@@ -227,7 +227,10 @@ const canvas = document.querySelector("#atmosphereCanvas");
 const ctx = canvas.getContext("2d");
 
 let activeTheme = "sunny";
-let activeLayer = "Radar";
+let radarActive = true;
+let activeOverlays = new Set();
+let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
+let radarFrameTransitionTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail
 let activeSpcDay  = 1;       // 1, 2, or 3
 let activeBasemap = "dark-v11";
@@ -2280,10 +2283,35 @@ function updateRadarLabel() {
 
 function setRadarFrame(index) {
   radarFrameIndex = Math.max(0, Math.min(radarFrames.length - 1, Number(index)));
-  if (radarMap && mapLoaded && ["Radar", "Alerts", "LSR"].includes(activeLayer)) {
-    removeMapLayer("radar-layer");
-    removeMapSource("radar-source");
-    addRadarLayer();
+  if (radarMap && mapLoaded && radarActive) {
+    clearTimeout(radarFrameTransitionTimer);
+    const slots = ["a", "b"];
+    const curSlot = slots[radarSlot];
+    const nextSlot = slots[1 - radarSlot];
+    const curLayerId = `radar-layer-${curSlot}`;
+    const curSrcId   = `radar-source-${curSlot}`;
+    const nextLayerId = `radar-layer-${nextSlot}`;
+    const nextSrcId   = `radar-source-${nextSlot}`;
+
+    removeMapLayer(nextLayerId);
+    removeMapSource(nextSrcId);
+
+    radarMap.addSource(nextSrcId, {
+      type: "raster",
+      tiles: [radarTileUrl(radarFrames[radarFrameIndex])],
+      tileSize: 256,
+      attribution: "NOAA nowCOAST / NWS MRMS",
+    });
+    radarMap.addLayer({
+      id: nextLayerId, type: "raster", source: nextSrcId,
+      paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 500 },
+    });
+    radarSlot = 1 - radarSlot;
+
+    radarFrameTransitionTimer = setTimeout(() => {
+      removeMapLayer(curLayerId);
+      removeMapSource(curSrcId);
+    }, 600);
   }
   updateRadarLabel();
 }
@@ -2291,7 +2319,10 @@ function setRadarFrame(index) {
 function setRainfallOpacity(pct) {
   radarOpacity = pct / 100;
   if (radarMap && mapLoaded) {
-    if (radarMap.getLayer("radar-layer"))    radarMap.setPaintProperty("radar-layer",    "raster-opacity", radarOpacity);
+    for (const slot of ["a", "b"]) {
+      if (radarMap.getLayer(`radar-layer-${slot}`))
+        radarMap.setPaintProperty(`radar-layer-${slot}`, "raster-opacity", radarOpacity);
+    }
   }
   const label = document.querySelector("#radarOpacityLabel");
   if (label) label.textContent = `${pct}%`;
@@ -2307,8 +2338,8 @@ function removeMapSource(id) {
 
 function clearWeatherLayers() {
   stopRadarAnimation();
-  // Remove all overlay layers
-  ["radar-layer",
+  clearTimeout(radarFrameTransitionTimer);
+  ["radar-layer-a", "radar-layer-b",
    "spc-fill", "spc-line",
    "drought-fill", "drought-line",
    "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
@@ -2316,8 +2347,7 @@ function clearWeatherLayers() {
    "wpc-rain-layer",
    "surface-layer",
   ].forEach(removeMapLayer);
-  // Remove all overlay sources
-  ["radar-source",
+  ["radar-source-a", "radar-source-b",
    "spc-source",
    "drought-source",
    "alerts-source", "nws-alerts-source",
@@ -2325,11 +2355,10 @@ function clearWeatherLayers() {
    "wpc-rain-source",
    "surface-source",
   ].forEach(removeMapSource);
-  // Remove LSR markers
   document.querySelectorAll(".lsr-marker-wrap").forEach(el => el.remove());
-  // Hide SPC legend when clearing
   const leg = document.querySelector("#spcLegendBox");
   if (leg) leg.hidden = true;
+  radarSlot = 0;
 }
 
 function renderBasemapButtons() {
@@ -2383,21 +2412,22 @@ function addRadarLayer() {
   const slider = document.querySelector("#radarTimeline");
   if (slider) { slider.max = radarFrames.length - 1; slider.value = radarFrameIndex; }
 
-  radarMap.addSource("radar-source", {
+  const slot = radarSlot === 0 ? "a" : "b";
+  radarMap.addSource(`radar-source-${slot}`, {
     type: "raster",
     tiles: [radarTileUrl(radarFrames[radarFrameIndex])],
     tileSize: 256,
     attribution: "NOAA nowCOAST / NWS MRMS",
   });
   radarMap.addLayer({
-    id: "radar-layer", type: "raster", source: "radar-source",
-    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 220 },
+    id: `radar-layer-${slot}`, type: "raster", source: `radar-source-${slot}`,
+    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400 },
   });
   updateRadarLabel();
 }
 
 async function addSpcLayer() {
-  if (activeLayer !== "SPC" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   const type = activeSpcType; // cat | torn | wind | hail
   const day  = activeSpcDay;  // 1 | 2 | 3
   const cacheKey = `${day}_${type}`;
@@ -2472,7 +2502,7 @@ async function addSpcLayer() {
 }
 
 async function addFireWeatherLayer() {
-  if (activeLayer !== "Fire Wx" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   if (!fireWeatherData) {
     fireWeatherData = normalizeSpcData(await fetchOutlookGeoJson(FIRE_WX_URLS[0]));
   }
@@ -2521,7 +2551,7 @@ async function addFireWeatherLayer() {
 }
 
 async function addWpcRainfallLayer() {
-  if (activeLayer !== "WPC Rain" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   // WPC Day 1 QPF as a WMS raster overlay from NOAA nowCOAST
   const params = [
     "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
@@ -2544,7 +2574,7 @@ async function addWpcRainfallLayer() {
 }
 
 async function addSurfaceAnalysisLayer() {
-  if (activeLayer !== "Surface" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   // NOAA nowCOAST surface analysis fronts and pressure centers as WMS
   const params = [
     "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
@@ -2567,7 +2597,7 @@ async function addSurfaceAnalysisLayer() {
 }
 
 async function addLsrLayer() {
-  if (activeLayer !== "LSR" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   if (!lsrData) {
     lsrData = await fetchOutlookGeoJson(LSR_URL);
   }
@@ -2711,7 +2741,7 @@ function buildAlertFeatureHtml(feature, idx, total) {
 }
 
 async function addAlertsLayer() {
-  if (activeLayer !== "Alerts" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   if (!alertPolygonData) {
     alertPolygonData = filterMapColoredWarnings(await fetchOutlookGeoJson(IEM_SBW_URL));
   }
@@ -2811,7 +2841,7 @@ async function addAlertsLayer() {
 
 async function addDroughtLayer() {
   droughtLayerData = droughtLayerData || normalizeDroughtData(await fetchDroughtGeoJson());
-  if (activeLayer !== "Drought" || !radarMap || !mapLoaded) return;
+  if (!radarMap || !mapLoaded) return;
   radarMap.addSource("drought-source", { type: "geojson", data: droughtLayerData });
   radarMap.addLayer({
     id: "drought-fill",
@@ -2869,16 +2899,14 @@ function drawRadar() {
   if (!radarMap || !mapLoaded) return;
   clearWeatherLayers();
 
-  switch (activeLayer) {
-    case "Radar":      addRadarLayer(); break;
-    case "SPC":        addSpcLayer().catch(e => console.warn("SPC unavailable", e)); break;
-    case "Drought":    addDroughtLayer().catch(e => console.warn("Drought unavailable", e)); break;
-    case "Alerts":     addRadarLayer(); addAlertsLayer().catch(e => console.warn("Alerts unavailable", e)); break;
-    case "Fire Wx":    addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e)); break;
-    case "WPC Rain":   addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e)); break;
-    case "Surface":    addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e)); break;
-    case "LSR":        addRadarLayer(); addLsrLayer().catch(e => console.warn("LSR unavailable", e)); break;
-  }
+  if (radarActive)                   addRadarLayer();
+  if (activeOverlays.has("SPC"))     addSpcLayer().catch(e => console.warn("SPC unavailable", e));
+  if (activeOverlays.has("Drought")) addDroughtLayer().catch(e => console.warn("Drought unavailable", e));
+  if (activeOverlays.has("Alerts"))  addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
+  if (activeOverlays.has("Fire Wx")) addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
+  if (activeOverlays.has("WPC Rain"))addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
+  if (activeOverlays.has("Surface")) addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e));
+  if (activeOverlays.has("LSR"))     addLsrLayer().catch(e => console.warn("LSR unavailable", e));
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
@@ -2888,7 +2916,7 @@ function drawRadar() {
 
 function animateRadarLayer() {
   stopRadarAnimation();
-  if (!["Radar", "Alerts", "LSR"].includes(activeLayer) || !radarFrames.length) return;
+  if (!radarActive || !radarFrames.length) return;
   const lbl = document.querySelector("#playLabel");
   if (lbl) lbl.textContent = "Pause";
   radarAnimationTimer = setInterval(() => {
@@ -2897,9 +2925,7 @@ function animateRadarLayer() {
 }
 
 function renderLayers() {
-  // Base layers row
   const baseEl = document.querySelector("#baseLayerPills");
-  // Overlay layers row
   const overlayEl = document.querySelector("#overlayLayerPills");
   if (!baseEl || !overlayEl) return;
 
@@ -2907,35 +2933,40 @@ function renderLayers() {
   const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
-    `<button type="button" data-layer="${l}" class="${l === activeLayer ? "active" : ""}">${l}</button>`
+    `<button type="button" data-layer="${l}" class="${radarActive ? "active" : ""}">${l}</button>`
   ).join("");
 
   overlayEl.innerHTML = OVERLAY_LAYERS.map(l =>
-    `<button type="button" data-layer="${l}" class="${l === activeLayer ? "active" : ""}">${l}</button>`
+    `<button type="button" data-layer="${l}" class="${activeOverlays.has(l) ? "active" : ""}">${l}</button>`
   ).join("");
 
-  // Unified click handler for all layer buttons
-  [baseEl, overlayEl].forEach(container => {
-    container.querySelectorAll("button[data-layer]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        activeLayer = btn.dataset.layer;
-        renderLayers();
-        drawRadar();
-      });
+  baseEl.querySelectorAll("button[data-layer]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      radarActive = !radarActive;
+      renderLayers();
+      drawRadar();
     });
   });
 
-  // Show/hide SPC sub-controls
+  overlayEl.querySelectorAll("button[data-layer]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const layer = btn.dataset.layer;
+      if (activeOverlays.has(layer)) activeOverlays.delete(layer);
+      else activeOverlays.add(layer);
+      renderLayers();
+      drawRadar();
+    });
+  });
+
   const spcCtrl = document.querySelector("#spcSubControls");
   if (spcCtrl) {
-    spcCtrl.hidden = activeLayer !== "SPC";
-    if (activeLayer === "SPC") renderSpcSubControls();
+    spcCtrl.hidden = !activeOverlays.has("SPC");
+    if (activeOverlays.has("SPC")) renderSpcSubControls();
   }
 
-  // Show/hide radar timeline controls
   const radCtrl = document.querySelector("#radarSubControls");
   if (radCtrl) {
-    radCtrl.hidden = !["Radar", "Alerts", "LSR"].includes(activeLayer);
+    radCtrl.hidden = !radarActive;
   }
 }
 
@@ -2985,7 +3016,7 @@ function renderSpcSubControls() {
 function renderSpcLegend() {
   const box = document.querySelector("#spcLegendBox");
   if (!box) return;
-  if (activeLayer !== "SPC") { box.hidden = true; return; }
+  if (!activeOverlays.has("SPC")) { box.hidden = true; return; }
   box.hidden = false;
 
   const isCat = activeSpcType === "cat";
