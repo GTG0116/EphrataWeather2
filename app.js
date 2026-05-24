@@ -260,6 +260,7 @@ let radarFrames = [];
 let radarOpacity = 0.78;
 let locationSuggestionTimer;
 let serviceWorkerRegistration = null;
+let suppressNextAlertNotifications = true;
 let locationSuggestionResults = [];
 let histCalYear = null;
 let histCalMonth = null;
@@ -562,6 +563,7 @@ function hideLocationSuggestions() {
 async function chooseLocation(location) {
   selectedLocation = { ...location };
   nwsAlertPolygonData = null;
+  suppressNextAlertNotifications = true;
   setLocationBrand();
   locationInput.value = selectedLocation.name;
   hideLocationSuggestions();
@@ -1619,8 +1621,14 @@ async function syncPushShownAlerts() {
 function notifyNewWeatherAlerts() {
   if (!notificationSupported() || Notification.permission !== "granted") return;
   const alerts = weatherState.alerts || [];
-  const oldIds = new Set(JSON.parse(localStorage.getItem("weatherSeenAlertIds") || "[]"));
+  const storedIds = localStorage.getItem("weatherSeenAlertIds");
   const currentIds = alerts.map(alertNotificationId).filter(Boolean);
+  if (suppressNextAlertNotifications || storedIds == null) {
+    localStorage.setItem("weatherSeenAlertIds", JSON.stringify(currentIds));
+    suppressNextAlertNotifications = false;
+    return;
+  }
+  const oldIds = new Set(JSON.parse(storedIds || "[]"));
   const newAlerts = alerts.filter(alert => !oldIds.has(alertNotificationId(alert)));
   localStorage.setItem("weatherSeenAlertIds", JSON.stringify(currentIds));
   newAlerts.slice(0, 3).forEach(showAlertNotification);
