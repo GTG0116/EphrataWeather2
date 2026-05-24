@@ -37,6 +37,16 @@
   background: linear-gradient(180deg, var(--accent), var(--accent-2));
 }
 
+html,
+body {
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
+}
+
 body {
   min-height: 100vh;
   margin: 0;
