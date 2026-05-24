@@ -133,6 +133,7 @@ body[data-condition="fog"]::after {
   width: min(1440px, calc(100% - 32px));
   margin: 0 auto;
   padding: 28px 0 40px;
+  padding-top: max(28px, env(safe-area-inset-top));
 }
 
 .topbar,
@@ -1196,7 +1197,7 @@ dd {
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 20px, 1440px);
-    padding-top: 18px;
+    padding-top: max(18px, env(safe-area-inset-top));
   }
 
   .topbar,
@@ -1370,11 +1371,13 @@ dd {
   padding: 18px;
   position: sticky;
   top: 16px;
+  min-width: 0;
 }
 
 .climate-result-panel {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .climate-message {
@@ -1595,6 +1598,7 @@ dd {
 @media (max-width: 1120px) {
   .climate-layout {
     grid-template-columns: 1fr;
+    overflow-x: hidden;
   }
   .climate-calendar-tile {
     position: static;

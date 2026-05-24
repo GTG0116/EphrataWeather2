@@ -1875,6 +1875,9 @@ async function renderClimate(date) {
   const result = document.querySelector("#climateResult");
   if (!result) return;
   result.innerHTML = `<div class="climate-message climate-loading"><p class="eyebrow">Loading</p><strong>Open-Meteo ERA5 archive...</strong></div>`;
+  if (window.innerWidth < 1120) {
+    result.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   try {
     const { d, h } = await climatePayload(date);
     const i = 0;
@@ -1981,6 +1984,9 @@ async function renderClimate(date) {
     `;
   } catch (error) {
     result.innerHTML = `<div class="climate-message" style="color:#f87171;">${safeText(error.message)}</div>`;
+  }
+  if (window.innerWidth < 1120) {
+    result.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
