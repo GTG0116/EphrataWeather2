@@ -254,12 +254,14 @@ async function proxyGeoJson(url, res) {
 async function proxyWmsTile(url, res) {
   const params = new URLSearchParams(url.search);
   const baseUrl = params.get("BASE_URL");
+  const bbox = params.get("BBOX");
   if (!baseUrl) return send(res, 400, { error: "Missing BASE_URL" });
   let parsed;
   try { parsed = new URL(baseUrl); } catch { return send(res, 400, { error: "Invalid BASE_URL" }); }
   if (!ALLOWED_PROXY_HOSTS.has(parsed.hostname)) return send(res, 403, { error: "Host not allowed" });
   params.delete("BASE_URL");
-  const targetUrl = `${baseUrl}?${params.toString()}`;
+  params.delete("BBOX");
+  const targetUrl = `${baseUrl}?${params.toString()}${bbox != null ? `&BBOX=${bbox}` : ""}`;
   try {
     const response = await fetch(targetUrl, { headers: { "User-Agent": USER_AGENT } });
     const contentType = response.headers.get("content-type") || "";

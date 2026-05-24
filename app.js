@@ -1092,6 +1092,48 @@ async function mapsPayload() {
   };
 }
 
+async function spcForecastPayload() {
+  const loc = point();
+  const findInData = (raw) => {
+    if (!raw) return null;
+    const features = normalizeSpcData(raw).features || [];
+    return features.find(f => pointInGeometry(loc.lon, loc.lat, f.geometry))?.properties || null;
+  };
+
+  const [cat1, cat2, cat3, torn1, wind1, hail1, torn2, wind2, hail2] = await Promise.all([
+    fetchOutlookGeoJson(SPC_URLS.cat[0]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.cat[1]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.cat[2]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.torn[0]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.wind[0]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.hail[0]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.torn[1]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.wind[1]).catch(() => null),
+    fetchOutlookGeoJson(SPC_URLS.hail[1]).catch(() => null),
+  ]);
+
+  return [
+    {
+      catLabel: findInData(cat1)?.LABEL || null,
+      tornado: findInData(torn1)?.RISK_NUM ?? null,
+      wind: findInData(wind1)?.RISK_NUM ?? null,
+      hail: findInData(hail1)?.RISK_NUM ?? null,
+    },
+    {
+      catLabel: findInData(cat2)?.LABEL || null,
+      tornado: findInData(torn2)?.RISK_NUM ?? null,
+      wind: findInData(wind2)?.RISK_NUM ?? null,
+      hail: findInData(hail2)?.RISK_NUM ?? null,
+    },
+    {
+      catLabel: findInData(cat3)?.LABEL || null,
+      tornado: null,
+      wind: null,
+      hail: null,
+    },
+  ];
+}
+
 async function fetchOutlookGeoJson(url) {
   try {
     return await getJson(`/api/geojson?url=${encodeURIComponent(url)}`, { cache: "no-store" });
@@ -1185,6 +1227,38 @@ function spcPopupLabel(properties = {}) {
   const label = String(properties.LABEL || "");
   if (Number.isFinite(Number(properties.RISK_NUM))) return `${properties.RISK_NUM}% probability`;
   return spcLabel(label);
+}
+
+function spcCigLevel(catLabel) {
+  const lvl = { SLGT: 1, ENH: 2, MDT: 3, HIGH: 3 };
+  return lvl[String(catLabel || "").toUpperCase()] ?? null;
+}
+
+function spcRiskColor(catLabel) {
+  const colors = {
+    TSTM: "#c0e8c0", MRGL: "#66cc66", SLGT: "#ffe066",
+    ENH: "#ffa040", MDT: "#ff6060", HIGH: "#ff40ff",
+  };
+  return colors[String(catLabel || "").toUpperCase()] ?? null;
+}
+
+function spcThreatText(type, cig) {
+  if (!cig || !type) return null;
+  if (type === "tornado") {
+    if (cig === 1) return "Strong tornadoes (EF2+) possible";
+    if (cig === 2) return "Intense tornadoes (EF3+) possible";
+    if (cig === 3) return "Violent tornadoes (EF4+) possible";
+  }
+  if (type === "wind") {
+    if (cig === 1) return "Damaging winds up to 75 mph possible";
+    if (cig === 2) return "Derecho with destructive winds up to 80 mph possible";
+    if (cig === 3) return "Derecho likely with 80+ mph winds";
+  }
+  if (type === "hail" && cig < 3) {
+    if (cig === 1) return "Hail up to 2\" in diameter possible";
+    if (cig === 2) return "Hail up to 3.5\" in diameter possible";
+  }
+  return null;
 }
 
 function droughtLabel(category = "") {
@@ -1790,11 +1864,18 @@ function renderDaily() {
       month:       dayMonth,
     });
 
+    const spcDay = index < 3 ? (weatherState.spcDays?.[index] || null) : null;
+    const spcCat = spcDay?.catLabel || null;
+    const spcColor = spcRiskColor(spcCat);
+    const spcBadge = spcColor
+      ? `<span class="spc-risk-badge" style="background:${spcColor}22;color:${spcColor};border:1px solid ${spcColor}88" title="SPC Day ${index + 1} ${spcLabel(spcCat)} risk"><svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 110 1.5.75.75 0 010-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg> ${safeText(spcCat)}</span>`
+      : "";
+
     return `
     <button class="daily-card" type="button" data-day-index="${index}">
       <p class="eyebrow">
         ${day.name}
-        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>
+        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}
       </p>
       ${weatherIcon(iconForCondition(day.shortForecast))}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
@@ -1842,7 +1923,8 @@ function showDailyDetails(index) {
   const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, parseInt(day.windSpeed, 10));
   const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, parseInt(night.windSpeed, 10)) : null);
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
-  openDetails("Daily Forecast", day.name || "Forecast", [
+
+  const rows = [
     ["High / Low", `${f(day.temperature)}°F / ${night ? f(night.temperature) : "--"}°F`],
     ["Feels Like", `${f(feelsHigh)}°F / ${f(feelsLow)}°F`],
     ["Precipitation Chance", `${f(precip)}%`],
@@ -1852,7 +1934,32 @@ function showDailyDetails(index) {
     ["Night", night?.shortForecast || "Not reported"],
     ["Sunrise", weatherState.astronomy?.sunrise || "--"],
     ["Sunset", weatherState.astronomy?.sunset || "--"],
-  ], day.detailedForecast || day.shortForecast || "");
+  ];
+
+  if (index < 3) {
+    const spcDay = weatherState.spcDays?.[index];
+    const catLabel = spcDay?.catLabel || null;
+    if (catLabel === "TSTM") {
+      rows.push(["Severe Weather Risk", `General thunderstorm area — SPC Day ${index + 1}`]);
+    } else if (catLabel) {
+      const cig = spcCigLevel(catLabel);
+      rows.push(["Severe Weather Risk", `${spcLabel(catLabel)} — SPC Day ${index + 1}`]);
+      if (spcDay.tornado != null) {
+        const desc = spcThreatText("tornado", cig);
+        rows.push(["Tornado", desc ? `${desc} (${spcDay.tornado}% probability)` : `${spcDay.tornado}% probability`]);
+      }
+      if (spcDay.wind != null) {
+        const desc = spcThreatText("wind", cig);
+        rows.push(["Wind", desc ? `${desc} (${spcDay.wind}% probability)` : `${spcDay.wind}% probability`]);
+      }
+      if (spcDay.hail != null && cig < 3) {
+        const desc = spcThreatText("hail", cig);
+        rows.push(["Hail", desc ? `${desc} (${spcDay.hail}% probability)` : `${spcDay.hail}% probability`]);
+      }
+    }
+  }
+
+  openDetails("Daily Forecast", day.name || "Forecast", rows, day.detailedForecast || day.shortForecast || "");
 }
 
 function parseAlertSections(text = "") {
@@ -2492,7 +2599,7 @@ function initMap() {
 
 function addRadarLayer() {
   radarFrames = radarFrameTimes();
-  radarFrameIndex = Math.min(radarFrameIndex, radarFrames.length - 1);
+  radarFrameIndex = radarFrames.length - 1;
   const slider = document.querySelector("#radarTimeline");
   if (slider) { slider.max = radarFrames.length - 1; slider.value = radarFrameIndex; }
 
@@ -2683,16 +2790,21 @@ async function addSurfaceAnalysisLayer() {
 async function addSatelliteLayer() {
   if (!radarMap || !mapLoaded) return;
   const layerName = SATELLITE_LAYERS[activeSatelliteType] || SATELLITE_LAYERS.geocolor;
-  const params = [
-    "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
-    "FORMAT=image%2Fpng", "TRANSPARENT=true",
-    `LAYERS=${encodeURIComponent(layerName)}`,
-    "CRS=EPSG%3A3857", "WIDTH=256", "HEIGHT=256",
-    "STYLES=",
-  ].join("&");
+  const wmsParams = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: "1.3.0",
+    REQUEST: "GetMap",
+    FORMAT: "image/png",
+    TRANSPARENT: "true",
+    LAYERS: layerName,
+    CRS: "EPSG:3857",
+    WIDTH: "256",
+    HEIGHT: "256",
+    STYLES: "",
+  });
   radarMap.addSource("satellite-source", {
     type: "raster",
-    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(SATELLITE_WMS)}&BBOX={bbox-epsg-3857}`],
+    tiles: [`${SATELLITE_WMS}?${wmsParams.toString()}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA nowCOAST GOES Satellite",
   });
@@ -3197,11 +3309,12 @@ async function refreshLiveData() {
   alertPolygonData = null;
   nwsAlertPolygonData = null;
 
-  const [weather, aviation, space, maps] = await Promise.allSettled([
+  const [weather, aviation, space, maps, spcForecast] = await Promise.allSettled([
     weatherPayload(),
     aviationPayload(),
     spacePayload(),
     mapsPayload(),
+    spcForecastPayload(),
   ]);
 
   if (weather.status === "fulfilled") {
@@ -3211,6 +3324,9 @@ async function refreshLiveData() {
     document.querySelector("#statusBadge").textContent = "NWS unavailable";
   }
   mapState = maps.status === "fulfilled" ? maps.value : {};
+  if (spcForecast.status === "fulfilled") {
+    weatherState.spcDays = spcForecast.value;
+  }
 
   renderCurrent();
   renderAlerts();
