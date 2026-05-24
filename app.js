@@ -1094,10 +1094,14 @@ async function mapsPayload() {
 
 async function fetchOutlookGeoJson(url) {
   try {
-    return await getJson(url, { cache: "no-store" });
-  } catch (error) {
-    const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    return getJson(proxy, { cache: "no-store" });
+    return await getJson(`/api/geojson?url=${encodeURIComponent(url)}`, { cache: "no-store" });
+  } catch {
+    try {
+      return await getJson(url, { cache: "no-store" });
+    } catch {
+      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+      return getJson(proxy, { cache: "no-store" });
+    }
   }
 }
 
@@ -2643,7 +2647,7 @@ async function addWpcRainfallLayer() {
 
   radarMap.addSource("wpc-rain-source", {
     type: "raster",
-    tiles: [`${WPC_QPF_WMS}?${params}&BBOX={bbox-epsg-3857}`],
+    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(WPC_QPF_WMS)}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA WPC QPF Day 1",
   });
@@ -2666,7 +2670,7 @@ async function addSurfaceAnalysisLayer() {
 
   radarMap.addSource("surface-source", {
     type: "raster",
-    tiles: [`${SURFACE_WMS}?${params}&BBOX={bbox-epsg-3857}`],
+    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(SURFACE_WMS)}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA WPC Surface Analysis",
   });
@@ -2688,7 +2692,7 @@ async function addSatelliteLayer() {
   ].join("&");
   radarMap.addSource("satellite-source", {
     type: "raster",
-    tiles: [`${SATELLITE_WMS}?${params}&BBOX={bbox-epsg-3857}`],
+    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(SATELLITE_WMS)}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA nowCOAST GOES Satellite",
   });

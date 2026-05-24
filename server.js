@@ -9,6 +9,22 @@ const USER_AGENT = "EphrataWeatherPortal/1.0 (local weather dashboard)";
 const NOAA_RADAR_WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows";
 const cache = new Map();
 
+const ALLOWED_PROXY_HOSTS = new Set([
+  "spc.noaa.gov", "www.spc.noaa.gov",
+  "nowcoast.noaa.gov",
+  "mesonet.agron.iastate.edu",
+  "www.ncei.noaa.gov",
+  "services.arcgis.com",
+  "idpgis.ncep.noaa.gov",
+  "api.weather.gov",
+]);
+
+// 1x1 transparent PNG used when a WMS tile request fails
+const EMPTY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAABjE+ibYAAAAASUVORK5CYII=",
+  "base64"
+);
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -211,6 +227,60 @@ function serveStatic(req, res) {
   });
 }
 
+async function proxyGeoJson(url, res) {
+  const targetUrl = url.searchParams.get("url");
+  if (!targetUrl) return send(res, 400, { error: "Missing url parameter" });
+  let parsed;
+  try { parsed = new URL(targetUrl); } catch { return send(res, 400, { error: "Invalid url" }); }
+  if (!ALLOWED_PROXY_HOSTS.has(parsed.hostname)) return send(res, 403, { error: "Host not allowed" });
+  try {
+    const data = await getJson(targetUrl, 300);
+    res.writeHead(200, {
+      "Content-Type": "application/geo+json; charset=utf-8",
+      "Cache-Control": "max-age=300",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify(data));
+  } catch {
+    res.writeHead(200, {
+      "Content-Type": "application/geo+json; charset=utf-8",
+      "Cache-Control": "max-age=60",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify({ type: "FeatureCollection", features: [] }));
+  }
+}
+
+async function proxyWmsTile(url, res) {
+  const params = new URLSearchParams(url.search);
+  const baseUrl = params.get("BASE_URL");
+  if (!baseUrl) return send(res, 400, { error: "Missing BASE_URL" });
+  let parsed;
+  try { parsed = new URL(baseUrl); } catch { return send(res, 400, { error: "Invalid BASE_URL" }); }
+  if (!ALLOWED_PROXY_HOSTS.has(parsed.hostname)) return send(res, 403, { error: "Host not allowed" });
+  params.delete("BASE_URL");
+  const targetUrl = `${baseUrl}?${params.toString()}`;
+  try {
+    const response = await fetch(targetUrl, { headers: { "User-Agent": USER_AGENT } });
+    const contentType = response.headers.get("content-type") || "";
+    if (!response.ok || !contentType.startsWith("image/")) {
+      res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" });
+      res.end(EMPTY_PNG);
+      return;
+    }
+    const buffer = await response.arrayBuffer();
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "max-age=300",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(Buffer.from(buffer));
+  } catch {
+    res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" });
+    res.end(EMPTY_PNG);
+  }
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
@@ -219,6 +289,8 @@ async function route(req, res) {
     if (url.pathname === "/api/space") return send(res, 200, await spacePayload());
     if (url.pathname === "/api/climate") return send(res, 200, await climatePayload(url));
     if (url.pathname === "/api/maps") return send(res, 200, await mapsPayload());
+    if (url.pathname === "/api/geojson") return proxyGeoJson(url, res);
+    if (url.pathname === "/api/wmstile") return proxyWmsTile(url, res);
     return serveStatic(req, res);
   } catch (error) {
     send(res, 502, { error: error.message });
