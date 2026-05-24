@@ -251,6 +251,7 @@ let droughtLayerData = null;
 let fireWeatherData = null;
 let lsrData = null;
 let alertPolygonData = null;
+let nwsAlertPolygonData = null;
 let spcPopupWired = false;
 let droughtPopupWired = false;
 let radarAnimationTimer;
@@ -560,6 +561,7 @@ function hideLocationSuggestions() {
 
 async function chooseLocation(location) {
   selectedLocation = { ...location };
+  nwsAlertPolygonData = null;
   setLocationBrand();
   locationInput.value = selectedLocation.name;
   hideLocationSuggestions();
@@ -610,6 +612,22 @@ const ALERT_PHENOMENA_COLORS = {
   MA: { fill: "#38bdf8", line: "#7dd3fc" },
 };
 
+const NWS_ALERT_EVENT_COLORS = [
+  [/tornado watch/i, { fill: "#a855f7", line: "#c084fc" }],
+  [/severe thunderstorm watch/i, { fill: "#f59e0b", line: "#fbbf24" }],
+  [/flood watch/i, { fill: "#14b8a6", line: "#2dd4bf" }],
+  [/winter weather advisory/i, { fill: "#38bdf8", line: "#7dd3fc" }],
+  [/heat advisory/i, { fill: "#f97316", line: "#fb923c" }],
+];
+
+function nwsAlertColor(event = "") {
+  return NWS_ALERT_EVENT_COLORS.find(([pattern]) => pattern.test(event))?.[1] || null;
+}
+
+function isWarningEvent(event = "") {
+  return /\bwarning\b/i.test(event);
+}
+
 function warningHasMapColor(feature) {
   const phenomenon = String(feature?.properties?.phenomena || "").toUpperCase();
   return !!ALERT_PHENOMENA_COLORS[phenomenon];
@@ -650,6 +668,18 @@ function severeDetectionTag(alert) {
   return null;
 }
 
+function isDetectionTag(value) {
+  return /observed|radar indicated/i.test(String(value || ""));
+}
+
+function normalizeAlertTag(value) {
+  const text = String(value || "").replace(/_/g, " ").trim();
+  if (!text) return "";
+  if (/observed/i.test(text)) return "Observed";
+  if (/radar indicated/i.test(text)) return "Radar indicated";
+  return text;
+}
+
 function normalizeNwsAlert(feature) {
   const p = feature.properties || {};
   return {
@@ -665,19 +695,40 @@ function normalizeNwsAlert(feature) {
     parameters: p.parameters || {},
     areaDesc: p.areaDesc || "",
     source: "NWS",
+    affectedZones: p.affectedZones || [],
   };
+}
+
+function alertDedupeKey(alert) {
+  return [
+    String(alert.id || "").replace(/\/actual$/i, ""),
+    alert.event || "",
+    alert.expires || "",
+    alert.areaDesc || "",
+  ].join("|").toLowerCase();
+}
+
+function mergeAlerts(...groups) {
+  const seen = new Set();
+  return groups.flat().filter(alert => {
+    const key = alertDedupeKey(alert);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function tagsForAlert(alert) {
   const p = alert.parameters || {};
+  const detectionTag = severeDetectionTag(alert);
   const raw = [
-    alert.severity,
+    !isDetectionTag(alert.severity) && alert.severity,
     p.tornadoDetection?.[0],
     p.thunderstormDamageThreat?.[0],
     p.flashFloodDetection?.[0],
     p.maxWindGust?.[0] && `Wind ${formatWindTag(p.maxWindGust[0])}`,
     p.maxHailSize?.[0] && `Hail ${formatHailTag(p.maxHailSize[0])}`,
-    severeDetectionTag(alert),
+    detectionTag,
     alert.iem_tornadotag && `Tornado ${alert.iem_tornadotag}`,
     alert.iem_damagetag && `Damage ${alert.iem_damagetag}`,
     alert.iem_windtag && `Wind ${formatWindTag(alert.iem_windtag)}`,
@@ -686,7 +737,7 @@ function tagsForAlert(alert) {
     alert.iem_is_pds && "PDS",
     alert.iem_is_emergency && "Emergency",
   ].filter(Boolean);
-  return [...new Set(raw.map(item => String(item).replace(/_/g, " ").trim()))]
+  return [...new Set(raw.map(normalizeAlertTag))]
     .filter(item => !/^immediate$/i.test(item));
 }
 
@@ -725,16 +776,25 @@ async function alertsPayload(lat, lon) {
     getJson("https://mesonet.agron.iastate.edu/geojson/sbw.geojson"),
     getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
   ]);
-  const nwsAlerts = nwsResult.status === "fulfilled" ? (nwsResult.value.features || []).map(normalizeNwsAlert) : [];
+  const nwsAlerts = nwsResult.status === "fulfilled"
+    ? (nwsResult.value.features || [])
+      .map(normalizeNwsAlert)
+      .filter(alert => !isWarningEvent(alert.event))
+    : [];
   const iemAlerts = iemResult.status === "fulfilled"
     ? (iemResult.value.features || [])
       .filter(feature => pointInGeometry(lon, lat, feature.geometry))
       .map(normalizeIemFeature)
     : [];
-  if (iemResult.status === "fulfilled") {
-    return { alerts: iemAlerts, source: "IEM storm-based warnings" };
-  }
-  return { alerts: nwsAlerts.map(alert => ({ ...alert, source: "NWS Backup" })), source: "NWS backup (IEM unavailable)" };
+  const alerts = mergeAlerts(iemAlerts, nwsAlerts);
+  const sources = [
+    iemResult.status === "fulfilled" && "IEM storm-based warnings",
+    nwsResult.status === "fulfilled" && "NWS watches/advisories",
+  ].filter(Boolean);
+  return {
+    alerts,
+    source: sources.join(" + ") || "Alerts unavailable",
+  };
 }
 
 function headlineFor(condition, forecast) {
@@ -2230,7 +2290,7 @@ function clearWeatherLayers() {
   ["radar-layer",
    "spc-fill", "spc-line",
    "drought-fill", "drought-line",
-   "alerts-fill", "alerts-line",
+   "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
    "fire-fill", "fire-line",
    "wpc-rain-layer",
    "surface-layer",
@@ -2239,7 +2299,7 @@ function clearWeatherLayers() {
   ["radar-source",
    "spc-source",
    "drought-source",
-   "alerts-source",
+   "alerts-source", "nws-alerts-source",
    "fire-source",
    "wpc-rain-source",
    "surface-source",
@@ -2546,42 +2606,109 @@ async function addLsrLayer() {
   });
 }
 
+async function nwsAlertFeatureCollection() {
+  const loc = selectedLocation;
+  const data = await getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" });
+  const features = [];
+  for (const feature of data.features || []) {
+    const p = feature.properties || {};
+    if (isWarningEvent(p.event || "")) continue;
+    const color = nwsAlertColor(p.event || "");
+    if (!color) continue;
+    if (feature.geometry) {
+      features.push({
+        type: "Feature",
+        geometry: feature.geometry,
+        properties: { ...p, fillColor: color.fill, lineColor: color.line },
+      });
+      continue;
+    }
+
+    const zones = (p.affectedZones || []).slice(0, 80);
+    const zoneResults = await Promise.allSettled(zones.map(zone => getJson(zone, { cache: "force-cache" })));
+    zoneResults.forEach(result => {
+      const geometry = result.status === "fulfilled" ? result.value?.geometry : null;
+      if (!geometry) return;
+      features.push({
+        type: "Feature",
+        geometry,
+        properties: {
+          ...p,
+          fillColor: color.fill,
+          lineColor: color.line,
+          zoneName: result.value?.properties?.name || "",
+        },
+      });
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
 async function addAlertsLayer() {
   if (activeLayer !== "Alerts" || !radarMap || !mapLoaded) return;
   if (!alertPolygonData) {
     alertPolygonData = filterMapColoredWarnings(await fetchOutlookGeoJson(IEM_SBW_URL));
   }
+  if (!nwsAlertPolygonData) {
+    nwsAlertPolygonData = await nwsAlertFeatureCollection();
+  }
   const data = alertPolygonData;
-  if (!data?.features?.length) return;
+  const hasIemAlerts = !!data?.features?.length;
+  const hasNwsAlerts = !!nwsAlertPolygonData?.features?.length;
+  if (!hasIemAlerts && !hasNwsAlerts) return;
 
   // Color by phenomena type
-  radarMap.addSource("alerts-source", { type: "geojson", data });
-  radarMap.addLayer({
-    id: "alerts-fill",
-    type: "fill",
-    source: "alerts-source",
-    paint: {
-      "fill-color": ["match", ["get", "phenomena"],
-        "TO", "#dc2626", "SV", "#f97316", "FF", "#10b981",
-        "FA", "#22d3ee", "SQ", "#a78bfa", "MA", "#38bdf8",
-        "rgba(0,0,0,0)"],
-      "fill-opacity": 0.3,
-    },
-  });
-  radarMap.addLayer({
-    id: "alerts-line",
-    type: "line",
-    source: "alerts-source",
-    paint: {
-      "line-color": ["match", ["get", "phenomena"],
-        "TO", "#ef4444", "SV", "#fb923c", "FF", "#34d399",
-        "FA", "#67e8f9", "SQ", "#c4b5fd", "MA", "#7dd3fc",
-        "rgba(0,0,0,0)"],
-      "line-width": 2,
-    },
-  });
+  if (hasIemAlerts) {
+    radarMap.addSource("alerts-source", { type: "geojson", data });
+    radarMap.addLayer({
+      id: "alerts-fill",
+      type: "fill",
+      source: "alerts-source",
+      paint: {
+        "fill-color": ["match", ["get", "phenomena"],
+          "TO", "#dc2626", "SV", "#f97316", "FF", "#10b981",
+          "FA", "#22d3ee", "SQ", "#a78bfa", "MA", "#38bdf8",
+          "rgba(0,0,0,0)"],
+        "fill-opacity": 0.3,
+      },
+    });
+    radarMap.addLayer({
+      id: "alerts-line",
+      type: "line",
+      source: "alerts-source",
+      paint: {
+        "line-color": ["match", ["get", "phenomena"],
+          "TO", "#ef4444", "SV", "#fb923c", "FF", "#34d399",
+          "FA", "#67e8f9", "SQ", "#c4b5fd", "MA", "#7dd3fc",
+          "rgba(0,0,0,0)"],
+        "line-width": 2,
+      },
+    });
+  }
 
-  if (!popupWiredLayers.has("alerts")) {
+  if (hasNwsAlerts) {
+    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsAlertPolygonData });
+    radarMap.addLayer({
+      id: "nws-alerts-fill",
+      type: "fill",
+      source: "nws-alerts-source",
+      paint: {
+        "fill-color": ["get", "fillColor"],
+        "fill-opacity": 0.22,
+      },
+    });
+    radarMap.addLayer({
+      id: "nws-alerts-line",
+      type: "line",
+      source: "nws-alerts-source",
+      paint: {
+        "line-color": ["get", "lineColor"],
+        "line-width": 2.2,
+      },
+    });
+  }
+
+  if (hasIemAlerts && !popupWiredLayers.has("alerts")) {
     radarMap.on("click", "alerts-fill", ev => {
       const f = ev.features?.[0];
       if (!f) return;
@@ -2612,6 +2739,34 @@ async function addAlertsLayer() {
     radarMap.on("mouseenter", "alerts-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
     radarMap.on("mouseleave", "alerts-fill", () => { radarMap.getCanvas().style.cursor = ""; });
     popupWiredLayers.add("alerts");
+  }
+
+  if (hasNwsAlerts && !popupWiredLayers.has("nws-alerts")) {
+    radarMap.on("click", "nws-alerts-fill", ev => {
+      const f = ev.features?.[0];
+      if (!f) return;
+      const p = f.properties || {};
+      const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
+      new mapboxgl.Popup({ offset: 8 })
+        .setLngLat(ev.lngLat)
+        .setHTML(`
+          <div class="popup-header">
+            <div class="popup-icon popup-alert" style="background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;">!</div>
+            <div>
+              <div class="popup-title">${safeText(p.event || "Weather Alert")}</div>
+              <div class="popup-subtitle">NWS County/Zone Alert</div>
+            </div>
+          </div>
+          <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
+          <div class="popup-stat"><span class="popup-key">Severity</span><span class="popup-val">${safeText(p.severity || "--")}</span></div>
+          <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
+          <div class="popup-note">${safeText(p.headline || "Tap the alert panel for full details.")}</div>
+        `)
+        .addTo(radarMap);
+    });
+    radarMap.on("mouseenter", "nws-alerts-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
+    radarMap.on("mouseleave", "nws-alerts-fill", () => { radarMap.getCanvas().style.cursor = ""; });
+    popupWiredLayers.add("nws-alerts");
   }
 }
 
@@ -2829,6 +2984,8 @@ async function refreshLiveData() {
   refreshButton.disabled = true;
   refreshButton.textContent = "Refreshing";
   document.querySelector("#statusBadge").textContent = "Updating live sources";
+  alertPolygonData = null;
+  nwsAlertPolygonData = null;
 
   const [weather, aviation, space, maps] = await Promise.allSettled([
     weatherPayload(),
@@ -2846,7 +3003,6 @@ async function refreshLiveData() {
   mapState = maps.status === "fulfilled" ? maps.value : {};
 
   renderCurrent();
-  renderHourlyChart();
   renderAlerts();
   await syncPushShownAlerts();
   notifyNewWeatherAlerts();
@@ -2866,15 +3022,6 @@ tabs.forEach(tab => {
     screens.forEach(screen => screen.classList.toggle("active", screen.id === tab.dataset.tab));
     if (tab.dataset.tab === "maps") setTimeout(drawRadar, 0);
   });
-});
-
-// Hourly metric switcher
-document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event => {
-  const btn = event.target.closest("[data-metric]");
-  if (!btn) return;
-  hourlyChartMetric = btn.dataset.metric;
-  document.querySelectorAll("#hourlyMetricSwitcher button").forEach(b => b.classList.toggle("active", b === btn));
-  renderHourlyChart();
 });
 
 refreshButton.addEventListener("click", refreshLiveData);
