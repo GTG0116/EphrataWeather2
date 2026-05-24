@@ -1094,10 +1094,32 @@ async function mapsPayload() {
 
 async function spcForecastPayload() {
   const loc = point();
-  const findInData = (raw) => {
+
+  const parseCigNum = (label) => {
+    const m = String(label || "").toUpperCase().match(/^CIG([123])$/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+
+  // Returns { risk, cig } for a hazard-type GeoJSON — a single file can contain
+  // both probability polygons (numeric LABEL) and CIG polygons (label "CIG1"–"CIG3"),
+  // and each has its own independent coverage at a given location.
+  const extractHazard = (raw) => {
+    if (!raw) return { risk: null, cig: null };
+    const allProps = (normalizeSpcData(raw).features || [])
+      .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry))
+      .map(f => f.properties);
+    const riskProps = allProps.find(p => p.RISK_NUM != null);
+    const cigProps  = allProps.find(p => parseCigNum(p.LABEL) != null);
+    return {
+      risk: riskProps?.RISK_NUM ?? null,
+      cig:  cigProps ? parseCigNum(cigProps.LABEL) : null,
+    };
+  };
+
+  const findCatLabel = (raw) => {
     if (!raw) return null;
-    const features = normalizeSpcData(raw).features || [];
-    return features.find(f => pointInGeometry(loc.lon, loc.lat, f.geometry))?.properties || null;
+    return (normalizeSpcData(raw).features || [])
+      .find(f => pointInGeometry(loc.lon, loc.lat, f.geometry))?.properties?.LABEL || null;
   };
 
   const [cat1, cat2, cat3, torn1, wind1, hail1, torn2, wind2, hail2] = await Promise.all([
@@ -1112,24 +1134,27 @@ async function spcForecastPayload() {
     fetchOutlookGeoJson(SPC_URLS.hail[1]).catch(() => null),
   ]);
 
+  const t1 = extractHazard(torn1), w1 = extractHazard(wind1), h1 = extractHazard(hail1);
+  const t2 = extractHazard(torn2), w2 = extractHazard(wind2), h2 = extractHazard(hail2);
+
   return [
     {
-      catLabel: findInData(cat1)?.LABEL || null,
-      tornado: findInData(torn1)?.RISK_NUM ?? null,
-      wind: findInData(wind1)?.RISK_NUM ?? null,
-      hail: findInData(hail1)?.RISK_NUM ?? null,
+      catLabel: findCatLabel(cat1),
+      tornado: t1.risk, tornCig: t1.cig,
+      wind:    w1.risk, windCig: w1.cig,
+      hail:    h1.risk, hailCig: h1.cig,
     },
     {
-      catLabel: findInData(cat2)?.LABEL || null,
-      tornado: findInData(torn2)?.RISK_NUM ?? null,
-      wind: findInData(wind2)?.RISK_NUM ?? null,
-      hail: findInData(hail2)?.RISK_NUM ?? null,
+      catLabel: findCatLabel(cat2),
+      tornado: t2.risk, tornCig: t2.cig,
+      wind:    w2.risk, windCig: w2.cig,
+      hail:    h2.risk, hailCig: h2.cig,
     },
     {
-      catLabel: findInData(cat3)?.LABEL || null,
-      tornado: null,
-      wind: null,
-      hail: null,
+      catLabel: findCatLabel(cat3),
+      tornado: null, tornCig: null,
+      wind:    null, windCig: null,
+      hail:    null, hailCig: null,
     },
   ];
 }
@@ -1227,11 +1252,6 @@ function spcPopupLabel(properties = {}) {
   const label = String(properties.LABEL || "");
   if (Number.isFinite(Number(properties.RISK_NUM))) return `${properties.RISK_NUM}% probability`;
   return spcLabel(label);
-}
-
-function spcCigLevel(catLabel) {
-  const lvl = { SLGT: 1, ENH: 2, MDT: 3, HIGH: 3 };
-  return lvl[String(catLabel || "").toUpperCase()] ?? null;
 }
 
 function spcRiskColor(catLabel) {
@@ -1942,18 +1962,17 @@ function showDailyDetails(index) {
     if (catLabel === "TSTM") {
       rows.push(["Severe Weather Risk", `General thunderstorm area — SPC Day ${index + 1}`]);
     } else if (catLabel) {
-      const cig = spcCigLevel(catLabel);
       rows.push(["Severe Weather Risk", `${spcLabel(catLabel)} — SPC Day ${index + 1}`]);
       if (spcDay.tornado != null) {
-        const desc = spcThreatText("tornado", cig);
+        const desc = spcThreatText("tornado", spcDay.tornCig);
         rows.push(["Tornado", desc ? `${desc} (${spcDay.tornado}% probability)` : `${spcDay.tornado}% probability`]);
       }
       if (spcDay.wind != null) {
-        const desc = spcThreatText("wind", cig);
+        const desc = spcThreatText("wind", spcDay.windCig);
         rows.push(["Wind", desc ? `${desc} (${spcDay.wind}% probability)` : `${spcDay.wind}% probability`]);
       }
-      if (spcDay.hail != null && cig < 3) {
-        const desc = spcThreatText("hail", cig);
+      if (spcDay.hail != null) {
+        const desc = spcThreatText("hail", spcDay.hailCig);
         rows.push(["Hail", desc ? `${desc} (${spcDay.hail}% probability)` : `${spcDay.hail}% probability`]);
       }
     }
