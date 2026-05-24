@@ -2207,7 +2207,7 @@ function renderMapSidebar() {
 
   sidebar.innerHTML = `
     <div class="sidebar-tile">
-      <p class="eyebrow">📍 ${safeText(selectedLocation.name)}</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg></span> ${safeText(selectedLocation.name)}</p>
       <h3>${f(current.temp)}°F — ${safeText(current.condition || "Conditions")}</h3>
       <div class="sidebar-chip-row">
         <div class="sidebar-chip">
@@ -2226,7 +2226,7 @@ function renderMapSidebar() {
     </div>
 
     <div class="sidebar-tile">
-      <p class="eyebrow">⚡ SPC Day 1 Outlook</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span> SPC Day 1 Outlook</p>
       <h3>${safeText(mapState.spcRisk || "No categorical risk")}</h3>
       <div class="sidebar-chip-row">
         <div class="sidebar-chip spc-torn">
@@ -2245,28 +2245,28 @@ function renderMapSidebar() {
     </div>
 
     <div class="sidebar-tile">
-      <p class="eyebrow">🌤 Fair Weather Index</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span> Fair Weather Index</p>
       <h3 style="color:${fwi.color}">${fwi.label} (${fwi.score100}/100)</h3>
       <p>${fwiNote(fwi.score100)}</p>
     </div>
 
     ${alerts.length ? `
     <div class="sidebar-tile">
-      <p class="eyebrow">⚠️ ${alerts.length} Active Alert${alerts.length > 1 ? "s" : ""}</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span> ${alerts.length} Active Alert${alerts.length > 1 ? "s" : ""}</p>
       ${alerts.slice(0, 2).map(a => `<h3 style="margin-bottom:4px;font-size:0.9rem;">${safeText(a.event)}</h3>`).join("")}
       ${alerts.length > 2 ? `<small style="color:var(--muted)">+${alerts.length - 2} more alerts</small>` : ""}
     </div>` : ""}
 
     <div class="sidebar-tile">
-      <p class="eyebrow">🌡 Observation</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg></span> Observation</p>
       <h3>${f(current.temp)}° / Dew ${f(current.dewPoint)}°</h3>
       <p style="font-size:0.8rem;color:var(--muted)">
-        ${astronomy ? `☀️ ${astronomy.sunrise} — 🌙 ${astronomy.sunset}` : "Sun times loading…"}
+        ${astronomy ? `<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="display:inline;vertical-align:middle;margin-right:2px"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2"/></svg>${astronomy.sunrise} — <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="display:inline;vertical-align:middle;margin-right:2px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>${astronomy.sunset}` : "Sun times loading…"}
       </p>
     </div>
 
     <div class="sidebar-tile">
-      <p class="eyebrow">🏜 Drought Monitor</p>
+      <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 22V8M5 12H2m20 0h-3m-4-7V3m0 18v-2M8.5 8.5L6 6m12 12-2.5-2.5M15.5 8.5 18 6M6 18l2.5-2.5"/></svg></span> Drought Monitor</p>
       <h3>${safeText(mapState.drought || "No active drought")}</h3>
       <p>USDM classification for this area.</p>
     </div>
@@ -2366,6 +2366,7 @@ function clearWeatherLayers() {
    "fire-fill", "fire-line",
    "wpc-rain-layer",
    "surface-layer",
+   "satellite-layer",
   ].forEach(removeMapLayer);
   ["radar-source-a", "radar-source-b",
    "spc-source",
@@ -2374,6 +2375,7 @@ function clearWeatherLayers() {
    "fire-source",
    "wpc-rain-source",
    "surface-source",
+   "satellite-source",
   ].forEach(removeMapSource);
   document.querySelectorAll(".lsr-marker-wrap").forEach(el => el.remove());
   const leg = document.querySelector("#spcLegendBox");
@@ -2395,7 +2397,7 @@ function renderBasemapButtons() {
         radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
         radarMap.once("style.load", () => {
           mapLoaded = true;
-          drawRadar();
+          drawRadar(false);
         });
       }
     });
@@ -2415,7 +2417,7 @@ function initMap() {
   radarMap.addControl(new mapboxgl.ScaleControl({ unit: "imperial" }), "bottom-right");
   radarMap.on("load", () => {
     mapLoaded = true;
-    drawRadar();
+    drawRadar(true);
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(pos => {
         updateUserLocationMarker(pos.coords.latitude, pos.coords.longitude);
@@ -2616,6 +2618,28 @@ async function addSurfaceAnalysisLayer() {
   });
 }
 
+async function addSatelliteLayer() {
+  if (!radarMap || !mapLoaded) return;
+  const layerName = SATELLITE_LAYERS[activeSatelliteType] || SATELLITE_LAYERS.geocolor;
+  const params = [
+    "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
+    "FORMAT=image%2Fpng", "TRANSPARENT=true",
+    `LAYERS=${encodeURIComponent(layerName)}`,
+    "CRS=EPSG%3A3857", "WIDTH=256", "HEIGHT=256",
+    "STYLES=",
+  ].join("&");
+  radarMap.addSource("satellite-source", {
+    type: "raster",
+    tiles: [`${SATELLITE_WMS}?${params}&BBOX={bbox-epsg-3857}`],
+    tileSize: 256,
+    attribution: "NOAA nowCOAST GOES Satellite",
+  });
+  radarMap.addLayer({
+    id: "satellite-layer", type: "raster", source: "satellite-source",
+    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400 },
+  });
+}
+
 async function addLsrLayer() {
   if (!radarMap || !mapLoaded) return;
   if (!lsrData) {
@@ -2626,14 +2650,14 @@ async function addLsrLayer() {
 
   // LSR markers as custom HTML elements
   const LSR_ICONS = {
-    "T": { icon: "🌪️", color: "#ef4444", label: "Tornado" },
-    "H": { icon: "⚙️",  color: "#f97316", label: "Hail" },
-    "W": { icon: "💨",  color: "#38bdf8", label: "Wind" },
-    "F": { icon: "🌊",  color: "#10b981", label: "Flood" },
-    "R": { icon: "☔",  color: "#60a5fa", label: "Rain" },
-    "S": { icon: "❄️",  color: "#a5f3fc", label: "Snow" },
-    "Z": { icon: "🧊",  color: "#bfdbfe", label: "Ice" },
-    "M": { icon: "☁️",  color: "#94a3b8", label: "TSTM" },
+    "T": { icon: "TOR", color: "#ef4444", label: "Tornado" },
+    "H": { icon: "HAL", color: "#f97316", label: "Hail" },
+    "W": { icon: "WND", color: "#38bdf8", label: "Wind" },
+    "F": { icon: "FLD", color: "#10b981", label: "Flood" },
+    "R": { icon: "RAN", color: "#60a5fa", label: "Rain" },
+    "S": { icon: "SNO", color: "#a5f3fc", label: "Snow" },
+    "Z": { icon: "ICE", color: "#bfdbfe", label: "Ice" },
+    "M": { icon: "STM", color: "#94a3b8", label: "TSTM" },
   };
 
   features.forEach((feat, idx) => {
@@ -2641,7 +2665,7 @@ async function addLsrLayer() {
     const coords = feat.geometry?.coordinates;
     if (!coords) return;
     const typeKey = (p.type || "").toUpperCase().charAt(0);
-    const cfg = LSR_ICONS[typeKey] || { icon: "📍", color: "#94a3b8", label: p.type || "LSR" };
+    const cfg = LSR_ICONS[typeKey] || { icon: "LSR", color: "#94a3b8", label: p.type || "LSR" };
 
     const wrap = document.createElement("div");
     wrap.className = "lsr-marker-wrap";
@@ -2913,25 +2937,28 @@ async function addDroughtLayer() {
   }
 }
 
-function drawRadar() {
+function drawRadar(relocate = false) {
   if (!document.querySelector("#maps")?.classList.contains("active")) return;
   initMap();
   if (!radarMap || !mapLoaded) return;
   clearWeatherLayers();
 
-  if (radarActive)                   addRadarLayer();
-  if (activeOverlays.has("SPC"))     addSpcLayer().catch(e => console.warn("SPC unavailable", e));
-  if (activeOverlays.has("Drought")) addDroughtLayer().catch(e => console.warn("Drought unavailable", e));
-  if (activeOverlays.has("Alerts"))  addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
-  if (activeOverlays.has("Fire Wx")) addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
-  if (activeOverlays.has("WPC Rain"))addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
-  if (activeOverlays.has("Surface")) addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e));
-  if (activeOverlays.has("LSR"))     addLsrLayer().catch(e => console.warn("LSR unavailable", e));
+  if (radarActive)                        addRadarLayer();
+  if (activeOverlays.has("SPC"))          addSpcLayer().catch(e => console.warn("SPC unavailable", e));
+  if (activeOverlays.has("Drought"))      addDroughtLayer().catch(e => console.warn("Drought unavailable", e));
+  if (activeOverlays.has("Alerts"))       addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
+  if (activeOverlays.has("Fire Wx"))      addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
+  if (activeOverlays.has("WPC Rain"))     addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
+  if (activeOverlays.has("Surface"))      addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e));
+  if (activeOverlays.has("LSR"))          addLsrLayer().catch(e => console.warn("LSR unavailable", e));
+  if (activeOverlays.has("Satellite"))    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
   radarMap.resize();
-  radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 700 });
+  if (relocate) {
+    radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 700 });
+  }
 }
 
 function animateRadarLayer() {
@@ -2950,7 +2977,7 @@ function renderLayers() {
   if (!baseEl || !overlayEl) return;
 
   const BASE_LAYERS = ["Radar"];
-  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought"];
+  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought", "Satellite"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
     `<button type="button" data-layer="${l}" class="${radarActive ? "active" : ""}">${l}</button>`
@@ -2964,7 +2991,7 @@ function renderLayers() {
     btn.addEventListener("click", () => {
       radarActive = !radarActive;
       renderLayers();
-      drawRadar();
+      drawRadar(false);
     });
   });
 
@@ -2974,7 +3001,7 @@ function renderLayers() {
       if (activeOverlays.has(layer)) activeOverlays.delete(layer);
       else activeOverlays.add(layer);
       renderLayers();
-      drawRadar();
+      drawRadar(false);
     });
   });
 
@@ -2982,6 +3009,12 @@ function renderLayers() {
   if (spcCtrl) {
     spcCtrl.hidden = !activeOverlays.has("SPC");
     if (activeOverlays.has("SPC")) renderSpcSubControls();
+  }
+
+  const satCtrl = document.querySelector("#satelliteSubControls");
+  if (satCtrl) {
+    satCtrl.hidden = !activeOverlays.has("Satellite");
+    if (activeOverlays.has("Satellite")) renderSatelliteSubControls();
   }
 
   const radCtrl = document.querySelector("#radarSubControls");
@@ -3017,7 +3050,7 @@ function renderSpcSubControls() {
       // Day 3 only has categorical; days 1-2 have all types
       if (activeSpcDay === 3 && activeSpcType !== "cat") activeSpcType = "cat";
       renderSpcSubControls();
-      drawRadar();
+      drawRadar(false);
     });
   });
 
@@ -3025,12 +3058,33 @@ function renderSpcSubControls() {
     btn.addEventListener("click", () => {
       activeSpcType = btn.dataset.spcType;
       renderSpcSubControls();
-      drawRadar();
+      drawRadar(false);
     });
   });
 
   // Update SPC legend
   renderSpcLegend();
+}
+
+function renderSatelliteSubControls() {
+  const typeEl = document.querySelector("#satelliteTypeBtns");
+  if (!typeEl) return;
+  const types = [
+    { id: "geocolor",   label: "GeoColor"    },
+    { id: "truecolor",  label: "True Color"  },
+    { id: "infrared",   label: "Infrared"    },
+    { id: "watervapor", label: "Water Vapor" },
+  ];
+  typeEl.innerHTML = types.map(t =>
+    `<button type="button" data-sat-type="${t.id}" class="${t.id === activeSatelliteType ? "active" : ""}">${t.label}</button>`
+  ).join("");
+  typeEl.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeSatelliteType = btn.dataset.satType;
+      renderSatelliteSubControls();
+      drawRadar(false);
+    });
+  });
 }
 
 function renderSpcLegend() {
@@ -3110,7 +3164,7 @@ tabs.forEach(tab => {
   tab.addEventListener("click", () => {
     tabs.forEach(item => item.classList.toggle("active", item === tab));
     screens.forEach(screen => screen.classList.toggle("active", screen.id === tab.dataset.tab));
-    if (tab.dataset.tab === "maps") setTimeout(drawRadar, 0);
+    if (tab.dataset.tab === "maps") setTimeout(() => drawRadar(true), 0);
   });
 });
 
@@ -3206,6 +3260,14 @@ document.querySelector("#radarPlayButton")?.addEventListener("click", () => {
 });
 document.querySelector("#radarOpacitySlider")?.addEventListener("input", event => {
   setRainfallOpacity(Number(event.target.value));
+});
+
+document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event => {
+  const btn = event.target.closest("[data-metric]");
+  if (!btn) return;
+  hourlyChartMetric = btn.dataset.metric;
+  document.querySelectorAll("#hourlyMetricSwitcher button").forEach(b => b.classList.toggle("active", b === btn));
+  renderHourlyChart();
 });
 
 window.addEventListener("resize", drawRadar);
