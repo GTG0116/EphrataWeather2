@@ -1837,6 +1837,8 @@ dd {
 }
 
 .hourly-chart-wrap {
+  position: relative;
+  height: 185px;
   margin: 12px 0 8px;
   border-radius: 8px;
   overflow: hidden;
@@ -1844,11 +1846,20 @@ dd {
   border: 1px solid rgba(255, 255, 255, 0.07);
 }
 
+@media (max-width: 600px) {
+  .hourly-chart-wrap {
+    height: 160px;
+  }
+}
+
 .hourly-chart-svg {
   display: block;
   width: 100%;
-  height: auto;
-  overflow: visible;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  touch-action: none;
 }
 
 .hourly-footer {

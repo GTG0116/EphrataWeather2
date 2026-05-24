@@ -243,6 +243,7 @@ let activeSpcType = "cat";   // cat | torn | wind | hail
 let activeSpcDay  = 1;       // 1, 2, or 3
 let activeBasemap = "dark-v11";
 let activeSatelliteType = "geocolor";
+let satelliteActive = false;
 let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
@@ -1424,19 +1425,21 @@ function renderHourlyChart() {
   if (!hourly.length) { wrap.innerHTML = ""; return; }
 
   const METRICS = {
-    temperature: { unit: "°",   color: "#f97316", getValue: h => h.temperature ?? null,                         label: "°F" },
-    wind:        { unit: " mph",color: "#38bdf8", getValue: h => parseInt(h.windSpeed, 10) || 0,                 label: "mph" },
-    humidity:    { unit: "%",   color: "#a78bfa", getValue: h => h.relativeHumidity?.value ?? null,              label: "%" },
-    precip:      { unit: "%",   color: "#60a5fa", getValue: h => h.probabilityOfPrecipitation?.value ?? null,    label: "%" },
-    fwi:         { unit: "",    color: "#facc15", getValue: h => hourFwi(h).score100,                           label: "score",
+    temperature: { unit: "°",   color: "#f97316", getValue: h => h.temperature ?? null,                      label: "°F" },
+    wind:        { unit: " mph",color: "#38bdf8", getValue: h => parseInt(h.windSpeed, 10) || 0,              label: "mph" },
+    humidity:    { unit: "%",   color: "#a78bfa", getValue: h => h.relativeHumidity?.value ?? null,           label: "%" },
+    precip:      { unit: "%",   color: "#60a5fa", getValue: h => h.probabilityOfPrecipitation?.value ?? null, label: "%" },
+    fwi:         { unit: "",    color: "#facc15", getValue: h => hourFwi(h).score100, label: "score",
                    formatValue: (v, h) => `${v} ${hourFwi(h).label}` },
   };
 
   const cfg  = METRICS[hourlyChartMetric] || METRICS.temperature;
   const vals = hourly.map(h => { const v = cfg.getValue(h); return v != null ? Number(v) : 0; });
 
-  const W = 960, H = 148;
-  const padL = 28, padR = 28, padT = 36, padB = 24;
+  // Use actual pixel dimensions so text/dots render correctly at all screen sizes
+  const W = Math.max(300, wrap.offsetWidth || 600);
+  const H = Math.max(130, wrap.offsetHeight || 175);
+  const padL = 10, padR = 10, padT = 30, padB = 26;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
@@ -1446,7 +1449,6 @@ function renderHourlyChart() {
 
   const xFor = i => padL + (i / (vals.length - 1)) * plotW;
   const yFor = v => padT + plotH - ((v - minV) / rng) * plotH;
-
   const pts = vals.map((v, i) => [xFor(i), yFor(v)]);
 
   // Smooth bezier line
@@ -1462,51 +1464,107 @@ function renderHourlyChart() {
 
   const gId  = `hcg_${hourlyChartMetric}`;
   const col  = cfg.color;
+  const fs   = Math.max(10, Math.min(13, W / 68));  // value label size
+  const tfs  = Math.max(9,  Math.min(11, W / 92));  // time label size
+  const step = W < 450 ? 4 : 3;                     // label every Nth hour
 
-  // Dots + value labels (every 3rd)
   const dotsSvg = pts.map(([x, y], i) => {
-    const show = hourlyChartMetric === "fwi" ? (i % 4 === 0 || i === pts.length - 1) : (i % 3 === 0 || i === pts.length - 1);
+    const show = (i % step === 0 || i === pts.length - 1);
     const vStr = cfg.formatValue ? cfg.formatValue(vals[i], hourly[i]) : `${vals[i]}${cfg.unit}`;
     return `
-      <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${show ? 4 : 2.5}"
-        fill="${col}" stroke="rgba(2,6,23,0.85)" stroke-width="${show ? 2 : 1.5}"
-        opacity="${show ? 1 : 0.55}" style="cursor:pointer"
-        data-hour-index="${i}"><title>${safeText(vStr)}</title></circle>
-      ${show ? `<text x="${x.toFixed(1)}" y="${(y - 10).toFixed(1)}" text-anchor="middle"
-        fill="${col}" font-size="${hourlyChartMetric === "fwi" ? "9" : "10.5"}" font-weight="800"
-        font-family="Inter,system-ui,sans-serif">${vStr}</text>` : ""}
-    `;
+      <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${show ? 3.5 : 2}"
+        fill="${col}" stroke="rgba(2,6,23,0.85)" stroke-width="${show ? 1.8 : 1.2}"
+        opacity="${show ? 1 : 0.5}" data-hour-index="${i}"/>
+      ${show ? `<text x="${x.toFixed(1)}" y="${(y - 8).toFixed(1)}" text-anchor="middle"
+        fill="${col}" font-size="${fs}" font-weight="800"
+        font-family="Inter,system-ui,sans-serif">${safeText(vStr)}</text>` : ""}`;
   }).join("");
 
-  // Time labels on x-axis (every 3rd)
   const timeSvg = hourly.map((h, i) => {
-    if (i % 3 !== 0 && i !== hourly.length - 1) return "";
+    if (i % step !== 0 && i !== hourly.length - 1) return "";
     const t = new Date(h.startTime);
     const lbl = i === 0 ? "Now" : t.toLocaleTimeString([], { hour: "numeric" });
-    return `<text x="${xFor(i).toFixed(1)}" y="${(H - 4).toFixed(1)}" text-anchor="middle"
-      fill="rgba(232,240,255,0.48)" font-size="9.5" font-weight="600"
+    return `<text x="${xFor(i).toFixed(1)}" y="${(H - 5).toFixed(1)}" text-anchor="middle"
+      fill="rgba(232,240,255,0.45)" font-size="${tfs}" font-weight="600"
       font-family="Inter,system-ui,sans-serif">${lbl}</text>`;
   }).join("");
 
+  const tipW = Math.min(94, Math.max(72, W * 0.18));
+  const tipH = 40;
+
   wrap.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="hourly-chart-svg">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" class="hourly-chart-svg">
       <defs>
         <linearGradient id="${gId}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stop-color="${col}" stop-opacity="0.38"/>
+          <stop offset="0%"   stop-color="${col}" stop-opacity="0.32"/>
           <stop offset="100%" stop-color="${col}" stop-opacity="0.02"/>
         </linearGradient>
       </defs>
       <path d="${area}" fill="url(#${gId})"/>
-      <path d="${d}" fill="none" stroke="${col}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="${d}" fill="none" stroke="${col}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
       ${dotsSvg}
       ${timeSvg}
+      <line class="chart-cursor" x1="0" y1="${padT - 6}" x2="0" y2="${padT + plotH}"
+        stroke="rgba(255,255,255,0.22)" stroke-width="1.5" stroke-dasharray="4,3" visibility="hidden"/>
+      <circle class="chart-hover-dot" cx="0" cy="0" r="6"
+        fill="${col}" stroke="rgba(2,6,23,0.9)" stroke-width="2.5" visibility="hidden"/>
+      <g class="chart-tooltip" visibility="hidden">
+        <rect width="${tipW}" height="${tipH}" rx="7"
+          fill="rgba(8,16,36,0.93)" stroke="${col}" stroke-width="1.2" stroke-opacity="0.65"/>
+        <text class="tip-val" x="${tipW / 2}" y="16" text-anchor="middle"
+          fill="${col}" font-size="${fs + 1}" font-weight="800" font-family="Inter,system-ui,sans-serif"/>
+        <text class="tip-time" x="${tipW / 2}" y="30" text-anchor="middle"
+          fill="rgba(232,240,255,0.56)" font-size="${tfs}" font-weight="600" font-family="Inter,system-ui,sans-serif"/>
+      </g>
+      <rect class="chart-hit" x="${padL}" y="0" width="${plotW}" height="${H}"
+        fill="transparent" style="cursor:crosshair"/>
     </svg>
   `;
 
-  // Make dots clickable to open hour detail
-  wrap.querySelectorAll("circle[data-hour-index]").forEach(dot => {
-    dot.addEventListener("click", () => showHourDetails(Number(dot.dataset.hourIndex)));
-  });
+  const svg     = wrap.querySelector(".hourly-chart-svg");
+  const cursor  = svg.querySelector(".chart-cursor");
+  const hdot    = svg.querySelector(".chart-hover-dot");
+  const tipG    = svg.querySelector(".chart-tooltip");
+  const tipVal  = svg.querySelector(".tip-val");
+  const tipTime = svg.querySelector(".tip-time");
+  let hideTimer;
+
+  function closestIdx(clientX) {
+    const rect = svg.getBoundingClientRect();
+    const svgX = ((clientX - rect.left) / rect.width) * W;
+    let best = 0, bestDist = Infinity;
+    pts.forEach(([px], i) => { const dist = Math.abs(px - svgX); if (dist < bestDist) { bestDist = dist; best = i; } });
+    return best;
+  }
+
+  function showTip(clientX, fromTouch = false) {
+    clearTimeout(hideTimer);
+    const idx = closestIdx(clientX);
+    const [cx, cy] = pts[idx];
+    const vStr = cfg.formatValue ? cfg.formatValue(vals[idx], hourly[idx]) : `${vals[idx]}${cfg.unit}`;
+    const t = new Date(hourly[idx].startTime);
+    const lbl = idx === 0 ? "Now" : t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx); cursor.setAttribute("visibility", "visible");
+    hdot.setAttribute("cx", cx); hdot.setAttribute("cy", cy); hdot.setAttribute("visibility", "visible");
+    tipVal.textContent = vStr; tipTime.textContent = lbl;
+    let tx = Math.max(padL, Math.min(W - padR - tipW, cx - tipW / 2));
+    const ty = Math.max(2, cy - tipH - 12);
+    tipG.setAttribute("transform", `translate(${tx},${ty})`); tipG.setAttribute("visibility", "visible");
+    if (fromTouch) hideTimer = setTimeout(hideTip, 2800);
+  }
+
+  function hideTip() {
+    cursor.setAttribute("visibility", "hidden");
+    hdot.setAttribute("visibility", "hidden");
+    tipG.setAttribute("visibility", "hidden");
+  }
+
+  const hit = svg.querySelector(".chart-hit");
+  hit.addEventListener("mousemove",  e => showTip(e.clientX));
+  hit.addEventListener("mouseleave", hideTip);
+  hit.addEventListener("touchstart", e => { e.preventDefault(); showTip(e.touches[0].clientX, true); }, { passive: false });
+  hit.addEventListener("touchmove",  e => { e.preventDefault(); showTip(e.touches[0].clientX, true); }, { passive: false });
+  hit.addEventListener("click",      e => showHourDetails(closestIdx(e.clientX)));
 }
 
 function alertPriority(alert) {
@@ -2951,7 +3009,7 @@ function drawRadar(relocate = false) {
   if (activeOverlays.has("WPC Rain"))     addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
   if (activeOverlays.has("Surface"))      addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e));
   if (activeOverlays.has("LSR"))          addLsrLayer().catch(e => console.warn("LSR unavailable", e));
-  if (activeOverlays.has("Satellite"))    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
+  if (satelliteActive)                    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
@@ -2976,11 +3034,14 @@ function renderLayers() {
   const overlayEl = document.querySelector("#overlayLayerPills");
   if (!baseEl || !overlayEl) return;
 
-  const BASE_LAYERS = ["Radar"];
-  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought", "Satellite"];
+  const BASE_LAYERS = [
+    { id: "Radar",     isActive: () => radarActive,     toggle: () => { radarActive = !radarActive; } },
+    { id: "Satellite", isActive: () => satelliteActive, toggle: () => { satelliteActive = !satelliteActive; } },
+  ];
+  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
-    `<button type="button" data-layer="${l}" class="${radarActive ? "active" : ""}">${l}</button>`
+    `<button type="button" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}">${l.id}</button>`
   ).join("");
 
   overlayEl.innerHTML = OVERLAY_LAYERS.map(l =>
@@ -2989,7 +3050,8 @@ function renderLayers() {
 
   baseEl.querySelectorAll("button[data-layer]").forEach(btn => {
     btn.addEventListener("click", () => {
-      radarActive = !radarActive;
+      const layer = BASE_LAYERS.find(l => l.id === btn.dataset.layer);
+      if (layer) layer.toggle();
       renderLayers();
       drawRadar(false);
     });
@@ -3013,8 +3075,8 @@ function renderLayers() {
 
   const satCtrl = document.querySelector("#satelliteSubControls");
   if (satCtrl) {
-    satCtrl.hidden = !activeOverlays.has("Satellite");
-    if (activeOverlays.has("Satellite")) renderSatelliteSubControls();
+    satCtrl.hidden = !satelliteActive;
+    if (satelliteActive) renderSatelliteSubControls();
   }
 
   const radCtrl = document.querySelector("#radarSubControls");
