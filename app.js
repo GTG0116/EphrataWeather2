@@ -37,6 +37,13 @@ const LSR_URL = "https://mesonet.agron.iastate.edu/geojson/lsr.php?hours=24";
 // NOAA nowCOAST WMS endpoints
 const WPC_QPF_WMS  = "https://nowcoast.noaa.gov/geoserver/forecasts/qpf/ows";
 const SURFACE_WMS  = "https://nowcoast.noaa.gov/geoserver/observations/surface_analysis/ows";
+const SATELLITE_WMS = "https://nowcoast.noaa.gov/geoserver/observations/satellite/ows";
+const SATELLITE_LAYERS = {
+  geocolor:   "goes_east_conus_geocolor",
+  truecolor:  "goes_east_conus_truecolor",
+  infrared:   "goes_east_conus_clean_ir",
+  watervapor: "goes_east_conus_water_vapor",
+};
 
 // Basemap styles
 const BASEMAP_STYLES = [
@@ -185,6 +192,7 @@ const fallbackWeather = {
   daily: [],
   alerts: [],
   sources: [],
+  pollenForecast: [],
 };
 
 const themePalettes = {
@@ -234,6 +242,7 @@ let radarFrameTransitionTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail
 let activeSpcDay  = 1;       // 1, 2, or 3
 let activeBasemap = "dark-v11";
+let activeSatelliteType = "geocolor";
 let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
@@ -868,9 +877,22 @@ async function pollenPayload() {
     key: GOOGLE_POLLEN_KEY,
     "location.longitude": loc.lon,
     "location.latitude": loc.lat,
-    days: "1",
+    days: "5",
   });
-  return summarizePollen(await getJson(`https://pollen.googleapis.com/v1/forecast:lookup?${params}`));
+  const data = await getJson(`https://pollen.googleapis.com/v1/forecast:lookup?${params}`);
+  return (data.dailyInfo || []).map(day => {
+    const types = (day.pollenTypeInfo || [])
+      .filter(t => t.indexInfo)
+      .sort((a, b) => (b.indexInfo?.value || 0) - (a.indexInfo?.value || 0));
+    const top = types[0];
+    if (!top) return null;
+    return {
+      label: `${top.displayName || top.code} ${top.indexInfo?.category || ""}`.trim(),
+      detail: types.slice(0, 3).map(t => `${t.displayName || t.code}: ${t.indexInfo?.category || "n/a"}`).join(" | "),
+      value: top.indexInfo?.value ?? 0,
+      category: top.indexInfo?.category || "Unknown",
+    };
+  }).filter(Boolean);
 }
 
 async function weatherPayload() {
@@ -916,8 +938,8 @@ async function weatherPayload() {
       wind,
       gust,
       uv: openMeteo?.current?.uv_index ?? null,
-      pollen: pollen?.label || null,
-      pollenDetail: pollen?.detail || null,
+      pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
+      pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
       airQualityDetail: airQuality?.detail || "Open-Meteo air quality unavailable",
       visibility: visibility == null ? null : Number(visibility.toFixed(1)),
@@ -929,6 +951,7 @@ async function weatherPayload() {
     dailyExtras: openMeteo?.daily || {},
     alerts: (alertsData.alerts || []).map(alert => ({ ...alert, tags: tagsForAlert(alert) })),
     alertSource: alertsData.source || "NWS",
+    pollenForecast: Array.isArray(pollen) ? pollen : [],
     astronomy,
     sources: ["api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"],
   };
@@ -1072,7 +1095,7 @@ async function fetchOutlookGeoJson(url) {
   try {
     return await getJson(url, { cache: "no-store" });
   } catch (error) {
-    const proxy = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+    const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
     return getJson(proxy, { cache: "no-store" });
   }
 }
@@ -1381,22 +1404,17 @@ function renderCurrent() {
 
   hourlyStrip.innerHTML = (weatherState.hourly || []).slice(0, 24).map((hour, index) => {
     const time = new Date(hour.startTime);
-    const dewPoint = fahrenheit(nwsValue(hour, "dewpoint"));
-    const humidity = nwsValue(hour, "relativeHumidity");
-    const feels = apparentTemperature(hour.temperature, humidity, parseInt(hour.windSpeed, 10));
     const precip = hour.probabilityOfPrecipitation?.value;
-    const fwi = hourFwi(hour);
     return `
-      <button class="hour-card" type="button" data-hour-index="${index}">
+      <button class="hour-card compact" type="button" data-hour-index="${index}">
         <strong>${index === 0 ? "Now" : time.toLocaleTimeString([], { hour: "numeric" })}</strong>
         ${weatherIcon(iconForCondition(hour.shortForecast))}
         <div class="hour-temp">${f(hour.temperature)}°</div>
-        <span class="hour-fwi" style="--fwi-color:${fwi.color};--fwi-bg:${fwi.bg}">FWI ${fwi.score100} ${fwi.label}</span>
-        <small>${f(precip)}% precip · feels ${f(feels)}°</small>
-        <span class="mini-line">${f(dewPoint)}° dew · ${f(humidity)}% RH</span>
+        <small>${f(precip)}%</small>
       </button>
     `;
-  }).join("") || `<article class="hour-card"><strong>No hourly data</strong><small>NWS hourly endpoint is unavailable.</small></article>`;
+  }).join("") || `<article class="hour-card"><strong>No hourly data</strong></article>`;
+  renderHourlyChart();
 }
 
 function renderHourlyChart() {
@@ -1690,6 +1708,7 @@ function renderDaily() {
   }
 
   const extras = weatherState.dailyExtras || {};
+  const pollenForecast = weatherState.pollenForecast || [];
   dailyGrid.innerHTML = days.slice(0, 7).map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
     const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, parseInt(day.windSpeed, 10));
@@ -1722,6 +1741,7 @@ function renderDaily() {
         <span>${f(precip)}% precip</span>
         <span>Feels ${f(feelsHigh)}° / ${f(feelsLow)}°</span>
         <span>UV ${f(uv, 1)}</span>
+        ${pollenForecast[index] ? `<span class="pollen-chip" title="${safeText(pollenForecast[index].detail || '')}"><svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3m-2.6-7.4-2.1 2.1M9.7 14.3l-2.1 2.1m9.8 0-2.1-2.1M9.7 9.7 7.6 7.6"/></svg> ${safeText(pollenForecast[index].label)}</span>` : ""}
       </div>
     </button>
   `;
