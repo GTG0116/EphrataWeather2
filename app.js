@@ -235,7 +235,14 @@ let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
 let mapState = {};
-let selectedLocation = { ...EPHRATA };
+let selectedLocation = (() => {
+  try {
+    const saved = localStorage.getItem("weatherLastLocation");
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return { ...EPHRATA };
+})();
+if (locationInput) locationInput.value = selectedLocation.name;
 let radarMap;
 let mapMarker;
 let mapLoaded = false;
@@ -561,6 +568,10 @@ async function chooseLocation(location) {
     mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   }
   await refreshLiveData();
+  try { localStorage.setItem("weatherLastLocation", JSON.stringify(selectedLocation)); } catch {}
+  if (Notification.permission === "granted") {
+    registerPushSubscription().catch(e => console.warn("Push location update failed", e));
+  }
 }
 
 function pointInRing(lon, lat, ring) {
