@@ -110,20 +110,20 @@ async function activeAlerts(location, env) {
 async function sendPush(subscription, alert, location, env) {
   const jwt = await vapidJwt(subscription.endpoint, env);
 
-  let body = "A new weather alert has been issued for your area.";
-  if (alert.headline) {
-    body = alert.headline;
-  } else if (alert.expires) {
-    try {
-      const tz = location?.timezone || "America/New_York";
-      const time = new Date(alert.expires).toLocaleTimeString("en-US", {
-        timeZone: tz, hour: "numeric", minute: "2-digit", timeZoneName: "short",
-      });
-      body = `Expires ${time}`;
-    } catch {}
-  }
+  const eventName = alert.event || "Weather Alert";
+  const expiresText = formatExpiration(alert.expires, location);
+  const body = expiresText
+    ? `${eventName} expires ${expiresText}`
+    : alert.headline || `${eventName} issued for your area.`;
 
-  const payload = { title: alert.event || "Weather Alert", body, tag: alert.id, id: alert.id };
+  const payload = {
+    title: eventName,
+    body,
+    tag: alert.id,
+    id: alert.id,
+    event: eventName,
+    expires: alert.expires || null,
+  };
   const encryptedBody = await encryptPushPayload(subscription, payload);
 
   const response = await fetch(subscription.endpoint, {
@@ -140,6 +140,20 @@ async function sendPush(subscription, alert, location, env) {
   if (response.status === 404 || response.status === 410) return "gone";
   if (!response.ok) throw new Error(`Push failed: ${response.status}`);
   return "sent";
+}
+
+function formatExpiration(expires, location) {
+  if (!expires) return "";
+  try {
+    return new Date(expires).toLocaleTimeString("en-US", {
+      timeZone: location?.timezone || "America/New_York",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
+  } catch {
+    return "";
+  }
 }
 
 async function encryptPushPayload(subscription, payload) {
