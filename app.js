@@ -1596,8 +1596,8 @@ async function showAlertNotification(alert) {
     body,
     tag: alertNotificationId(alert),
     renotify: true,
-    badge: "icon.svg",
-    icon: "icon.svg",
+    badge: "icon-192.png",
+    icon: "icon-192.png",
     data: { url: location.href },
   };
   const registration = serviceWorkerRegistration || await navigator.serviceWorker.ready.catch(() => null);
