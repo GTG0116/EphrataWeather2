@@ -22,6 +22,8 @@ const SPC_URLS = {
          "https://www.spc.noaa.gov/products/outlook/day3otlk_hail.nolyr.geojson"],
 };
 
+const SPC_CAT_RANK = { TSTM: 1, MRGL: 2, SLGT: 3, ENH: 4, MDT: 5, HIGH: 6 };
+
 // SPC Fire Weather outlook GeoJSON
 const FIRE_WX_URLS = [
   "https://www.spc.noaa.gov/products/fire_wx/day1otlk_fire.nolyr.geojson",
@@ -1065,15 +1067,29 @@ async function mapsPayload() {
     fetchOutlookGeoJson(SPC_URLS.hail[0]),
     fetchDroughtGeoJson(),
   ]);
-  const getSpcRisk = result => {
+  const getHighestCatFeature = result => {
     if (result.status !== "fulfilled") return null;
-    return (normalizeSpcData(result.value).features || [])
-      .find(feature => pointInGeometry(loc.lon, loc.lat, feature.geometry)) || null;
+    const matches = (normalizeSpcData(result.value).features || [])
+      .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry));
+    if (!matches.length) return null;
+    return matches.reduce((best, f) =>
+      (SPC_CAT_RANK[f.properties?.LABEL] || 0) > (SPC_CAT_RANK[best.properties?.LABEL] || 0) ? f : best
+    );
   };
-  const spcCat = getSpcRisk(catResult);
-  const spcTorn = getSpcRisk(tornResult);
-  const spcWind = getSpcRisk(windResult);
-  const spcHail = getSpcRisk(hailResult);
+  const getHighestProbFeature = result => {
+    if (result.status !== "fulfilled") return null;
+    const matches = (normalizeSpcData(result.value).features || [])
+      .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry))
+      .filter(f => f.properties?.RISK_NUM != null);
+    if (!matches.length) return null;
+    return matches.reduce((best, f) =>
+      f.properties.RISK_NUM > best.properties.RISK_NUM ? f : best
+    );
+  };
+  const spcCat = getHighestCatFeature(catResult);
+  const spcTorn = getHighestProbFeature(tornResult);
+  const spcWind = getHighestProbFeature(windResult);
+  const spcHail = getHighestProbFeature(hailResult);
   const droughtFeature = droughtResult.status === "fulfilled"
     ? (normalizeDroughtData(droughtResult.value).features || [])
       .find(feature => pointInGeometry(loc.lon, loc.lat, feature.geometry))
@@ -1108,7 +1124,9 @@ async function spcForecastPayload() {
     const allProps = (normalizeSpcData(raw).features || [])
       .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry))
       .map(f => f.properties);
-    const riskProps = allProps.find(p => p.RISK_NUM != null);
+    const riskProps = allProps
+      .filter(p => p.RISK_NUM != null)
+      .reduce((best, p) => p.RISK_NUM > (best?.RISK_NUM ?? -Infinity) ? p : best, null);
     const cigProps  = allProps.find(p => parseCigNum(p.LABEL) != null);
     return {
       risk: riskProps?.RISK_NUM ?? null,
@@ -1118,8 +1136,12 @@ async function spcForecastPayload() {
 
   const findCatLabel = (raw) => {
     if (!raw) return null;
-    return (normalizeSpcData(raw).features || [])
-      .find(f => pointInGeometry(loc.lon, loc.lat, f.geometry))?.properties?.LABEL || null;
+    const matches = (normalizeSpcData(raw).features || [])
+      .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry));
+    if (!matches.length) return null;
+    return matches.reduce((best, f) =>
+      (SPC_CAT_RANK[f.properties?.LABEL] || 0) > (SPC_CAT_RANK[best.properties?.LABEL] || 0) ? f : best
+    ).properties?.LABEL || null;
   };
 
   const [cat1, cat2, cat3, torn1, wind1, hail1, torn2, wind2, hail2] = await Promise.all([
