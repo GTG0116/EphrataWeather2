@@ -74,7 +74,7 @@ async function checkSubscriptions(env) {
       const seen = new Set(record.seenAlertIds || []);
       const newest = alerts.find(alert => !seen.has(alert.id));
       if (newest) {
-        const result = await sendPush(record.subscription, env);
+        const result = await sendPush(record.subscription, newest, record.location, env);
         if (result === "gone") {
           await env.SUBSCRIPTIONS.delete(key);
           continue;
@@ -102,22 +102,107 @@ async function activeAlerts(location, env) {
   return (data.features || []).map(feature => ({
     id: feature.id || feature.properties?.id || `${feature.properties?.event}-${feature.properties?.sent}`,
     event: feature.properties?.event || "Weather Alert",
+    headline: feature.properties?.headline || null,
+    expires: feature.properties?.expires || null,
   })).filter(alert => alert.id);
 }
 
-async function sendPush(subscription, env) {
+async function sendPush(subscription, alert, location, env) {
   const jwt = await vapidJwt(subscription.endpoint, env);
+
+  let body = "A new weather alert has been issued for your area.";
+  if (alert.headline) {
+    body = alert.headline;
+  } else if (alert.expires) {
+    try {
+      const tz = location?.timezone || "America/New_York";
+      const time = new Date(alert.expires).toLocaleTimeString("en-US", {
+        timeZone: tz, hour: "numeric", minute: "2-digit", timeZoneName: "short",
+      });
+      body = `Expires ${time}`;
+    } catch {}
+  }
+
+  const payload = { title: alert.event || "Weather Alert", body, tag: alert.id, id: alert.id };
+  const encryptedBody = await encryptPushPayload(subscription, payload);
+
   const response = await fetch(subscription.endpoint, {
     method: "POST",
     headers: {
       "TTL": "300",
       "Urgency": "high",
+      "Content-Encoding": "aes128gcm",
+      "Content-Type": "application/octet-stream",
       "Authorization": `vapid t=${jwt}, k=${env.VAPID_PUBLIC_KEY}`,
     },
+    body: encryptedBody,
   });
   if (response.status === 404 || response.status === 410) return "gone";
   if (!response.ok) throw new Error(`Push failed: ${response.status}`);
   return "sent";
+}
+
+async function encryptPushPayload(subscription, payload) {
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const p256dhBytes = base64UrlToBytes(subscription.keys.p256dh);
+  const authBytes = base64UrlToBytes(subscription.keys.auth);
+
+  const serverKeyPair = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]
+  );
+  const serverPublicRaw = new Uint8Array(await crypto.subtle.exportKey("raw", serverKeyPair.publicKey));
+
+  const subscriberPublicKey = await crypto.subtle.importKey(
+    "raw", p256dhBytes, { name: "ECDH", namedCurve: "P-256" }, false, []
+  );
+  const sharedBits = await crypto.subtle.deriveBits(
+    { name: "ECDH", public: subscriberPublicKey }, serverKeyPair.privateKey, 256
+  );
+  const sharedSecret = new Uint8Array(sharedBits);
+
+  // PRK = HMAC-SHA256(salt=auth, ikm=sharedSecret)
+  const prkKey = await crypto.subtle.importKey("raw", authBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const prk = new Uint8Array(await crypto.subtle.sign("HMAC", prkKey, sharedSecret));
+
+  // IKM = HKDF-Expand(PRK, "WebPush: info\0" + subscriber_pub + server_pub, 32)
+  const ikm = await hkdfExpand(prk, bytesConcat(
+    new TextEncoder().encode("WebPush: info\0"), p256dhBytes, serverPublicRaw
+  ), 32);
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+
+  // PRK2 = HMAC-SHA256(salt=salt, ikm=ikm)
+  const prk2Key = await crypto.subtle.importKey("raw", salt, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const prk2 = new Uint8Array(await crypto.subtle.sign("HMAC", prk2Key, ikm));
+
+  const cek = await hkdfExpand(prk2, new TextEncoder().encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdfExpand(prk2, new TextEncoder().encode("Content-Encoding: nonce\0"), 12);
+
+  const aesKey = await crypto.subtle.importKey("raw", cek, { name: "AES-GCM" }, false, ["encrypt"]);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aesKey, bytesConcat(plaintext, new Uint8Array([2])))
+  );
+
+  // aes128gcm record: [16 salt][4 record_size BE][1 keyid_len=65][65 server_pub][ciphertext]
+  const header = new Uint8Array(86);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096, false);
+  header[20] = 65;
+  header.set(serverPublicRaw, 21);
+  return bytesConcat(header, ciphertext);
+}
+
+async function hkdfExpand(prk, info, length) {
+  const key = await crypto.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const t1 = new Uint8Array(await crypto.subtle.sign("HMAC", key, bytesConcat(info, new Uint8Array([1]))));
+  return t1.slice(0, length);
+}
+
+function bytesConcat(...arrays) {
+  const out = new Uint8Array(arrays.reduce((n, a) => n + a.length, 0));
+  let offset = 0;
+  for (const a of arrays) { out.set(a, offset); offset += a.length; }
+  return out;
 }
 
 async function vapidJwt(pushEndpoint, env) {
@@ -164,6 +249,7 @@ function normalizeLocation(location = {}) {
     lat: Number(location.lat),
     lon: Number(location.lon),
     name: String(location.name || "Saved location"),
+    timezone: location.timezone || null,
   };
 }
 
