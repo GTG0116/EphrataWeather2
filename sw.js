@@ -1,4 +1,4 @@
-const CACHE_NAME = "weather-portal-v1";
+const CACHE_NAME = "weather-portal-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -6,7 +6,10 @@ const APP_SHELL = [
   "./app.js",
   "./icons.js",
   "./manifest.json",
-  "./icon.svg"
+  "./favicon-32.png",
+  "./apple-touch-icon.png",
+  "./icon-192.png",
+  "./icon-512.png"
 ];
 
 self.addEventListener("install", event => {
@@ -46,8 +49,8 @@ self.addEventListener("push", event => {
     body: payload.body || "A new weather alert has been issued.",
     tag: alertId || "weather-alert",
     renotify: true,
-    badge: "./icon.svg",
-    icon: "./icon.svg",
+    badge: "./icon-192.png",
+    icon: "./icon-192.png",
     data: { url: payload.url || "./index.html" }
   };
 
