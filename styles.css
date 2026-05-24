@@ -542,6 +542,7 @@ dd {
   justify-content: center;
   gap: 8px;
   min-height: 34px;
+  width: 100%;
   flex-direction: column;
 }
 
@@ -551,12 +552,12 @@ dd {
 }
 
 .ui-icon {
-  display: flex;
+  display: grid;
+  place-items: center;
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  align-items: center;
-  justify-content: center;
+  margin: 0 auto;
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
   border-radius: 7px;
@@ -566,15 +567,22 @@ dd {
 }
 
 .ui-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 25px;
   display: block;
+  margin: auto;
+  transform: translateY(1px);
   fill: none;
   stroke: currentColor;
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
   overflow: visible;
+}
+
+.hourly-metric-switcher,
+.hourly-chart-wrap {
+  display: none !important;
 }
 
 .metric:hover .ui-icon {
