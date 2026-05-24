@@ -1010,13 +1010,14 @@ async function climatePayload(date) {
     "apparent_temperature_max","apparent_temperature_min",
     "precipitation_sum","rain_sum","snowfall_sum",
     "wind_speed_10m_max","wind_gusts_10m_max","wind_direction_10m_dominant",
-    "cloud_cover_mean","pressure_msl_mean","relative_humidity_2m_mean",
-    "dew_point_2m_mean","sunshine_duration","uv_index_max",
+    "cloud_cover_mean","pressure_msl_mean",
+    "sunshine_duration","uv_index_max",
     "sunrise","sunset",
   ].join(",");
   const hourly = [
     "temperature_2m","precipitation","weather_code",
     "wind_speed_10m","wind_direction_10m",
+    "relative_humidity_2m","dew_point_2m",
   ].join(",");
   const tz = encodeURIComponent(loc.timezone || "America/New_York");
   const data = await getJson(
@@ -1031,10 +1032,10 @@ async function climatePayload(date) {
 async function mapsPayload() {
   const loc = point();
   const [catResult, tornResult, windResult, hailResult, droughtResult] = await Promise.allSettled([
-    fetchOutlookGeoJson(SPC_URLS.cat),
-    fetchOutlookGeoJson(SPC_URLS.torn),
-    fetchOutlookGeoJson(SPC_URLS.wind),
-    fetchOutlookGeoJson(SPC_URLS.hail),
+    fetchOutlookGeoJson(SPC_URLS.cat[0]),
+    fetchOutlookGeoJson(SPC_URLS.torn[0]),
+    fetchOutlookGeoJson(SPC_URLS.wind[0]),
+    fetchOutlookGeoJson(SPC_URLS.hail[0]),
     fetchDroughtGeoJson(),
   ]);
   const getSpcRisk = result => {
@@ -1889,8 +1890,6 @@ async function renderClimate(date) {
     const windDir = d.wind_direction_10m_dominant?.[i];
     const cloud = d.cloud_cover_mean?.[i];
     const pressure = d.pressure_msl_mean?.[i];
-    const humidity = d.relative_humidity_2m_mean?.[i];
-    const dew = d.dew_point_2m_mean?.[i];
     const sunshine = d.sunshine_duration?.[i];
     const uv = d.uv_index_max?.[i];
     const sunriseStr = d.sunrise?.[i];
@@ -1908,10 +1907,16 @@ async function renderClimate(date) {
       if (snow != null && snow > 0) parts.push(`Snow: ${snow.toFixed(1)}"`);
       return parts.length ? parts.join(" · ") : "No precipitation";
     })();
+    // Compute mean humidity and dew point from hourly data (not available as daily archive fields)
+    let humSum = 0, humCnt = 0, dewSum = 0, dewCnt = 0;
     let hourlyHtml = "";
     if (h?.time) {
       h.time.forEach((t, idx) => {
         if (!t.startsWith(date)) return;
+        const hum = h.relative_humidity_2m?.[idx];
+        const dp = h.dew_point_2m?.[idx];
+        if (hum != null) { humSum += hum; humCnt++; }
+        if (dp != null) { dewSum += dp; dewCnt++; }
         const hr = parseInt(t.slice(11, 13), 10);
         const label = hr === 0 ? "12 AM" : hr < 12 ? `${hr} AM` : hr === 12 ? "12 PM" : `${hr - 12} PM`;
         const temp = h.temperature_2m?.[idx];
@@ -1928,6 +1933,8 @@ async function renderClimate(date) {
           </div>`;
       });
     }
+    const humidity = humCnt > 0 ? humSum / humCnt : null;
+    const dew = dewCnt > 0 ? dewSum / dewCnt : null;
     const dateLabel = new Date(`${date}T12:00:00`).toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
@@ -2351,13 +2358,6 @@ function initMap() {
   });
   radarMap.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
   radarMap.addControl(new mapboxgl.ScaleControl({ unit: "imperial" }), "bottom-right");
-  // Blue circle for selected location (like a standard "you are here" dot)
-  const markerEl = document.createElement("div");
-  markerEl.className = "location-blue-dot";
-  mapMarker = new mapboxgl.Marker({ element: markerEl, anchor: "center" })
-    .setLngLat([selectedLocation.lon, selectedLocation.lat])
-    .setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)))
-    .addTo(radarMap);
   radarMap.on("load", () => {
     mapLoaded = true;
     drawRadar();
@@ -2652,6 +2652,58 @@ async function nwsAlertFeatureCollection() {
   return { type: "FeatureCollection", features };
 }
 
+function buildAlertFeatureHtml(feature, idx, total) {
+  const p = feature.properties || {};
+  const isIem = p.phenomena != null;
+  let title, subtitle, detailHtml, noteHtml, iconStyle;
+
+  if (isIem) {
+    const key = `${p.phenomena}.${p.significance}`;
+    const eventName = iemPhenomenaMap[key] || key;
+    const expires = p.expire ? new Date(p.expire).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
+    title = safeText(eventName);
+    subtitle = "IEM Storm-Based Warning";
+    iconStyle = "background:rgba(251,146,60,0.18);border:1px solid rgba(251,146,60,0.35);";
+    detailHtml = `
+      <div class="popup-stat"><span class="popup-key">Phenomena</span><span class="popup-val">${safeText(key)}</span></div>
+      <div class="popup-stat"><span class="popup-key">WFO</span><span class="popup-val">${safeText(p.wfo || "--")}</span></div>
+      <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
+      ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${safeText(p.windtag)} mph</span></div>` : ""}
+      ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${safeText(p.hailtag)}"</span></div>` : ""}
+      ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}`;
+    noteHtml = "Click the alert panel for full details and instructions.";
+  } else {
+    const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
+    title = safeText(p.event || "Weather Alert");
+    subtitle = "NWS County/Zone Alert";
+    iconStyle = `background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;`;
+    detailHtml = `
+      <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
+      <div class="popup-stat"><span class="popup-key">Severity</span><span class="popup-val">${safeText(p.severity || "--")}</span></div>
+      <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>`;
+    noteHtml = safeText(p.headline || "Tap the alert panel for full details.");
+  }
+
+  const navHtml = total > 1 ? `
+    <div class="popup-alert-nav">
+      <button class="popup-nav-btn" onclick="window._alertNav(-1)" ${idx === 0 ? "disabled" : ""}>&#8249;</button>
+      <span class="popup-nav-counter">${idx + 1} / ${total}</span>
+      <button class="popup-nav-btn" onclick="window._alertNav(1)" ${idx === total - 1 ? "disabled" : ""}>&#8250;</button>
+    </div>` : "";
+
+  return `
+    <div class="popup-header">
+      <div class="popup-icon popup-alert" style="${iconStyle}">⚠️</div>
+      <div>
+        <div class="popup-title">${title}</div>
+        <div class="popup-subtitle">${safeText(subtitle)}</div>
+      </div>
+    </div>
+    ${navHtml}
+    ${detailHtml}
+    <div class="popup-note">${noteHtml}</div>`;
+}
+
 async function addAlertsLayer() {
   if (activeLayer !== "Alerts" || !radarMap || !mapLoaded) return;
   if (!alertPolygonData) {
@@ -2716,65 +2768,38 @@ async function addAlertsLayer() {
     });
   }
 
-  if (hasIemAlerts && !popupWiredLayers.has("alerts")) {
-    radarMap.on("click", "alerts-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const p = f.properties || {};
-      const key = `${p.phenomena}.${p.significance}`;
-      const eventName = iemPhenomenaMap[key] || key;
-      const expires = p.expire ? new Date(p.expire).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`
-          <div class="popup-header">
-            <div class="popup-icon popup-alert" style="background:rgba(251,146,60,0.18);border:1px solid rgba(251,146,60,0.35);">⚠️</div>
-            <div>
-              <div class="popup-title">${safeText(eventName)}</div>
-              <div class="popup-subtitle">IEM Storm-Based Warning</div>
-            </div>
-          </div>
-          <div class="popup-stat"><span class="popup-key">Phenomena</span><span class="popup-val">${safeText(key)}</span></div>
-          <div class="popup-stat"><span class="popup-key">WFO</span><span class="popup-val">${safeText(p.wfo || "--")}</span></div>
-          <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
-          ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${safeText(p.windtag)} mph</span></div>` : ""}
-          ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${safeText(p.hailtag)}"</span></div>` : ""}
-          ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}
-          <div class="popup-note">Click the alert panel for full details and instructions.</div>
-        `)
-        .addTo(radarMap);
-    });
-    radarMap.on("mouseenter", "alerts-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
-    radarMap.on("mouseleave", "alerts-fill", () => { radarMap.getCanvas().style.cursor = ""; });
-    popupWiredLayers.add("alerts");
-  }
+  // Unified click handler for all alert layers — shows paginated popup when multiple alerts overlap
+  if ((hasIemAlerts || hasNwsAlerts) && !popupWiredLayers.has("all-alerts")) {
+    const alertClickLayers = [
+      ...(hasIemAlerts ? ["alerts-fill"] : []),
+      ...(hasNwsAlerts ? ["nws-alerts-fill"] : []),
+    ];
 
-  if (hasNwsAlerts && !popupWiredLayers.has("nws-alerts")) {
-    radarMap.on("click", "nws-alerts-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const p = f.properties || {};
-      const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`
-          <div class="popup-header">
-            <div class="popup-icon popup-alert" style="background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;">!</div>
-            <div>
-              <div class="popup-title">${safeText(p.event || "Weather Alert")}</div>
-              <div class="popup-subtitle">NWS County/Zone Alert</div>
-            </div>
-          </div>
-          <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
-          <div class="popup-stat"><span class="popup-key">Severity</span><span class="popup-val">${safeText(p.severity || "--")}</span></div>
-          <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
-          <div class="popup-note">${safeText(p.headline || "Tap the alert panel for full details.")}</div>
-        `)
-        .addTo(radarMap);
+    let _alertClickPending = false;
+    const handleAlertClick = ev => {
+      if (_alertClickPending) return;
+      _alertClickPending = true;
+      queueMicrotask(() => { _alertClickPending = false; });
+
+      const activeLayers = alertClickLayers.filter(l => radarMap.getLayer(l));
+      const features = radarMap.queryRenderedFeatures(ev.point, { layers: activeLayers });
+      if (!features.length) return;
+
+      let idx = 0;
+      const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
+      window._alertNav = delta => {
+        idx = Math.max(0, Math.min(features.length - 1, idx + delta));
+        popup.setHTML(buildAlertFeatureHtml(features[idx], idx, features.length));
+      };
+      popup.setHTML(buildAlertFeatureHtml(features[0], 0, features.length));
+    };
+
+    alertClickLayers.forEach(layer => {
+      radarMap.on("click", layer, handleAlertClick);
+      radarMap.on("mouseenter", layer, () => { radarMap.getCanvas().style.cursor = "pointer"; });
+      radarMap.on("mouseleave", layer, () => { radarMap.getCanvas().style.cursor = ""; });
     });
-    radarMap.on("mouseenter", "nws-alerts-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
-    radarMap.on("mouseleave", "nws-alerts-fill", () => { radarMap.getCanvas().style.cursor = ""; });
-    popupWiredLayers.add("nws-alerts");
+    popupWiredLayers.add("all-alerts");
   }
 }
 

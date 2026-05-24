@@ -2155,6 +2155,49 @@ dd {
 }
 
 /* ═══════════════════════════════════════════════
+   ALERT POPUP NAVIGATION
+═══════════════════════════════════════════════ */
+.popup-alert-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  margin-bottom: 8px;
+}
+.popup-nav-btn {
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #e8f0ff;
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.14s;
+  padding: 0;
+}
+.popup-nav-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+.popup-nav-btn:disabled {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+.popup-nav-counter {
+  font-size: 0.78rem;
+  color: rgba(232, 240, 255, 0.55);
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══════════════════════════════════════════════
    LSR MARKER ICONS
 ═══════════════════════════════════════════════ */
 .lsr-marker {
