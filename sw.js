@@ -40,27 +40,52 @@ self.addEventListener("push", event => {
     payload = { body: event.data?.text() };
   }
 
+  const alertId = payload.tag || payload.id;
   const title = payload.title || "Weather Alert";
   const options = {
     body: payload.body || "A new weather alert has been issued.",
-    tag: payload.tag || payload.id || "weather-alert",
+    tag: alertId || "weather-alert",
     renotify: true,
     badge: "./icon.svg",
     icon: "./icon.svg",
     data: { url: payload.url || "./index.html" }
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    Promise.all([
+      self.registration.showNotification(title, options),
+      alertId ? markAlertShown(alertId) : Promise.resolve(),
+      alertId ? broadcastToClients({ type: "push-alert-shown", id: alertId }) : Promise.resolve(),
+    ])
+  );
 });
+
+async function markAlertShown(id) {
+  const cache = await caches.open("push-shown-alerts-v1");
+  const existing = await cache.match("ids").then(r => r?.json()).catch(() => null) || [];
+  if (!existing.includes(id)) {
+    existing.push(id);
+    await cache.put("ids", new Response(JSON.stringify(existing), { headers: { "Content-Type": "application/json" } }));
+  }
+}
+
+async function broadcastToClients(message) {
+  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  clients.forEach(c => c.postMessage(message));
+}
 
 self.addEventListener("notificationclick", event => {
   event.notification.close();
-  const targetUrl = new URL(event.notification.data?.url || "./index.html", self.location.origin).href;
+  const fromNotifUrl = new URL("./index.html", self.location.origin);
+  fromNotifUrl.searchParams.set("from", "notification");
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
-      const appClient = clients.find(client => client.url.startsWith(self.location.origin));
-      if (appClient) return appClient.focus();
-      return self.clients.openWindow(targetUrl);
+      const appClient = clients.find(c => new URL(c.url).origin === self.location.origin);
+      if (appClient) {
+        appClient.postMessage({ type: "notification-click" });
+        return appClient.focus();
+      }
+      return self.clients.openWindow(fromNotifUrl.href);
     })
   );
 });
