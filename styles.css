@@ -1200,21 +1200,78 @@ dd {
     padding-top: max(18px, env(safe-area-inset-top));
   }
 
+  .topbar {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
   .topbar,
   .section-head {
     align-items: flex-start;
     flex-direction: column;
   }
 
+  /* Hide decorative eyebrow in topbar to save vertical space */
+  .topbar > div > .eyebrow {
+    display: none;
+  }
+
+  /* Compact h1 in topbar */
+  .topbar h1 {
+    font-size: clamp(1.4rem, 7vw, 2rem);
+    margin-bottom: 0;
+  }
+
+  .top-actions {
+    gap: 8px;
+  }
+
   .top-actions,
   .location-search,
   .climate-search,
-  .select-wrap,
-  .location-search input,
-  .location-search button,
+  .select-wrap {
+    width: 100%;
+  }
+
+  /* Search row stays as a flex row — input fills, button shrinks */
+  .location-search {
+    display: flex;
+    flex-wrap: nowrap;
+  }
+
+  .location-search input {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+  }
+
+  .location-search button {
+    flex-shrink: 0;
+    width: auto;
+    padding: 0 12px;
+  }
+
   .climate-search input,
   .climate-search button {
     width: 100%;
+  }
+
+  /* Icon buttons and refresh stay compact in a row */
+  .locate-me-btn,
+  .notify-btn {
+    min-height: 38px;
+    padding: 0 10px;
+  }
+
+  .refresh-button {
+    min-height: 38px;
+    padding: 0 12px;
+  }
+
+  /* Compact status badge */
+  .status-badge {
+    font-size: 0.65rem;
+    padding: 7px 10px;
   }
 
   .forecast-banner {
@@ -1598,10 +1655,16 @@ dd {
 @media (max-width: 1120px) {
   .climate-layout {
     grid-template-columns: 1fr;
-    overflow-x: hidden;
   }
   .climate-calendar-tile {
     position: static;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .climate-result-panel {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
   }
 }
 
@@ -1615,6 +1678,77 @@ dd {
   .locate-me-btn span,
   .notify-btn span {
     display: none;
+  }
+
+  /* Prevent calendar from overflowing on narrow screens */
+  .climate-calendar-tile {
+    padding: 14px;
+    overflow: hidden;
+  }
+
+  .hist-cal-nav {
+    gap: 6px;
+  }
+
+  .hist-cal-title {
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .hist-select {
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.78rem;
+    padding: 0 6px;
+  }
+
+  /* Keep hourly strip scrollable within its tile */
+  .hist-hourly-panel {
+    overflow: hidden;
+  }
+
+  .hist-hourly-strip {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 480px) {
+  .hist-stats-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .hist-temp-range {
+    font-size: 2.4rem;
+  }
+
+  .hist-cal-nav {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
+  .hist-cal-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+  }
+
+  .hist-cal-title {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .hist-select {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.72rem;
+    padding: 0 4px;
+    min-height: 30px;
+  }
+
+  .climate-calendar-tile {
+    padding: 10px;
   }
 }
 
@@ -2416,5 +2550,24 @@ dd {
   .hourly-metric-switcher button {
     padding: 0 9px;
     font-size: 0.72rem;
+  }
+
+  .layer-pills-row {
+    gap: 5px;
+  }
+
+  .layer-pills-row button {
+    min-height: 28px;
+    padding: 0 10px;
+    font-size: 0.72rem;
+  }
+
+  .map-section-head h2 {
+    font-size: 1.4rem;
+    margin-bottom: 8px;
+  }
+
+  .map-section-head {
+    margin-bottom: 8px;
   }
 }
