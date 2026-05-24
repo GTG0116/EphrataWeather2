@@ -1543,6 +1543,19 @@ async function showAlertNotification(alert) {
   else new Notification(title, options);
 }
 
+async function syncPushShownAlerts() {
+  try {
+    const cache = await caches.open("push-shown-alerts-v1");
+    const response = await cache.match("ids");
+    if (!response) return;
+    const pushIds = await response.json();
+    if (!pushIds?.length) return;
+    const existing = new Set(JSON.parse(localStorage.getItem("weatherSeenAlertIds") || "[]"));
+    pushIds.forEach(id => existing.add(id));
+    localStorage.setItem("weatherSeenAlertIds", JSON.stringify([...existing]));
+  } catch {}
+}
+
 function notifyNewWeatherAlerts() {
   if (!notificationSupported() || Notification.permission !== "granted") return;
   const alerts = weatherState.alerts || [];
@@ -1578,6 +1591,18 @@ async function registerAppWorker() {
   if (!("serviceWorker" in navigator)) return;
   try {
     serviceWorkerRegistration = await navigator.serviceWorker.register("sw.js");
+    navigator.serviceWorker.addEventListener("message", event => {
+      if (event.data?.type === "push-alert-shown") {
+        const existing = new Set(JSON.parse(localStorage.getItem("weatherSeenAlertIds") || "[]"));
+        existing.add(event.data.id);
+        localStorage.setItem("weatherSeenAlertIds", JSON.stringify([...existing]));
+      }
+      if (event.data?.type === "notification-click") {
+        refreshLiveData().then(() => {
+          if (!alertsPanel.hidden) alertsPanel.scrollIntoView({ behavior: "smooth" });
+        });
+      }
+    });
   } catch (error) {
     console.warn("Service worker unavailable", error);
   } finally {
@@ -2823,6 +2848,7 @@ async function refreshLiveData() {
   renderCurrent();
   renderHourlyChart();
   renderAlerts();
+  await syncPushShownAlerts();
   notifyNewWeatherAlerts();
   renderDaily();
   renderMetar(aviation.status === "fulfilled" ? aviation.value : null);
@@ -2959,5 +2985,10 @@ tabs.forEach(tab => {
     }, { capture: true });
   }
 });
-refreshLiveData();
+refreshLiveData().then(() => {
+  if (new URLSearchParams(location.search).get("from") === "notification") {
+    history.replaceState(null, "", location.pathname);
+    if (!alertsPanel.hidden) alertsPanel.scrollIntoView({ behavior: "smooth" });
+  }
+});
 drawAtmosphere();
