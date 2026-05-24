@@ -94,15 +94,16 @@
                 <p class="eyebrow">24 Hour Horizon</p>
                 <h3>Hourly Forecast</h3>
               </div>
-              <div class="hourly-metric-switcher" id="hourlyMetricSwitcher" hidden>
-                <button class="active" data-metric="temperature">🌡 Temp</button>
-                <button data-metric="wind">💨 Wind</button>
-                <button data-metric="humidity">💧 Humidity</button>
-                <button data-metric="precip">🌧 Rain %</button>
-                <button data-metric="fwi">FWI</button>
-              </div>
             </div>
             <div class="hourly-strip" id="hourlyStrip"></div>
+            <div class="hourly-chart-wrap" id="hourlyChartWrap"></div>
+            <div class="hourly-metric-switcher" id="hourlyMetricSwitcher">
+              <button class="active" data-metric="temperature"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg> Temp</button>
+              <button data-metric="wind"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/></svg> Wind</button>
+              <button data-metric="humidity"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.32 0z"/></svg> Humidity</button>
+              <button data-metric="precip"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 17.58A5 5 0 0 0 18 8h-1.26A8 8 0 1 0 4 16.25"/><line x1="8" y1="19" x2="8" y2="21"/><line x1="12" y1="19" x2="12" y2="21"/><line x1="16" y1="19" x2="16" y2="21"/></svg> Rain %</button>
+              <button data-metric="fwi"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg> FWI</button>
+            </div>
             <div class="hourly-footer">
               <span id="updatedAt">Updated --</span>
             </div>
@@ -151,6 +152,14 @@
                   <div class="ctrl-row">
                     <span class="ctrl-label">Type</span>
                     <div class="ctrl-btn-group" id="spcTypeBtns"></div>
+                  </div>
+                </div>
+
+                <!-- Satellite sub-controls -->
+                <div class="sub-controls" id="satelliteSubControls" hidden>
+                  <div class="ctrl-row">
+                    <span class="ctrl-label">Band</span>
+                    <div class="ctrl-btn-group" id="satelliteTypeBtns"></div>
                   </div>
                 </div>
 
