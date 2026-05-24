@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Weather Portal">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Weather Portal</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.css" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body data-theme="sunny">
+    <canvas id="atmosphereCanvas" aria-hidden="true"></canvas>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local Weather Intelligence</p>
+          <h1 id="appTitle">Weather Portal</h1>
+        </div>
+        <div class="top-actions">
+          <form class="location-search" id="locationForm">
+            <label for="locationInput" class="sr-only">Search US town</label>
+            <input id="locationInput" type="search" placeholder="Search a US town" autocomplete="off">
+            <div class="location-suggestions" id="locationSuggestions" role="listbox" aria-label="Suggested towns" hidden></div>
+            <button type="submit">Search</button>
+          </form>
+          <button class="locate-me-btn" id="locateMeBtn" type="button" title="Use my current location" aria-label="Use my current location">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="9" stroke-dasharray="4 2"/></svg>
+            <span id="locateMeBtnText">Locate Me</span>
+          </button>
+          <button class="notify-btn" id="notifyButton" type="button" title="Enable weather alert notifications" aria-label="Enable weather alert notifications">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+            <span id="notifyButtonText">Alerts</span>
+          </button>
+          <button class="refresh-button" id="refreshButton" type="button">Refresh</button>
+          <div class="status-badge" id="statusBadge">Connecting to live sources</div>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Weather sections">
+        <button class="tab active" type="button" data-tab="current">Current &amp; Hourly</button>
+        <button class="tab" type="button" data-tab="extended">Extended Forecast</button>
+        <button class="tab" type="button" data-tab="maps">Radar &amp; Maps</button>
+        <button class="tab" type="button" data-tab="aviation">Aviation &amp; Space</button>
+        <button class="tab" type="button" data-tab="climate">Climate History</button>
+      </nav>
+
+      <main>
+        <!-- CURRENT & HOURLY -->
+        <section class="screen active" id="current" aria-labelledby="current-title">
+          <section class="alerts-panel" id="alertsPanel" aria-label="Active weather alerts" hidden></section>
+
+          <div class="hero-grid">
+            <article class="tile forecast-banner">
+              <div>
+                <p class="eyebrow" id="locationName">Ephrata, PA</p>
+                <h2 id="current-title">Loading weather…</h2>
+                <p class="summary" id="weatherSummary">Fetching live conditions from NWS.</p>
+              </div>
+              <div class="temp-lockup">
+                <div id="currentIcon" class="current-icon" aria-hidden="true"></div>
+                <span id="currentTemp">--</span>
+                <sup>°F</sup>
+                <small id="currentCondition">Loading live data</small>
+              </div>
+            </article>
+
+            <article class="tile comfort-tile">
+              <div class="tile-heading">
+                <p class="eyebrow">Fair Weather Index</p>
+                <strong id="comfortLabel">--</strong>
+              </div>
+              <div class="comfort-ring" style="--score: 50">
+                <span id="comfortScore">--</span>
+              </div>
+              <div class="comfort-condition" id="comfortCondition">--</div>
+            </article>
+          </div>
+
+          <div class="metric-grid" id="metricGrid"></div>
+
+          <!-- HOURLY SECTION WITH CHART -->
+          <section class="tile hourly-panel" aria-label="24 hour forecast">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">24 Hour Horizon</p>
+                <h3>Hourly Forecast</h3>
+              </div>
+              <div class="hourly-metric-switcher" id="hourlyMetricSwitcher">
+                <button class="active" data-metric="temperature">🌡 Temp</button>
+                <button data-metric="wind">💨 Wind</button>
+                <button data-metric="humidity">💧 Humidity</button>
+                <button data-metric="precip">🌧 Rain %</button>
+                <button data-metric="fwi">FWI</button>
+              </div>
+            </div>
+            <div class="hourly-chart-wrap" id="hourlyChartWrap"></div>
+            <div class="hourly-strip" id="hourlyStrip"></div>
+            <div class="hourly-footer">
+              <span id="updatedAt">Updated --</span>
+            </div>
+          </section>
+        </section>
+
+        <!-- EXTENDED FORECAST -->
+        <section class="screen" id="extended" aria-labelledby="extended-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Model Blend</p>
+              <h2 id="extended-title">Extended Forecast</h2>
+            </div>
+            <span>Daily outlook with fair weather scoring</span>
+          </div>
+          <div class="daily-grid" id="dailyGrid"></div>
+        </section>
+
+        <!-- RADAR & MAPS -->
+        <section class="screen" id="maps" aria-labelledby="maps-title">
+          <div class="map-layout">
+            <article class="tile radar-card">
+              <div class="section-head map-section-head">
+                <div>
+                  <p class="eyebrow">GIS Dashboard</p>
+                  <h2 id="maps-title">Radar &amp; Regional Layers</h2>
+                </div>
+              </div>
+
+              <!-- Layer controls -->
+              <div class="map-controls-wrap">
+                <div class="layer-group-row">
+                  <span class="layer-group-label">Base</span>
+                  <div class="layer-pills-row" id="baseLayerPills"></div>
+                </div>
+                <div class="layer-group-row">
+                  <span class="layer-group-label">Overlays</span>
+                  <div class="layer-pills-row" id="overlayLayerPills"></div>
+                </div>
+
+                <!-- SPC sub-controls (shown when SPC active) -->
+                <div class="sub-controls" id="spcSubControls" hidden>
+                  <div class="ctrl-row">
+                    <span class="ctrl-label">Day</span>
+                    <div class="ctrl-btn-group" id="spcDayBtns"></div>
+                  </div>
+                  <div class="ctrl-row">
+                    <span class="ctrl-label">Type</span>
+                    <div class="ctrl-btn-group" id="spcTypeBtns"></div>
+                  </div>
+                </div>
+
+                <!-- Radar timeline controls -->
+                <div class="sub-controls" id="radarSubControls" hidden>
+                  <div class="ctrl-row radar-timeline-row">
+                    <button type="button" id="radarPlayButton" class="play-btn">
+                      <svg id="playIcon" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><polygon points="5,3 19,12 5,21"/></svg>
+                      <span id="playLabel">Play</span>
+                    </button>
+                    <input id="radarTimeline" type="range" min="0" max="14" value="14" aria-label="Radar timeline" class="timeline-slider">
+                    <span id="radarTimeLabel" class="timeline-label">Latest</span>
+                  </div>
+                  <div class="ctrl-row">
+                    <span class="ctrl-label">Opacity</span>
+                    <input type="range" id="radarOpacitySlider" min="10" max="100" value="78" class="opacity-slider" aria-label="Layer opacity">
+                    <span id="radarOpacityLabel">78%</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Map -->
+              <div class="radar-map-wrap">
+                <div id="radarMap" aria-label="Interactive regional radar and map layers"></div>
+                <button class="map-locate-btn" id="mapLocateBtn" type="button" title="Live GPS location" aria-label="Show live location on map">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+                  Live Location
+                </button>
+                <!-- SPC Legend -->
+                <div class="spc-legend-box" id="spcLegendBox" hidden></div>
+              </div>
+
+              <!-- Map Options -->
+              <details class="map-options-details">
+                <summary class="map-options-summary">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+                  Map Customization
+                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" class="chevron" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                </summary>
+                <div class="map-options-body">
+                  <div class="map-opt-group">
+                    <span class="map-opt-label">Basemap Style</span>
+                    <div class="basemap-btns" id="basemapBtns"></div>
+                  </div>
+                </div>
+              </details>
+            </article>
+
+            <aside class="map-sidebar" id="mapSidebar"></aside>
+          </div>
+        </section>
+
+        <!-- AVIATION & SPACE -->
+        <section class="screen" id="aviation" aria-labelledby="aviation-title">
+          <div class="aviation-grid">
+            <article class="tile metar-card">
+              <p class="eyebrow">Nearest Aviation Weather</p>
+              <h2 id="aviation-title">NWS Aviation Conditions</h2>
+              <div class="flight-rule" id="flightRule">VFR</div>
+              <pre id="metarRaw"></pre>
+              <dl id="metarDecoded"></dl>
+            </article>
+            <article class="tile space-card">
+              <p class="eyebrow">Heliophysics</p>
+              <h2>Space Weather Monitor</h2>
+              <div class="space-readouts" id="spaceReadouts"></div>
+              <div class="aurora-bar">
+                <span style="width: 42%"></span>
+              </div>
+              <p>Minor geomagnetic activity may enhance auroral propagation at high latitudes, with visibility dependent on latitude, cloud cover, and light pollution.</p>
+            </article>
+          </div>
+        </section>
+
+        <!-- CLIMATE HISTORY -->
+        <section class="screen" id="climate" aria-labelledby="climate-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">80+ Year Archive</p>
+              <h2 id="climate-title">Local Climate History</h2>
+            </div>
+            <p class="hist-loc-name" id="hist-location-name"></p>
+          </div>
+          <div class="climate-layout">
+            <div id="hist-calendar" class="tile climate-calendar-tile"></div>
+            <div id="climateResult" class="climate-result-panel"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="detail-modal" id="detailModal" hidden>
+      <button class="modal-backdrop" type="button" data-close-modal aria-label="Close details"></button>
+      <article class="tile modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <button class="modal-close" type="button" data-close-modal aria-label="Close details">×</button>
+        <p class="eyebrow" id="modalEyebrow">Forecast Details</p>
+        <h2 id="modalTitle">Details</h2>
+        <div id="modalBody"></div>
+      </article>
+    </div>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.js"></script>
+    <script src="icons.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

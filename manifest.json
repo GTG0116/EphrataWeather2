@@ -1,0 +1,19 @@
+{
+  "name": "Weather Portal",
+  "short_name": "Weather",
+  "description": "Local weather, radar, maps, and active alert monitoring.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
