@@ -1,0 +1,15 @@
+name = "weather-alert-worker"
+main = "cloudflare-alert-worker.js"
+compatibility_date = "2026-05-23"
+
+kv_namespaces = [
+  { binding = "SUBSCRIPTIONS", id = "7496b3576397407b9c01802559d91155" }
+]
+
+[triggers]
+crons = ["*/2 * * * *"]
+
+[vars]
+VAPID_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0"
+VAPID_SUBJECT = "mailto:gtgoeke@outlook.com"
+NWS_USER_AGENT = "WeatherPortal/1.0 (gtgoeke@outlook.com)"
