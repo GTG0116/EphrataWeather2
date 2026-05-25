@@ -854,8 +854,12 @@ async function alertsPayload(lat, lon) {
       .map(normalizeIemFeature)
       .map(alert => {
         const nwsMatch = nwsWarningsByEvent.get(alert.event);
-        if (nwsMatch?.description) {
-          return { ...alert, description: nwsMatch.description };
+        if (nwsMatch) {
+          return {
+            ...alert,
+            description: nwsMatch.description || alert.description,
+            parameters: nwsMatch.parameters || {},
+          };
         }
         return alert;
       })
@@ -3925,7 +3929,8 @@ window._viewAlertFromMapFeature = function(popupId, featureIdx) {
       showAlertDetails(alertIdx);
     } else {
       // Warning polygon is outside the user's location — normalize and show directly
-      showAlertDetails(normalizeIemFeature(feature));
+      const normalizedFeature = normalizeIemFeature(feature);
+      showAlertDetails({ ...normalizedFeature, tags: tagsForAlert(normalizedFeature) });
     }
   } else {
     // NWS zone/county alert — try matching by event type first
