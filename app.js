@@ -6,22 +6,16 @@ const RADAR_FRAME_MS = 700;
 // Fill these after deploying the alert worker described in NOTIFICATIONS.md.
 const PUSH_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0";
 const PUSH_SUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/subscribe";
-// SPC Categorical + probabilistic outlooks, Days 1-5 (days 4-5 categorical only)
+// SPC Categorical + probabilistic outlooks, Days 1-2
 const SPC_URLS = {
   cat:  ["https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day4otlk_cat.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day5otlk_cat.nolyr.geojson"],
+         "https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson"],
   torn: ["https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day2otlk_torn.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day3otlk_torn.nolyr.geojson"],
+         "https://www.spc.noaa.gov/products/outlook/day2otlk_torn.nolyr.geojson"],
   wind: ["https://www.spc.noaa.gov/products/outlook/day1otlk_wind.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day2otlk_wind.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day3otlk_wind.nolyr.geojson"],
+         "https://www.spc.noaa.gov/products/outlook/day2otlk_wind.nolyr.geojson"],
   hail: ["https://www.spc.noaa.gov/products/outlook/day1otlk_hail.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day2otlk_hail.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day3otlk_hail.nolyr.geojson"],
+         "https://www.spc.noaa.gov/products/outlook/day2otlk_hail.nolyr.geojson"],
 };
 
 const SPC_CAT_RANK = { TSTM: 1, MRGL: 2, SLGT: 3, ENH: 4, MDT: 5, HIGH: 6 };
@@ -29,8 +23,14 @@ const SPC_CAT_RANK = { TSTM: 1, MRGL: 2, SLGT: 3, ENH: 4, MDT: 5, HIGH: 6 };
 // NWS vector MapServer for SPC fire weather outlook (Day 1 layer 0, Day 2 layer 1)
 const FIRE_WX_MAPSERVER_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/fire_weather/SPC_firewx/MapServer";
 
-// WPC Excessive Rainfall Outlook (ERO) GeoJSON
-const WPC_ERO_URL = "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day1_Latest.geojson";
+// WPC Excessive Rainfall Outlook (ERO) GeoJSON — Days 1-5
+const WPC_ERO_URLS = [
+  "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day1_Latest.geojson",
+  "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day2_Latest.geojson",
+  "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day3_Latest.geojson",
+  "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day4_Latest.geojson",
+  "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day5_Latest.geojson",
+];
 
 // IEM storm-based warning polygons for map
 const IEM_SBW_URL = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson";
@@ -244,7 +244,9 @@ let activeOverlays = new Set();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
 let radarFrameTransitionTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail
-let activeSpcDay  = 1;       // 1, 2, or 3
+let activeSpcDay  = 1;       // 1 or 2
+let activeWpcDay  = 1;       // 1-5
+let activeFireDay = 1;       // 1 or 2
 let activeBasemap = "dark-v11";
 let activeSatelliteType = "infrared";
 let satelliteActive = false;
@@ -265,8 +267,8 @@ let mapMarker;
 let mapLoaded = false;
 let spcLayerData = {};       // key: "day_type" e.g. "1_cat"
 let droughtLayerData = null;
-let fireWeatherData = null;
-let wpcRainData = null;
+let fireWeatherDataCache = {};  // keyed by day (1|2)
+let wpcRainDataCache = {};      // keyed by day (1-5)
 let lsrData = null;
 let alertPolygonData = null;
 let nwsAlertPolygonData = null;
@@ -1172,10 +1174,9 @@ async function spcForecastPayload() {
     ).properties?.LABEL || null;
   };
 
-  const [cat1, cat2, cat3, torn1, wind1, hail1, torn2, wind2, hail2] = await Promise.all([
+  const [cat1, cat2, torn1, wind1, hail1, torn2, wind2, hail2] = await Promise.all([
     fetchOutlookGeoJson(SPC_URLS.cat[0]).catch(() => null),
     fetchOutlookGeoJson(SPC_URLS.cat[1]).catch(() => null),
-    fetchOutlookGeoJson(SPC_URLS.cat[2]).catch(() => null),
     fetchOutlookGeoJson(SPC_URLS.torn[0]).catch(() => null),
     fetchOutlookGeoJson(SPC_URLS.wind[0]).catch(() => null),
     fetchOutlookGeoJson(SPC_URLS.hail[0]).catch(() => null),
@@ -1200,25 +1201,15 @@ async function spcForecastPayload() {
       wind:    w2.risk, windCig: w2.cig,
       hail:    h2.risk, hailCig: h2.cig,
     },
-    {
-      catLabel: findCatLabel(cat3),
-      tornado: null, tornCig: null,
-      wind:    null, windCig: null,
-      hail:    null, hailCig: null,
-    },
   ];
 }
 
 async function fetchOutlookGeoJson(url) {
   try {
-    return await getJson(`/api/geojson?url=${encodeURIComponent(url)}`, { cache: "no-store" });
+    return await getJson(url, { cache: "no-store" });
   } catch {
-    try {
-      return await getJson(url, { cache: "no-store" });
-    } catch {
-      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-      return getJson(proxy, { cache: "no-store" });
-    }
+    const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    return getJson(proxy, { cache: "no-store" });
   }
 }
 
@@ -1934,7 +1925,7 @@ function renderDaily() {
       month:       dayMonth,
     });
 
-    const spcDay = index < 3 ? (weatherState.spcDays?.[index] || null) : null;
+    const spcDay = index < 2 ? (weatherState.spcDays?.[index] || null) : null;
     const spcCat = spcDay?.catLabel || null;
     const spcColor = spcRiskColor(spcCat);
     const spcBadge = (spcColor && spcCat !== "TSTM")
@@ -2772,7 +2763,7 @@ function clearWeatherLayers() {
    "drought-fill", "drought-line",
    "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
    "fire-fill", "fire-line",
-   "wpc-rain-layer",
+   "wpc-rain-fill", "wpc-rain-line",
    "surface-layer",
    "satellite-layer",
   ].forEach(removeMapLayer);
@@ -2933,11 +2924,12 @@ async function addSpcLayer() {
 
 async function addFireWeatherLayer() {
   if (!radarMap || !mapLoaded) return;
-  if (!fireWeatherData) {
-    const queryUrl = `${FIRE_WX_MAPSERVER_BASE}/0/query?where=1%3D1&outFields=*&f=geojson&outSR=4326`;
+  const day = activeFireDay;
+  if (!fireWeatherDataCache[day]) {
+    const layer = day - 1; // MapServer layer 0 = Day 1, layer 1 = Day 2
+    const queryUrl = `${FIRE_WX_MAPSERVER_BASE}/${layer}/query?where=1%3D1&outFields=*&f=geojson&outSR=4326`;
     const raw = await fetchOutlookGeoJson(queryUrl);
-    // Normalize label field — MapServer may use "label", "Label", or "LABEL"
-    fireWeatherData = {
+    fireWeatherDataCache[day] = {
       ...raw,
       features: (raw?.features || []).map(feat => {
         const p = feat.properties || {};
@@ -2946,7 +2938,7 @@ async function addFireWeatherLayer() {
       }),
     };
   }
-  radarMap.addSource("fire-source", { type: "geojson", data: fireWeatherData });
+  radarMap.addSource("fire-source", { type: "geojson", data: fireWeatherDataCache[day] });
   radarMap.addLayer({
     id: "fire-fill", type: "fill", source: "fire-source",
     paint: {
@@ -2975,7 +2967,7 @@ async function addFireWeatherLayer() {
         .setLngLat(ev.lngLat)
         .setHTML(`<div class="popup-header">
           <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
-          <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day 1 Forecast</div></div>
+          <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day ${activeFireDay} Forecast</div></div>
         </div>
         <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNice)}</span></div>
         <div class="popup-note">Elevated fire weather conditions. Monitor local alerts and fire restrictions.</div>`)
@@ -2989,10 +2981,11 @@ async function addFireWeatherLayer() {
 
 async function addWpcRainfallLayer() {
   if (!radarMap || !mapLoaded) return;
-  if (!wpcRainData) {
-    wpcRainData = normalizeSpcData(await fetchOutlookGeoJson(WPC_ERO_URL));
+  const day = activeWpcDay;
+  if (!wpcRainDataCache[day]) {
+    wpcRainDataCache[day] = normalizeSpcData(await fetchOutlookGeoJson(WPC_ERO_URLS[day - 1]));
   }
-  radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainData });
+  radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainDataCache[day] });
   radarMap.addLayer({
     id: "wpc-rain-fill", type: "fill", source: "wpc-rain-source",
     paint: {
@@ -3021,10 +3014,10 @@ async function addWpcRainfallLayer() {
         .setLngLat(ev.lngLat)
         .setHTML(`<div class="popup-header">
           <div class="popup-icon" style="background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);">🌧️</div>
-          <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day 1 Outlook</div></div>
+          <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day ${activeWpcDay} Outlook</div></div>
         </div>
         <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNames[label] || label)}</span></div>
-        <div class="popup-note">WPC Day 1 Excessive Rainfall Outlook — NOAA</div>`)
+        <div class="popup-note">WPC Day ${activeWpcDay} Excessive Rainfall Outlook — NOAA</div>`)
         .addTo(radarMap);
     });
     radarMap.on("mouseenter", "wpc-rain-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
@@ -3457,6 +3450,18 @@ function renderLayers() {
     if (activeOverlays.has("SPC")) renderSpcSubControls();
   }
 
+  const wpcCtrl = document.querySelector("#wpcSubControls");
+  if (wpcCtrl) {
+    wpcCtrl.hidden = !activeOverlays.has("WPC Rain");
+    if (activeOverlays.has("WPC Rain")) renderWpcSubControls();
+  }
+
+  const fireCtrl = document.querySelector("#fireWxSubControls");
+  if (fireCtrl) {
+    fireCtrl.hidden = !activeOverlays.has("Fire Wx");
+    if (activeOverlays.has("Fire Wx")) renderFireWxSubControls();
+  }
+
   const satCtrl = document.querySelector("#satelliteSubControls");
   if (satCtrl) {
     satCtrl.hidden = !satelliteActive;
@@ -3474,7 +3479,7 @@ function renderSpcSubControls() {
   const typeEl = document.querySelector("#spcTypeBtns");
   if (!dayEl || !typeEl) return;
 
-  const days  = [1, 2, 3, 4, 5];
+  const days  = [1, 2];
   const types = [
     { id: "cat",  label: "Categorical" },
     { id: "torn", label: "Tornado"     },
@@ -3486,20 +3491,14 @@ function renderSpcSubControls() {
     `<button type="button" data-spc-day="${d}" class="${d === activeSpcDay ? "active" : ""}">Day ${d}</button>`
   ).join("");
 
-  // Days 3-5 only have categorical; hide type selector for those days
-  const catOnly = activeSpcDay >= 3;
-  typeEl.hidden = catOnly;
-  if (!catOnly) {
-    typeEl.innerHTML = types.map(t =>
-      `<button type="button" data-spc-type="${t.id}" class="${t.id === activeSpcType ? "active" : ""}">${t.label}</button>`
-    ).join("");
-  }
+  typeEl.hidden = false;
+  typeEl.innerHTML = types.map(t =>
+    `<button type="button" data-spc-type="${t.id}" class="${t.id === activeSpcType ? "active" : ""}">${t.label}</button>`
+  ).join("");
 
   dayEl.querySelectorAll("button").forEach(btn => {
     btn.addEventListener("click", () => {
       activeSpcDay = Number(btn.dataset.spcDay);
-      // Days 3-5 only support categorical
-      if (activeSpcDay >= 3 && activeSpcType !== "cat") activeSpcType = "cat";
       renderSpcSubControls();
       drawRadar(false);
     });
@@ -3515,6 +3514,36 @@ function renderSpcSubControls() {
 
   // Update SPC legend
   renderSpcLegend();
+}
+
+function renderWpcSubControls() {
+  const dayEl = document.querySelector("#wpcDayBtns");
+  if (!dayEl) return;
+  dayEl.innerHTML = [1, 2, 3, 4, 5].map(d =>
+    `<button type="button" data-wpc-day="${d}" class="${d === activeWpcDay ? "active" : ""}">Day ${d}</button>`
+  ).join("");
+  dayEl.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeWpcDay = Number(btn.dataset.wpcDay);
+      renderWpcSubControls();
+      drawRadar(false);
+    });
+  });
+}
+
+function renderFireWxSubControls() {
+  const dayEl = document.querySelector("#fireWxDayBtns");
+  if (!dayEl) return;
+  dayEl.innerHTML = [1, 2].map(d =>
+    `<button type="button" data-fire-day="${d}" class="${d === activeFireDay ? "active" : ""}">Day ${d}</button>`
+  ).join("");
+  dayEl.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeFireDay = Number(btn.dataset.fireDay);
+      renderFireWxSubControls();
+      drawRadar(false);
+    });
+  });
 }
 
 function renderSatelliteSubControls() {
