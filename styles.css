@@ -706,6 +706,7 @@ dd {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   background: rgba(2, 6, 23, 0.28);
+  overflow: hidden;
 }
 
 .hour-card {
