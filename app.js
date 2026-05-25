@@ -2845,7 +2845,7 @@ async function addSatelliteLayer() {
   });
   radarMap.addSource("satellite-source", {
     type: "raster",
-    tiles: [`${SATELLITE_WMS}?${wmsParams.toString()}&BBOX={bbox-epsg-3857}`],
+    tiles: [`/api/wmstile?${wmsParams.toString()}&BASE_URL=${encodeURIComponent(SATELLITE_WMS)}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA nowCOAST GOES Satellite",
   });
