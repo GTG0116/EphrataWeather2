@@ -1884,7 +1884,7 @@ function rememberCurrentAlerts() {
 
 async function showAlertNotification(alert) {
   if (!notificationSupported() || Notification.permission !== "granted") return;
-  const title = alert.event || "Weather Alert";
+  const title = alertDisplayEvent(alert);
   const body = alert.headline || alert.description || `New alert for ${selectedLocation.name}`;
   const options = {
     body,
@@ -1965,6 +1965,9 @@ async function registerAppWorker() {
         });
       }
     });
+    if (Notification.permission === "granted") {
+      registerPushSubscription().catch(e => console.warn("Startup push re-subscribe failed", e));
+    }
   } catch (error) {
     console.warn("Service worker unavailable", error);
   } finally {
@@ -2481,7 +2484,7 @@ async function renderClimate(date) {
           <p>${safeText(condition)}</p>
           <p class="hist-feels">Feels like ${feelsHigh != null ? Math.round(feelsHigh) + "°" : "--"} high / ${feelsLow != null ? Math.round(feelsLow) + "°" : "--"} low</p>
         </div>
-        <div class="hist-hero-icon">${WeatherIcons.fromText(condition, false)}</div>
+        <div class="hist-hero-icon"><span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(condition, false)}</span></div>
       </div>
       ${hourlyHtml ? `
       <div class="tile hist-hourly-panel">
@@ -3290,7 +3293,9 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
     const key = rawKey.toUpperCase();
     const eventName = iemPhenomenaMap[key] || iemPhenomenaMap[rawKey] || rawKey;
     const expires = p.expire ? new Date(p.expire).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
-    title = safeText(eventName);
+    const tempAlert = normalizeIemFeature(feature);
+    tempAlert.tags = tagsForAlert(tempAlert);
+    title = safeText(alertDisplayEvent(tempAlert));
     subtitle = "IEM Storm-Based Warning";
     iconStyle = "background:rgba(251,146,60,0.18);border:1px solid rgba(251,146,60,0.35);";
     detailHtml = `
@@ -3301,7 +3306,9 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
       ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}`;
   } else {
     const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
-    title = safeText(p.event || "Weather Alert");
+    const evtLower = (p.event || "").toLowerCase();
+    const matchedAlert = (weatherState.alerts || []).find(a => a.event?.toLowerCase() === evtLower);
+    title = safeText(matchedAlert ? alertDisplayEvent(matchedAlert) : (p.event || "Weather Alert"));
     subtitle = "NWS County/Zone Alert";
     iconStyle = `background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;`;
     detailHtml = `
