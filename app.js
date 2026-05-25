@@ -41,7 +41,7 @@ const LSR_URL = "https://mesonet.agron.iastate.edu/geojson/lsr.php?hours=24";
 
 // NOAA nowCOAST WMS endpoints
 const WPC_QPF_WMS  = "https://nowcoast.noaa.gov/geoserver/forecasts/qpf/ows";
-const SURFACE_WMS  = "https://nowcoast.noaa.gov/geoserver/observations/surface_analysis/ows";
+const SURFACE_WMS  = "https://nowcoast.noaa.gov/arcgis/services/nowcoast/analysis_meteohydro_sfc_fronts_time/MapServer/WMSServer";
 const SATELLITE_WMS = "https://nowcoast.noaa.gov/geoserver/observations/satellite/ows";
 const SATELLITE_LAYERS = {
   geocolor:   "goes_visible_imagery",
@@ -415,7 +415,7 @@ function openDetails(eyebrow, title, rows, summary = "") {
   modalBody.innerHTML = `
     ${summary ? `<p class="modal-summary">${safeText(summary)}</p>` : ""}
     <dl class="detail-list">
-      ${rows.map(([term, desc]) => `<div><dt>${safeText(term)}</dt><dd>${safeText(desc)}</dd></div>`).join("")}
+      ${rows.map(([term, desc, icon]) => `<div><dt>${icon ? uiIcon(icon) : ""}<span>${safeText(term)}</span></dt><dd>${safeText(desc)}</dd></div>`).join("")}
     </dl>
   `;
   detailModal.hidden = false;
@@ -1518,6 +1518,16 @@ function uiIcon(name) {
     humidity: `<path d="M12 2.69 17.66 8.35a8 8 0 1 1-11.32 0z"/><path d="M8 16c1.5 2 4 2.5 6 1"/>`,
     wind:     `<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/>`,
     pressure: `<circle cx="12" cy="12" r="9"/><path d="m12 12 4-3.5"/><path d="M7 16h10"/>`,
+    temp:     `<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>`,
+    cloud:    `<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9z"/>`,
+    precip:   `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><path d="M16 14v6"/><path d="M8 14v6"/><path d="M12 16v6"/>`,
+    snow:     `<line x1="2" x2="22" y1="12" y2="12"/><line x1="12" x2="12" y1="2" y2="22"/><path d="m20 16-4-4 4-4"/><path d="m4 8 4 4-4 4"/><path d="m16 4-4 4-4-4"/><path d="m8 20 4-4 4 4"/>`,
+    sunshine: `<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2m-3.5-6.5-1.5 1.5M5 5l1.5 1.5M19 19l-1.5-1.5M5 19l1.5-1.5"/>`,
+    sunrise:  `<path d="M12 2v8m-8.07.93 1.41 1.41M2 18h2m16 0h2m-4.34-5.66 1.41-1.41M22 22H2m14-4a4 4 0 0 0-8 0"/><path d="m8 6 4-4 4 4"/>`,
+    sunset:   `<path d="M12 10V2m-8.07 8.93 1.41 1.41M2 18h2m16 0h2m-4.34-5.66 1.41-1.41M22 22H2m14-4a4 4 0 0 0-8 0"/><path d="m16 6-4 4-4-4"/>`,
+    degree:   `<rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/>`,
+    severe:   `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
+    fwi:      `<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>`,
   };
   return `<span class="ui-icon" aria-hidden="true"><svg viewBox="0 0 24 24">${icons[name] || icons.pressure}</svg></span>`;
 }
@@ -2024,14 +2034,14 @@ function showHourDetails(index) {
   const feels = apparentTemperature(hour.temperature, humidity, parseInt(hour.windSpeed, 10));
   const fwi = hourFwi(hour);
   openDetails("Hourly Forecast", time.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }), [
-    ["Condition", hour.shortForecast || "Not reported"],
-    ["Fair Weather Index", `${fwi.score100} (${fwi.label})`],
-    ["Temperature", `${f(hour.temperature)}°F, feels like ${f(feels)}°F`],
-    ["Dew Point", `${f(dewPoint)}°F`],
-    ["Humidity", `${f(humidity)}%`],
-    ["Wind", `${hour.windDirection || ""} ${wind}`.trim()],
-    ["Gusts", gust],
-    ["Precipitation Chance", `${f(hour.probabilityOfPrecipitation?.value)}%`],
+    ["Condition", hour.shortForecast || "Not reported", "cloud"],
+    ["Fair Weather Index", `${fwi.score100} (${fwi.label})`, "fwi"],
+    ["Temperature", `${f(hour.temperature)}°F, feels like ${f(feels)}°F`, "temp"],
+    ["Dew Point", `${f(dewPoint)}°F`, "dew"],
+    ["Humidity", `${f(humidity)}%`, "humidity"],
+    ["Wind", `${hour.windDirection || ""} ${wind}`.trim(), "wind"],
+    ["Gusts", gust, "wind"],
+    ["Precipitation Chance", `${f(hour.probabilityOfPrecipitation?.value)}%`, "precip"],
   ], hour.detailedForecast || "");
 }
 
@@ -2047,35 +2057,35 @@ function showDailyDetails(index) {
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
   const rows = [
-    ["High / Low", `${f(day.temperature)}°F / ${night ? f(night.temperature) : "--"}°F`],
-    ["Feels Like", `${f(feelsHigh)}°F / ${f(feelsLow)}°F`],
-    ["Precipitation Chance", `${f(precip)}%`],
-    ["UV Index", f(uv, 1)],
-    ["Day Wind", `${day.windDirection || ""} ${day.windSpeed || "not reported"}`.trim()],
-    ["Night Wind", night ? `${night.windDirection || ""} ${night.windSpeed || "not reported"}`.trim() : "Not reported"],
-    ["Night", night?.shortForecast || "Not reported"],
-    ["Sunrise", weatherState.astronomy?.sunrise || "--"],
-    ["Sunset", weatherState.astronomy?.sunset || "--"],
+    ["High / Low", `${f(day.temperature)}°F / ${night ? f(night.temperature) : "--"}°F`, "temp"],
+    ["Feels Like", `${f(feelsHigh)}°F / ${f(feelsLow)}°F`, "temp"],
+    ["Precipitation Chance", `${f(precip)}%`, "precip"],
+    ["UV Index", f(uv, 1), "uv"],
+    ["Day Wind", `${day.windDirection || ""} ${day.windSpeed || "not reported"}`.trim(), "wind"],
+    ["Night Wind", night ? `${night.windDirection || ""} ${night.windSpeed || "not reported"}`.trim() : "Not reported", "wind"],
+    ["Night", night?.shortForecast || "Not reported", "cloud"],
+    ["Sunrise", weatherState.astronomy?.sunrise || "--", "sunrise"],
+    ["Sunset", weatherState.astronomy?.sunset || "--", "sunset"],
   ];
 
   if (index < 3) {
     const spcDay = weatherState.spcDays?.[index];
     const catLabel = spcDay?.catLabel || null;
     if (catLabel === "TSTM") {
-      rows.push(["Severe Weather Risk", `General thunderstorm area — SPC Day ${index + 1}`]);
+      rows.push(["Severe Weather Risk", `General thunderstorm area — SPC Day ${index + 1}`, "severe"]);
     } else if (catLabel) {
-      rows.push(["Severe Weather Risk", `${spcLabel(catLabel)} — SPC Day ${index + 1}`]);
+      rows.push(["Severe Weather Risk", `${spcLabel(catLabel)} — SPC Day ${index + 1}`, "severe"]);
       if (spcDay.tornado != null) {
         const desc = spcThreatText("tornado", spcDay.tornCig);
-        rows.push(["Tornado", desc ? `${desc} (${spcDay.tornado}% probability)` : `${spcDay.tornado}% probability`]);
+        rows.push(["Tornado", desc ? `${desc} (${spcDay.tornado}% probability)` : `${spcDay.tornado}% probability`, "severe"]);
       }
       if (spcDay.wind != null) {
         const desc = spcThreatText("wind", spcDay.windCig);
-        rows.push(["Wind", desc ? `${desc} (${spcDay.wind}% probability)` : `${spcDay.wind}% probability`]);
+        rows.push(["Wind", desc ? `${desc} (${spcDay.wind}% probability)` : `${spcDay.wind}% probability`, "wind"]);
       }
       if (spcDay.hail != null) {
         const desc = spcThreatText("hail", spcDay.hailCig);
-        rows.push(["Hail", desc ? `${desc} (${spcDay.hail}% probability)` : `${spcDay.hail}% probability`]);
+        rows.push(["Hail", desc ? `${desc} (${spcDay.hail}% probability)` : `${spcDay.hail}% probability`, "precip"]);
       }
     }
   }
@@ -2412,11 +2422,12 @@ async function renderClimate(date) {
         const pr = h.precipitation?.[idx];
         const ws = h.wind_speed_10m?.[idx];
         const cond = wmoDescription(h.weather_code?.[idx]);
+        const isNight = hr < 6 || hr >= 20;
         hourlyHtml += `
           <div class="hist-hourly-item">
             <div class="hist-hourly-time">${label}</div>
+            <div class="hist-hourly-icon">${weatherIcon(cond + (isNight ? " Night" : ""))}</div>
             <div class="hist-hourly-temp">${temp != null ? Math.round(temp) + "°" : "--"}</div>
-            <div class="hist-hourly-cond">${safeText(cond)}</div>
             <div class="hist-hourly-wind">${ws != null ? Math.round(ws) + " mph" : "--"}</div>
             ${pr != null && pr > 0 ? `<div class="hist-hourly-precip">${pr.toFixed(2)}"</div>` : ""}
           </div>`;
@@ -2428,16 +2439,16 @@ async function renderClimate(date) {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     const stats = [
-      ["Peak Wind", windMax != null ? `${Math.round(windMax)} mph` : "--", windGust != null ? `${Math.round(windGust)} mph gusts · ${windDirLabel(windDir)}` : "--"],
-      ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? Math.round(dew) + "°F" : "--"}`],
-      ["Peak UV", uv != null ? uv.toFixed(1) : "--", uvRiskLabel(uv)],
-      ["Avg Pressure", pressure != null ? (pressure * 0.02953).toFixed(2) + " inHg" : "--", pressure != null ? Math.round(pressure) + " hPa" : "--"],
-      ["Cloud Cover", cloud != null ? `${Math.round(cloud)}%` : "--", cloudCoverLabel(cloud)],
-      ["Precipitation", precip != null ? precip.toFixed(2) + '"' : '0.00"', precipDetail],
-      ...(snow != null && snow > 0 ? [["Snowfall", snow.toFixed(1) + '"', "Snow total"]] : []),
-      ["Sunshine", sunshineHours(sunshine), "Duration of sunshine"],
-      ["Sun Times", fmtTime(sunriseStr), `Sunrise · Sunset ${fmtTime(sunsetStr)}`],
-      ["Degree Days", average != null ? `HDD ${Math.max(0, 65 - average)}` : "--", average != null ? `CDD ${Math.max(0, average - 65)}` : "--"],
+      ["Peak Wind", windMax != null ? `${Math.round(windMax)} mph` : "--", windGust != null ? `${Math.round(windGust)} mph gusts · ${windDirLabel(windDir)}` : "--", "wind"],
+      ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? Math.round(dew) + "°F" : "--"}`, "humidity"],
+      ["Peak UV", uv != null ? uv.toFixed(1) : "--", uvRiskLabel(uv), "uv"],
+      ["Avg Pressure", pressure != null ? (pressure * 0.02953).toFixed(2) + " inHg" : "--", pressure != null ? Math.round(pressure) + " hPa" : "--", "pressure"],
+      ["Cloud Cover", cloud != null ? `${Math.round(cloud)}%` : "--", cloudCoverLabel(cloud), "cloud"],
+      ["Precipitation", precip != null ? precip.toFixed(2) + '"' : '0.00"', precipDetail, "precip"],
+      ...(snow != null && snow > 0 ? [["Snowfall", snow.toFixed(1) + '"', "Snow total", "snow"]] : []),
+      ["Sunshine", sunshineHours(sunshine), "Duration of sunshine", "sunshine"],
+      ["Sun Times", fmtTime(sunriseStr), `Sunrise · Sunset ${fmtTime(sunsetStr)}`, "sunrise"],
+      ["Degree Days", average != null ? `HDD ${Math.max(0, 65 - average)}` : "--", average != null ? `CDD ${Math.max(0, average - 65)}` : "--", "degree"],
     ];
     result.innerHTML = `
       <div class="hist-hero tile">
@@ -2452,6 +2463,7 @@ async function renderClimate(date) {
           <p>${safeText(condition)}</p>
           <p class="hist-feels">Feels like ${feelsHigh != null ? Math.round(feelsHigh) + "°" : "--"} high / ${feelsLow != null ? Math.round(feelsLow) + "°" : "--"} low</p>
         </div>
+        <div class="hist-hero-icon">${WeatherIcons.fromText(condition, false)}</div>
       </div>
       ${hourlyHtml ? `
       <div class="tile hist-hourly-panel">
@@ -2459,9 +2471,12 @@ async function renderClimate(date) {
         <div class="hist-hourly-strip">${hourlyHtml}</div>
       </div>` : ""}
       <div class="hist-stats-grid">
-        ${stats.map(([label, value, detail]) => `
+        ${stats.map(([label, value, detail, icon]) => `
           <div class="hist-stat-card tile">
-            <p class="eyebrow">${safeText(label)}</p>
+            <div class="hist-stat-head">
+              ${icon ? uiIcon(icon) : ""}
+              <p class="eyebrow">${safeText(label)}</p>
+            </div>
             <strong>${safeText(value)}</strong>
             <small>${safeText(detail)}</small>
           </div>
@@ -3101,7 +3116,7 @@ async function addSurfaceAnalysisLayer() {
   // WPC surface analysis fronts and pressure centers via WMS.
   // Route through corsproxy.io — NOAA's nowCOAST WMS lacks CORS headers for
   // this workspace so direct browser fetch is blocked.
-  const wmsParams = "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=surface_analysis_fronts&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&STYLES=&BBOX=";
+  const wmsParams = "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=0&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&STYLES=&BBOX=";
   const wmsBase = `${SURFACE_WMS}?${wmsParams}`;
   const tileUrl = `${WORKER_PROXY}${encodeURIComponent(wmsBase)}{bbox-epsg-3857}`;
   radarMap.addSource("surface-source", {
@@ -3153,14 +3168,14 @@ async function addLsrLayer() {
 
   // LSR markers as custom HTML elements
   const LSR_ICONS = {
-    "T": { icon: "TOR", color: "#ef4444", label: "Tornado" },
-    "H": { icon: "HAL", color: "#f97316", label: "Hail" },
-    "W": { icon: "WND", color: "#38bdf8", label: "Wind" },
-    "F": { icon: "FLD", color: "#10b981", label: "Flood" },
-    "R": { icon: "RAN", color: "#60a5fa", label: "Rain" },
-    "S": { icon: "SNO", color: "#a5f3fc", label: "Snow" },
-    "Z": { icon: "ICE", color: "#bfdbfe", label: "Ice" },
-    "M": { icon: "STM", color: "#94a3b8", label: "TSTM" },
+    "T": { icon: "🌪", color: "#ef4444", label: "Tornado" },
+    "H": { icon: "🧊", color: "#f97316", label: "Hail" },
+    "W": { icon: "💨", color: "#38bdf8", label: "Wind" },
+    "F": { icon: "💧", color: "#10b981", label: "Flood" },
+    "R": { icon: "🌧", color: "#60a5fa", label: "Rain" },
+    "S": { icon: "❄", color: "#a5f3fc", label: "Snow" },
+    "Z": { icon: "🌬", color: "#bfdbfe", label: "Ice" },
+    "M": { icon: "⛈", color: "#94a3b8", label: "TSTM" },
   };
 
   features.forEach((feat, idx) => {
@@ -3168,7 +3183,7 @@ async function addLsrLayer() {
     const coords = feat.geometry?.coordinates;
     if (!coords) return;
     const typeKey = (p.type || "").toUpperCase().charAt(0);
-    const cfg = LSR_ICONS[typeKey] || { icon: "LSR", color: "#94a3b8", label: p.type || "LSR" };
+    const cfg = LSR_ICONS[typeKey] || { icon: "⚠", color: "#94a3b8", label: p.type || "LSR" };
 
     const wrap = document.createElement("div");
     wrap.className = "lsr-marker-wrap";

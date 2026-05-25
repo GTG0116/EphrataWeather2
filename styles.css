@@ -1033,6 +1033,24 @@ dt {
   text-transform: uppercase;
 }
 
+.detail-list dt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.detail-list dt .ui-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  font-size: 0;
+}
+
+.detail-list dt .ui-icon svg {
+  width: 11px;
+  height: 11px;
+}
+
 dd {
   margin: 5px 0 0;
   font-weight: 700;
@@ -1761,6 +1779,27 @@ dd {
 /* ── Historical result hero ───────────────────────── */
 .hist-hero {
   padding: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hist-hero-icon {
+  flex: 0 0 auto;
+}
+
+.hist-hero-icon .weather-icon {
+  width: 88px;
+  height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hist-hero-icon .weather-icon svg {
+  width: 88px;
+  height: 88px;
 }
 
 .hist-temp-range {
@@ -1813,7 +1852,27 @@ dd {
   font-weight: 800;
   font-size: 0.68rem;
   text-transform: uppercase;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+}
+
+.hist-hourly-icon {
+  margin: 2px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hist-hourly-icon .weather-icon {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hist-hourly-icon .weather-icon svg {
+  width: 30px;
+  height: 30px;
 }
 .hist-hourly-temp {
   font-size: 1.2rem;
@@ -1849,6 +1908,17 @@ dd {
   padding: 16px;
   min-height: 100px;
 }
+
+.hist-stat-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hist-stat-head .eyebrow {
+  margin: 0;
+}
+
 .hist-stat-card strong {
   display: block;
   margin: 8px 0 4px;
@@ -2391,6 +2461,8 @@ dd {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05) !important;
   backdrop-filter: blur(20px) !important;
   max-width: 320px !important;
+  max-height: 65vh !important;
+  overflow-y: auto !important;
   animation: popupIn 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both !important;
 }
 
@@ -2559,23 +2631,21 @@ dd {
    LSR MARKER ICONS
 ═══════════════════════════════════════════════ */
 .lsr-marker {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  border: 2px solid rgba(255,255,255,0.8);
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 2px solid rgba(255,255,255,0.85);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 8px;
-  letter-spacing: 0.02em;
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.55);
   transition: transform 160ms ease, box-shadow 160ms ease;
-  font-weight: 800;
   color: #fff;
   background: #ef4444;
   animation: lsrPop 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
 }
 
 @keyframes lsrPop {
