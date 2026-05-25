@@ -834,15 +834,25 @@ async function alertsPayload(lat, lon) {
     getJson("https://mesonet.agron.iastate.edu/geojson/sbw.geojson"),
     getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
   ]);
-  const nwsAlerts = nwsResult.status === "fulfilled"
-    ? (nwsResult.value.features || [])
-      .map(normalizeNwsAlert)
-      .filter(alert => !isWarningEvent(alert.event))
-    : [];
+  const allNwsFeatures = nwsResult.status === "fulfilled" ? (nwsResult.value.features || []) : [];
+  const nwsAlerts = allNwsFeatures
+    .map(normalizeNwsAlert)
+    .filter(alert => !isWarningEvent(alert.event));
+  const nwsWarningsByEvent = new Map();
+  allNwsFeatures
+    .map(normalizeNwsAlert)
+    .filter(alert => isWarningEvent(alert.event) && alert.description)
+    .forEach(alert => { if (!nwsWarningsByEvent.has(alert.event)) nwsWarningsByEvent.set(alert.event, alert); });
   const iemAlerts = iemResult.status === "fulfilled"
     ? (iemResult.value.features || [])
       .filter(feature => pointInGeometry(lon, lat, feature.geometry))
       .map(normalizeIemFeature)
+      .map(alert => {
+        if (!alert.description && nwsWarningsByEvent.has(alert.event)) {
+          return { ...alert, description: nwsWarningsByEvent.get(alert.event).description };
+        }
+        return alert;
+      })
     : [];
   const alerts = mergeAlerts(iemAlerts, nwsAlerts);
   const sources = [
@@ -1219,7 +1229,7 @@ async function fetchOutlookGeoJson(url) {
   try {
     return await getJson(url, { cache: "no-store" });
   } catch {
-    const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    const proxy = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     return getJson(proxy, { cache: "no-store" });
   }
 }
@@ -1596,6 +1606,17 @@ function renderHourlyChart() {
   const hourly = (weatherState.hourly || []).slice(0, 24);
   if (!hourly.length) { wrap.innerHTML = ""; return; }
 
+  if (!wrap.offsetWidth) {
+    requestAnimationFrame(() => renderHourlyChart());
+    return;
+  }
+  if (!wrap._chartResizeObserver) {
+    wrap._chartResizeObserver = new ResizeObserver(() => {
+      if (weatherState.hourly?.length) renderHourlyChart();
+    });
+    wrap._chartResizeObserver.observe(wrap);
+  }
+
   const METRICS = {
     temperature: { unit: "°",   color: "#f97316", getValue: h => h.temperature ?? null,                      label: "°F" },
     wind:        { unit: " mph",color: "#38bdf8", getValue: h => parseInt(h.windSpeed, 10) || 0,              label: "mph" },
@@ -1747,6 +1768,7 @@ function alertPriority(alert) {
   if (event.includes("tornado warning") && (tags.includes("pds") || tags.includes("observed"))) return 900;
   if (event.includes("tornado warning")) return 800;
   if (event.includes("flash flood warning") && tags.includes("emergency")) return 760;
+  if (event.includes("flash flood warning") && tags.includes("considerable")) return 720;
   if (event.includes("severe thunderstorm warning") && /destructive|extreme|emergency/.test(tags)) return 740;
   if (event.includes("severe thunderstorm warning")) return 700;
   if (event.includes("flash flood warning")) return 680;
@@ -2090,9 +2112,10 @@ function alertAdvice(alert) {
 // Per-alert-type level tables shown in the alert modal
 const ALERT_LEVEL_CATEGORIES = {
   "Flash Flood Warning": [
-    { label: "WARNING",   color: "#10b981", desc: "Flash flooding is occurring or imminent. Move to higher ground immediately. Never drive through flooded roads." },
-    { label: "OBSERVED",  color: "#22d3ee", desc: "Flash flooding confirmed by a trained spotter or emergency manager. Life-threatening conditions are ongoing." },
-    { label: "EMERGENCY", color: "#dc2626", desc: "Flash Flood Emergency — catastrophic, life-threatening flooding is in progress. Move to safety immediately. Extremely rare." },
+    { label: "WARNING",      color: "#10b981", desc: "Flash flooding is occurring or imminent. Move to higher ground immediately. Never drive through flooded roads." },
+    { label: "OBSERVED",     color: "#22d3ee", desc: "Flash flooding confirmed by a trained spotter or emergency manager. Life-threatening conditions are ongoing." },
+    { label: "CONSIDERABLE", color: "#f97316", desc: "Particularly dangerous flash flooding — life-threatening conditions are occurring or imminent. Move to higher ground immediately and stay out of all flood-prone areas." },
+    { label: "EMERGENCY",    color: "#dc2626", desc: "Catastrophic, life-threatening flooding is in progress. This is an exceptionally rare and extreme event — move to safety immediately." },
   ],
   "Tornado Warning": [
     { label: "WARNING",   color: "#dc2626", desc: "A tornado is imminent or occurring. Take shelter immediately in a lowest-floor interior room away from windows." },
