@@ -129,13 +129,24 @@ async function activeAlerts(location, env) {
     event: feature.properties?.event || "Weather Alert",
     headline: feature.properties?.headline || null,
     expires: feature.properties?.expires || null,
+    parameters: feature.properties?.parameters || {},
   })).filter(alert => alert.id);
+}
+
+function alertDisplayEvent(alert) {
+  const event = alert.event || "Weather Alert";
+  const params = alert.parameters || {};
+  const floodThreat = String(params.flashFloodDamageThreat?.[0] || "").toLowerCase();
+  if (event.toLowerCase() === "flash flood warning" && floodThreat === "catastrophic") {
+    return "Flash Flood Emergency";
+  }
+  return event;
 }
 
 async function sendPush(subscription, alert, location, env) {
   const jwt = await vapidJwt(subscription.endpoint, env);
 
-  const eventName = alert.event || "Weather Alert";
+  const eventName = alertDisplayEvent(alert);
   const expiresText = formatExpiration(alert.expires, location);
   const body = expiresText
     ? `${eventName} expires ${expiresText}`
