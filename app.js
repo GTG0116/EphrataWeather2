@@ -726,6 +726,9 @@ function normalizeAlertTag(value) {
   if (!text) return "";
   if (/observed/i.test(text)) return "Observed";
   if (/radar indicated/i.test(text)) return "Radar indicated";
+  if (/^considerable$/i.test(text)) return "Considerable threat";
+  if (/^destructive$/i.test(text)) return "Destructive";
+  if (/^catastrophic$/i.test(text)) return "Catastrophic threat";
   return text;
 }
 
@@ -775,6 +778,7 @@ function tagsForAlert(alert) {
     p.tornadoDetection?.[0],
     p.thunderstormDamageThreat?.[0],
     p.flashFloodDetection?.[0],
+    p.flashFloodDamageThreat?.[0],
     p.maxWindGust?.[0] && `Wind ${formatWindTag(p.maxWindGust[0])}`,
     p.maxHailSize?.[0] && `Hail ${formatHailTag(p.maxHailSize[0])}`,
     detectionTag,
@@ -848,8 +852,9 @@ async function alertsPayload(lat, lon) {
       .filter(feature => pointInGeometry(lon, lat, feature.geometry))
       .map(normalizeIemFeature)
       .map(alert => {
-        if (!alert.description && nwsWarningsByEvent.has(alert.event)) {
-          return { ...alert, description: nwsWarningsByEvent.get(alert.event).description };
+        const nwsMatch = nwsWarningsByEvent.get(alert.event);
+        if (nwsMatch?.description) {
+          return { ...alert, description: nwsMatch.description };
         }
         return alert;
       })
@@ -3054,7 +3059,7 @@ async function addWpcRainfallLayer() {
     id: "wpc-rain-fill", type: "fill", source: "wpc-rain-source",
     paint: {
       "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "MRGL", "#66d4ff", "SLGT", "#7dce82", "MDT", "#f5d020", "HIGH", "#e05020",
+        "MRGL", "#66cc66", "SLGT", "#ffe066", "MDT", "#ff6060", "HIGH", "#ff40ff",
         "rgba(0,0,0,0)"],
       "fill-opacity": 0.46,
     },
@@ -3063,7 +3068,7 @@ async function addWpcRainfallLayer() {
     id: "wpc-rain-line", type: "line", source: "wpc-rain-source",
     paint: {
       "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "MRGL", "#40b0e0", "SLGT", "#50aa50", "MDT", "#c8aa00", "HIGH", "#b03010",
+        "MRGL", "#44bb44", "SLGT", "#ddbb00", "MDT", "#cc2222", "HIGH", "#cc00cc",
         "rgba(0,0,0,0)"],
       "line-width": 1.4,
     },
@@ -3092,18 +3097,15 @@ async function addWpcRainfallLayer() {
 
 async function addSurfaceAnalysisLayer() {
   if (!radarMap || !mapLoaded) return;
-  // NOAA nowCOAST surface analysis fronts and pressure centers as WMS
-  const params = [
-    "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
-    "FORMAT=image%2Fpng", "TRANSPARENT=true",
-    "LAYERS=surface_analysis_fronts",
-    "CRS=EPSG%3A3857", "WIDTH=256", "HEIGHT=256",
-    "STYLES=",
-  ].join("&");
-
+  // WPC surface analysis fronts and pressure centers via WMS.
+  // Route through corsproxy.io — NOAA's nowCOAST WMS lacks CORS headers for
+  // this workspace so direct browser fetch is blocked.
+  const wmsParams = "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=surface_analysis_fronts&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&STYLES=&BBOX=";
+  const wmsBase = `${SURFACE_WMS}?${wmsParams}`;
+  const tileUrl = `https://corsproxy.io/?${encodeURIComponent(wmsBase)}{bbox-epsg-3857}`;
   radarMap.addSource("surface-source", {
     type: "raster",
-    tiles: [`${SURFACE_WMS}?${params}&BBOX={bbox-epsg-3857}`],
+    tiles: [tileUrl],
     tileSize: 256,
     attribution: "NOAA WPC Surface Analysis",
   });
