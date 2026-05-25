@@ -244,7 +244,7 @@ let radarFrameTransitionTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail
 let activeSpcDay  = 1;       // 1, 2, or 3
 let activeBasemap = "dark-v11";
-let activeSatelliteType = "geocolor";
+let activeSatelliteType = "infrared";
 let satelliteActive = false;
 let hourlyChartMetric = "temperature";
 let frame = 0;
@@ -3289,10 +3289,10 @@ function renderSatelliteSubControls() {
   const typeEl = document.querySelector("#satelliteTypeBtns");
   if (!typeEl) return;
   const types = [
-    { id: "geocolor",   label: "Visible"     },
-    { id: "truecolor",  label: "Shortwave"   },
     { id: "infrared",   label: "Infrared"    },
     { id: "watervapor", label: "Water Vapor" },
+    { id: "geocolor",   label: "Visible"     },
+    { id: "truecolor",  label: "Shortwave"   },
   ];
   typeEl.innerHTML = types.map(t =>
     `<button type="button" data-sat-type="${t.id}" class="${t.id === activeSatelliteType ? "active" : ""}">${t.label}</button>`
