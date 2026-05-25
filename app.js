@@ -1909,7 +1909,7 @@ function renderDaily() {
     const spcDay = index < 3 ? (weatherState.spcDays?.[index] || null) : null;
     const spcCat = spcDay?.catLabel || null;
     const spcColor = spcRiskColor(spcCat);
-    const spcBadge = spcColor
+    const spcBadge = (spcColor && spcCat !== "TSTM")
       ? `<span class="spc-risk-badge" style="background:${spcColor}22;color:${spcColor};border:1px solid ${spcColor}88" title="SPC Day ${index + 1} ${spcLabel(spcCat)} risk"><svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 110 1.5.75.75 0 010-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg> ${safeText(spcCat)}</span>`
       : "";
 
@@ -2845,7 +2845,7 @@ async function addSatelliteLayer() {
   });
   radarMap.addSource("satellite-source", {
     type: "raster",
-    tiles: [`/api/wmstile?${wmsParams.toString()}&BASE_URL=${encodeURIComponent(SATELLITE_WMS)}&BBOX={bbox-epsg-3857}`],
+    tiles: [`${SATELLITE_WMS}?${wmsParams.toString()}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA nowCOAST GOES Satellite",
   });
