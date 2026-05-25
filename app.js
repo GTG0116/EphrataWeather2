@@ -290,6 +290,8 @@ let liveLocationWatchId = null;
 let currentSunrise = null;   // actual Date object
 let currentSunset  = null;   // actual Date object
 let popupWiredLayers = new Set(); // track which layers have popup handlers
+let alertPopupRegistry = new Map(); // popupId → features array for alert popups
+let alertPopupCounter = 0;
 
 async function getJson(url, options = {}) {
   const response = await fetch(url, {
@@ -788,15 +790,24 @@ function tagsForAlert(alert) {
     .filter(item => !/^immediate$/i.test(item));
 }
 
+function iemEventSeverity(eventName) {
+  const e = (eventName || "").toLowerCase();
+  if (/tornado warning/.test(e)) return "Extreme";
+  if (/warning/.test(e)) return "Severe";
+  if (/watch/.test(e)) return "Moderate";
+  return "Minor";
+}
+
 function normalizeIemFeature(feature) {
   const p = feature.properties || {};
   const key = `${p.phenomena}.${p.significance}`;
   const text = [p.product_text, p.producttext, p.product_narrative, p.narrative].filter(Boolean).join("\n\n");
+  const eventName = iemPhenomenaMap[key] || key;
   return {
     id: p.uri || p.id || `${key}-${p.issue}`,
-    event: iemPhenomenaMap[key] || key,
-    headline: iemPhenomenaMap[key] || p.product_id || "Storm-Based Warning",
-    severity: p.damagetag || p.windthreat || p.hailthreat || "Warning",
+    event: eventName,
+    headline: eventName || p.product_id || "Storm-Based Warning",
+    severity: iemEventSeverity(eventName),
     urgency: p.urgency || "",
     effective: p.issue,
     expires: p.expire,
@@ -2167,8 +2178,10 @@ const ALERT_TIPS_TITLES = {
   "Flash Flood Watch":     "Prepare Now",
 };
 
-function showAlertDetails(index) {
-  const alert = weatherState.alerts?.[index];
+function showAlertDetails(indexOrAlert) {
+  const alert = typeof indexOrAlert === "number"
+    ? weatherState.alerts?.[indexOrAlert]
+    : indexOrAlert;
   if (!alert) return;
   const sections = parseAlertSections(alert.description);
   const event = alert.event || "Weather Alert";
@@ -3196,7 +3209,7 @@ async function nwsAlertFeatureCollection() {
   return { type: "FeatureCollection", features };
 }
 
-function buildAlertFeatureHtml(feature, idx, total) {
+function buildAlertFeatureHtml(feature, idx, total, popupId) {
   const p = feature.properties || {};
   const isIem = p.phenomena != null;
   let title, subtitle, detailHtml, iconStyle;
@@ -3243,7 +3256,7 @@ function buildAlertFeatureHtml(feature, idx, total) {
     </div>
     ${navHtml}
     ${detailHtml}
-    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${idx})">View Alert Details</button>`;
+    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${popupId},${idx})">View Alert Details</button>`;
 }
 
 async function addAlertsLayer() {
@@ -3329,12 +3342,15 @@ async function addAlertsLayer() {
 
       let idx = 0;
       window._alertMapFeatures = features;
+      const popupId = ++alertPopupCounter;
+      alertPopupRegistry.set(popupId, features);
       const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
+      popup.on("close", () => alertPopupRegistry.delete(popupId));
       window._alertNav = delta => {
         idx = Math.max(0, Math.min(features.length - 1, idx + delta));
-        popup.setHTML(buildAlertFeatureHtml(features[idx], idx, features.length));
+        popup.setHTML(buildAlertFeatureHtml(features[idx], idx, features.length, popupId));
       };
-      popup.setHTML(buildAlertFeatureHtml(features[0], 0, features.length));
+      popup.setHTML(buildAlertFeatureHtml(features[0], 0, features.length, popupId));
     };
 
     alertClickLayers.forEach(layer => {
@@ -3821,31 +3837,48 @@ setInterval(async () => {
   }
 }, 3 * 60 * 1000);
 
-// Find matching alert in weatherState.alerts from a map popup click
-window._viewAlertFromMapFeature = function(featureIdx) {
-  const feature = window._alertMapFeatures?.[featureIdx];
+// Show alert details from a map popup click. Uses per-popup registry so multiple
+// open popups don't interfere with each other.
+window._viewAlertFromMapFeature = function(popupId, featureIdx) {
+  const features = alertPopupRegistry.get(popupId) ?? window._alertMapFeatures;
+  const feature = features?.[featureIdx];
   if (!feature) return;
   const p = feature.properties || {};
   const alerts = weatherState.alerts || [];
-  let alertIdx = -1;
 
   if (p.phenomena != null) {
-    // IEM storm-based warning — match by event name
+    // IEM storm-based warning — try matching by event name first
     const rawKey = `${p.phenomena}.${p.significance}`;
     const eventName = iemPhenomenaMap[rawKey.toUpperCase()] || iemPhenomenaMap[rawKey] || rawKey;
-    alertIdx = alerts.findIndex(a =>
+    const alertIdx = alerts.findIndex(a =>
       a.event === eventName ||
       a.event?.toLowerCase() === eventName.toLowerCase()
     );
+    if (alertIdx !== -1) {
+      showAlertDetails(alertIdx);
+    } else {
+      // Warning polygon is outside the user's location — normalize and show directly
+      showAlertDetails(normalizeIemFeature(feature));
+    }
   } else {
-    // NWS alert — match by event type
+    // NWS zone/county alert — try matching by event type first
     const evtLower = (p.event || "").toLowerCase();
-    alertIdx = alerts.findIndex(a => a.event?.toLowerCase() === evtLower);
-  }
-
-  if (alertIdx !== -1) {
-    showAlertDetails(alertIdx);
-  } else {
-    alertsPanel?.scrollIntoView({ behavior: "smooth" });
+    const alertIdx = alerts.findIndex(a => a.event?.toLowerCase() === evtLower);
+    if (alertIdx !== -1) {
+      showAlertDetails(alertIdx);
+    } else {
+      // Show directly from feature properties
+      showAlertDetails({
+        event: p.event || "Weather Alert",
+        severity: p.severity || "Moderate",
+        tags: [],
+        description: p.description || "",
+        instruction: p.instruction || "",
+        expires: p.expires,
+        areaDesc: p.zoneName || p.areaDesc || "",
+        source: "NWS",
+        headline: p.headline || p.event || "Weather Alert",
+      });
+    }
   }
 };
