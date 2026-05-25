@@ -1241,6 +1241,28 @@ function normalizeSpcData(data) {
   };
 }
 
+// WPC ERO features use an OUTLOOK text field and a dn numeric field instead of LABEL short codes.
+function normalizeWpcEroData(data) {
+  if (!data?.features) return data || { features: [] };
+  const outlookMap = { marginal: "MRGL", slight: "SLGT", moderate: "MDT", high: "HIGH" };
+  const dnMap      = { 1: "MRGL", 2: "SLGT", 3: "MDT", 4: "HIGH" };
+  return {
+    ...data,
+    features: data.features.map(feature => {
+      const props = feature.properties || {};
+      let label = String(props.LABEL ?? props.label ?? "").toUpperCase();
+      if (!label) {
+        const outlook = String(props.OUTLOOK ?? props.outlook ?? "").toLowerCase();
+        for (const [key, val] of Object.entries(outlookMap)) {
+          if (outlook.startsWith(key)) { label = val; break; }
+        }
+      }
+      if (!label && props.dn != null) label = dnMap[props.dn] || "";
+      return { ...feature, properties: { ...props, LABEL: label } };
+    }),
+  };
+}
+
 function normalizeDroughtData(data) {
   if (!data?.features) return data || { features: [] };
   function category(props = {}) {
@@ -2922,18 +2944,24 @@ async function addSpcLayer() {
   renderSpcLegend();
 }
 
+// MapServer layer IDs: Day1 Outlook=1, Day2 Outlook=4
+const FIRE_WX_LAYERS = { 1: 1, 2: 4 };
+// MapServer dn values: 5=Elevated, 8=Critical, 10=Extreme
+const FIRE_WX_DN_LABELS = { 5: "ELEVATED", 8: "CRITICAL", 10: "EXTREME" };
+
 async function addFireWeatherLayer() {
   if (!radarMap || !mapLoaded) return;
   const day = activeFireDay;
   if (!fireWeatherDataCache[day]) {
-    const layer = day - 1; // MapServer layer 0 = Day 1, layer 1 = Day 2
+    const layer = FIRE_WX_LAYERS[day];
     const queryUrl = `${FIRE_WX_MAPSERVER_BASE}/${layer}/query?where=1%3D1&outFields=*&f=geojson&outSR=4326`;
     const raw = await fetchOutlookGeoJson(queryUrl);
     fireWeatherDataCache[day] = {
       ...raw,
       features: (raw?.features || []).map(feat => {
         const p = feat.properties || {};
-        const label = String(p.label ?? p.Label ?? p.LABEL ?? p.risk ?? p.Risk ?? p.RISK ?? "").toUpperCase();
+        const label = FIRE_WX_DN_LABELS[p.dn]
+          ?? String(p.label ?? p.Label ?? p.LABEL ?? p.risk ?? p.Risk ?? p.RISK ?? "").toUpperCase();
         return { ...feat, properties: { ...p, LABEL: label } };
       }),
     };
@@ -2943,7 +2971,7 @@ async function addFireWeatherLayer() {
     id: "fire-fill", type: "fill", source: "fire-source",
     paint: {
       "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "ELEVATED", "#fbbf24", "CRITICAL", "#f97316", "EXTREME CRITICAL", "#ef4444",
+        "ELEVATED", "#fbbf24", "CRITICAL", "#f97316", "EXTREME", "#ef4444",
         "rgba(0,0,0,0)"],
       "fill-opacity": 0.44,
     },
@@ -2952,7 +2980,7 @@ async function addFireWeatherLayer() {
     id: "fire-line", type: "line", source: "fire-source",
     paint: {
       "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "ELEVATED", "#d97706", "CRITICAL", "#ea580c", "EXTREME CRITICAL", "#b91c1c",
+        "ELEVATED", "#d97706", "CRITICAL", "#ea580c", "EXTREME", "#b91c1c",
         "rgba(0,0,0,0)"],
       "line-width": 1.5,
     },
@@ -2962,7 +2990,7 @@ async function addFireWeatherLayer() {
       const f = ev.features?.[0];
       if (!f) return;
       const label = f.properties?.LABEL || "Fire Weather Area";
-      const labelNice = label === "EXTREME CRITICAL" ? "Extreme Critical" : label.charAt(0) + label.slice(1).toLowerCase();
+      const labelNice = { ELEVATED: "Elevated", CRITICAL: "Critical", EXTREME: "Extreme" }[label] ?? (label.charAt(0) + label.slice(1).toLowerCase());
       new mapboxgl.Popup({ offset: 8 })
         .setLngLat(ev.lngLat)
         .setHTML(`<div class="popup-header">
@@ -2983,7 +3011,7 @@ async function addWpcRainfallLayer() {
   if (!radarMap || !mapLoaded) return;
   const day = activeWpcDay;
   if (!wpcRainDataCache[day]) {
-    wpcRainDataCache[day] = normalizeSpcData(await fetchOutlookGeoJson(WPC_ERO_URLS[day - 1]));
+    wpcRainDataCache[day] = normalizeWpcEroData(await fetchOutlookGeoJson(WPC_ERO_URLS[day - 1]));
   }
   radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainDataCache[day] });
   radarMap.addLayer({
