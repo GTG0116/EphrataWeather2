@@ -6,11 +6,13 @@ const RADAR_FRAME_MS = 700;
 // Fill these after deploying the alert worker described in NOTIFICATIONS.md.
 const PUSH_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0";
 const PUSH_SUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/subscribe";
-// SPC Categorical + probabilistic outlooks, Days 1-3
+// SPC Categorical + probabilistic outlooks, Days 1-5 (days 4-5 categorical only)
 const SPC_URLS = {
   cat:  ["https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
          "https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson",
-         "https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson"],
+         "https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson",
+         "https://www.spc.noaa.gov/products/outlook/day4otlk_cat.nolyr.geojson",
+         "https://www.spc.noaa.gov/products/outlook/day5otlk_cat.nolyr.geojson"],
   torn: ["https://www.spc.noaa.gov/products/outlook/day1otlk_torn.nolyr.geojson",
          "https://www.spc.noaa.gov/products/outlook/day2otlk_torn.nolyr.geojson",
          "https://www.spc.noaa.gov/products/outlook/day3otlk_torn.nolyr.geojson"],
@@ -24,11 +26,11 @@ const SPC_URLS = {
 
 const SPC_CAT_RANK = { TSTM: 1, MRGL: 2, SLGT: 3, ENH: 4, MDT: 5, HIGH: 6 };
 
-// SPC Fire Weather outlook GeoJSON
-const FIRE_WX_URLS = [
-  "https://www.spc.noaa.gov/products/fire_wx/day1otlk_fire.nolyr.geojson",
-  "https://www.spc.noaa.gov/products/fire_wx/day2otlk_fire.nolyr.geojson",
-];
+// NWS vector MapServer for SPC fire weather outlook (Day 1 layer 0, Day 2 layer 1)
+const FIRE_WX_MAPSERVER_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/fire_weather/SPC_firewx/MapServer";
+
+// WPC Excessive Rainfall Outlook (ERO) GeoJSON
+const WPC_ERO_URL = "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day1_Latest.geojson";
 
 // IEM storm-based warning polygons for map
 const IEM_SBW_URL = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson";
@@ -264,6 +266,7 @@ let mapLoaded = false;
 let spcLayerData = {};       // key: "day_type" e.g. "1_cat"
 let droughtLayerData = null;
 let fireWeatherData = null;
+let wpcRainData = null;
 let lsrData = null;
 let alertPolygonData = null;
 let nwsAlertPolygonData = null;
@@ -612,21 +615,46 @@ function pointInGeometry(lon, lat, geometry) {
 }
 
 const iemPhenomenaMap = {
-  "TO.W": "Tornado Warning",
-  "SV.W": "Severe Thunderstorm Warning",
-  "FF.W": "Flash Flood Warning",
-  "FA.Y": "Flood Advisory",
+  "TO.W": "Tornado Warning",     "TO.A": "Tornado Watch",
+  "SV.W": "Severe Thunderstorm Warning", "SV.A": "Severe Thunderstorm Watch",
+  "FF.W": "Flash Flood Warning", "FF.A": "Flash Flood Watch",
+  "FA.W": "Flood Warning",       "FA.Y": "Flood Advisory",       "FA.A": "Flood Watch",
   "SQ.W": "Snow Squall Warning",
-  "MA.W": "Special Marine Warning",
+  "MA.W": "Special Marine Warning", "MA.A": "Special Marine Watch",
+  "WS.W": "Winter Storm Warning", "WS.A": "Winter Storm Watch",   "WW.Y": "Winter Weather Advisory",
+  "BZ.W": "Blizzard Warning",    "IS.W": "Ice Storm Warning",
+  "ZR.Y": "Freezing Rain Advisory", "ZF.Y": "Freezing Fog Advisory",
+  "LE.W": "Lake Effect Snow Warning", "LW.Y": "Lake Wind Advisory",
+  "HT.Y": "Heat Advisory",       "EC.W": "Extreme Cold Warning",
+  "WI.Y": "Wind Advisory",       "HW.W": "High Wind Warning",    "HW.A": "High Wind Watch",
+  "EW.W": "Extreme Wind Warning",
+  "DS.W": "Dust Storm Warning",  "DU.Y": "Blowing Dust Advisory",
+  "SM.Y": "Dense Smoke Advisory", "FG.Y": "Dense Fog Advisory",
+  "HZ.W": "Hard Freeze Warning", "FZ.W": "Freeze Warning",       "FZ.A": "Freeze Watch",
+  "FR.Y": "Frost Advisory",
+  "CF.W": "Coastal Flood Warning","CF.A": "Coastal Flood Watch",  "CF.Y": "Coastal Flood Advisory",
+  "LS.W": "Lakeshore Flood Warning","LS.A": "Lakeshore Flood Watch","LS.Y": "Lakeshore Flood Advisory",
+  "RP.S": "Rip Current Statement","SU.W": "High Surf Warning",    "SU.Y": "High Surf Advisory",
+  "SC.Y": "Small Craft Advisory", "SW.Y": "Small Craft Advisory for Hazardous Seas",
+  "GL.W": "Gale Warning",        "GL.A": "Gale Watch",
+  "SR.W": "Storm Warning",       "SR.A": "Storm Watch",
+  "SE.W": "Hazardous Seas Warning",
+  "HU.W": "Hurricane Warning",   "HU.A": "Hurricane Watch",
+  "TR.W": "Tropical Storm Warning","TR.A": "Tropical Storm Watch",
+  "TS.W": "Tsunami Warning",     "TS.A": "Tsunami Watch",
+  "AF.W": "Ashfall Warning",     "AF.Y": "Ashfall Advisory",
+  "VO.W": "Volcano Warning",
+  "UP.W": "Ice Accretion Warning","UP.Y": "Ice Accretion Advisory",
+  "MH.W": "Mud/Landslide Warning","MH.Y": "Mud/Landslide Advisory",
 };
 
 const ALERT_PHENOMENA_COLORS = {
   TO: { fill: "#dc2626", line: "#ef4444" },
   SV: { fill: "#f97316", line: "#fb923c" },
   FF: { fill: "#10b981", line: "#34d399" },
-  FA: { fill: "#22d3ee", line: "#67e8f9" },
   SQ: { fill: "#a78bfa", line: "#c4b5fd" },
   MA: { fill: "#38bdf8", line: "#7dd3fc" },
+  // FA (Flood Advisory) intentionally excluded — not severe enough for map display
 };
 
 const NWS_ALERT_EVENT_COLORS = [
@@ -2035,31 +2063,201 @@ function alertAdvice(alert) {
   return "Stay weather-aware and follow local emergency guidance.";
 }
 
+// Per-alert-type level tables shown in the alert modal
+const ALERT_LEVEL_CATEGORIES = {
+  "Flash Flood Warning": [
+    { label: "WARNING",   color: "#10b981", desc: "Flash flooding is occurring or imminent. Move to higher ground immediately. Never drive through flooded roads." },
+    { label: "OBSERVED",  color: "#22d3ee", desc: "Flash flooding confirmed by a trained spotter or emergency manager. Life-threatening conditions are ongoing." },
+    { label: "EMERGENCY", color: "#dc2626", desc: "Flash Flood Emergency — catastrophic, life-threatening flooding is in progress. Move to safety immediately. Extremely rare." },
+  ],
+  "Tornado Warning": [
+    { label: "WARNING",   color: "#dc2626", desc: "A tornado is imminent or occurring. Take shelter immediately in a lowest-floor interior room away from windows." },
+    { label: "PDS",       color: "#a855f7", desc: "Particularly Dangerous Situation — a long-track, violent tornado is likely. Extreme caution and immediate shelter required." },
+    { label: "EMERGENCY", color: "#7c3aed", desc: "Tornado Emergency — a confirmed, extremely dangerous tornado is causing catastrophic damage. Act immediately." },
+  ],
+  "Severe Thunderstorm Warning": [
+    { label: "WARNING",     color: "#f97316", desc: "Damaging winds and/or large hail from severe thunderstorms. Move indoors and away from windows." },
+    { label: "CONSIDERABLE",color: "#ef4444", desc: "Particularly dangerous storm with winds 70–80+ mph or hail 1.75\"+ diameter. Seek sturdy shelter immediately." },
+    { label: "DESTRUCTIVE", color: "#991b1b", desc: "Extremely dangerous storm with wind damage threat 80+ mph and/or hail 2.75\"+ diameter. Catastrophic damage likely." },
+  ],
+  "Tornado Watch": [
+    { label: "WATCH",     color: "#a855f7", desc: "Conditions are favorable for tornadoes in the watch area. Review your shelter plan and stay alert." },
+    { label: "PDS WATCH", color: "#7c3aed", desc: "Particularly Dangerous Situation Watch — significant, long-track tornadoes are possible. Take action now." },
+  ],
+  "Severe Thunderstorm Watch": [
+    { label: "WATCH", color: "#f59e0b", desc: "Conditions are favorable for severe thunderstorms (large hail and/or damaging winds) in and near the watch area." },
+  ],
+  "Flash Flood Watch": [
+    { label: "WATCH", color: "#14b8a6", desc: "Conditions are favorable for flash flooding. Be ready to move to higher ground on short notice." },
+  ],
+  "Winter Storm Warning": [
+    { label: "WARNING",  color: "#38bdf8", desc: "Heavy snow (6\"+ or 4\"+ with wind) or significant ice accretion expected. Travel will be dangerous or impossible." },
+    { label: "BLIZZARD", color: "#7dd3fc", desc: "Snow and sustained winds 35+ mph causing whiteout conditions. Do not travel. Potentially life-threatening." },
+  ],
+};
+
+// Custom safety tips per alert type. If not defined, precautionary actions from alert text are shown.
+const ALERT_CUSTOM_TIPS = {
+  "Flash Flood Warning": [
+    "Move away from streams, rivers, and low-lying areas immediately",
+    "Never walk, swim, or drive through flood waters — Turn Around, Don't Drown",
+    "Just 6 inches of fast-moving water can knock you down; 12 inches can carry a vehicle",
+    "Evacuate immediately if directed by local officials",
+  ],
+  "Tornado Warning": [
+    "Go immediately to a basement or interior room on the lowest floor of a sturdy building",
+    "Stay away from windows, doors, and outside walls — cover your head",
+    "Mobile homes are NOT safe even if tied down — go to a sturdy building",
+    "If caught outside, find the nearest substantial building or ditch and lie flat",
+    "Do not try to outrun a tornado in a vehicle — abandon the car if a building is nearby",
+  ],
+  "Severe Thunderstorm Warning": [
+    "Move indoors to a sturdy building immediately and stay away from windows",
+    "Unplug electronics and avoid contact with plumbing during lightning",
+    "If outdoors, avoid tall trees, open fields, and metal objects — seek a low depression",
+    "Large hail can shatter glass — stay away from skylights and windows",
+    "Be prepared for sudden power outages",
+  ],
+  "Tornado Watch": [
+    "Know the location of your nearest shelter and have it ready",
+    "Monitor local weather alerts and have a way to receive warnings (phone, radio)",
+    "Watches can become Warnings with little notice — act quickly when upgraded",
+    "Charge your devices and prepare an emergency kit",
+  ],
+  "Severe Thunderstorm Watch": [
+    "Stay weather-aware and check for warnings frequently",
+    "Secure outdoor furniture and loose objects that can become projectiles",
+    "Plan where you'll shelter if a warning is issued",
+    "Avoid outdoor activities until the threat has passed",
+  ],
+  "Winter Storm Warning": [
+    "Avoid travel if possible — road conditions may be life-threatening",
+    "If you must travel, carry an emergency kit with blankets, food, water, and a flashlight",
+    "Keep extra food, water, and medication at home for extended outages",
+    "Never run a generator, grill, or kerosene heater indoors",
+    "Check on elderly neighbors and those without adequate heat",
+  ],
+  "Flash Flood Watch": [
+    "Identify the lowest floor of your building as your rally point if flooding occurs",
+    "Avoid camping or parking along streams and rivers",
+    "Never drive through standing water or road closures — water depth is deceptive",
+  ],
+};
+
+const ALERT_TIPS_TITLES = {
+  "Flash Flood Warning":   "Move to Higher Ground Now",
+  "Tornado Warning":       "Take Shelter Immediately",
+  "Severe Thunderstorm Warning": "Seek Shelter Now",
+  "Tornado Watch":         "Be Prepared",
+  "Severe Thunderstorm Watch": "Stay Alert",
+  "Winter Storm Warning":  "Stay Safe Indoors",
+  "Flash Flood Watch":     "Prepare Now",
+};
+
 function showAlertDetails(index) {
   const alert = weatherState.alerts?.[index];
   if (!alert) return;
   const sections = parseAlertSections(alert.description);
-  const hazardRows = [
-    severeDetectionTag(alert) && ["Detection", severeDetectionTag(alert)],
-    alert.iem_windtag && ["Max Wind", formatWindTag(alert.iem_windtag)],
-    alert.iem_hailtag && ["Max Hail", formatHailTag(alert.iem_hailtag)],
-    alert.iem_damagetag && ["Damage Threat", alert.iem_damagetag],
-    alert.iem_tornadotag && ["Tornado Tag", alert.iem_tornadotag],
-    alert.iem_floodtag && ["Flood Tag", alert.iem_floodtag],
+  const event = alert.event || "Weather Alert";
+  const severity = alert.severity || "";
+  const tags = alert.tags || [];
+  const currentTagsLower = tags.map(t => t.toLowerCase());
+
+  modalEyebrow.textContent = "Weather Alert";
+  modalTitle.textContent = event;
+
+  // Severity badge colors
+  const sevBg = { Extreme: "#dc262622", Severe: "#f9731622", Moderate: "#f59e0b22", Minor: "#22d3ee22" };
+  const sevColor = { Extreme: "#ef4444", Severe: "#fb923c", Moderate: "#fbbf24", Minor: "#67e8f9" };
+  const bg = sevBg[severity] || "rgba(148,163,184,0.15)";
+  const col = sevColor[severity] || "#94a3b8";
+
+  // Tags row
+  const tagsHtml = `<div class="alert-modal-tags">
+    ${severity ? `<span class="alert-modal-tag" style="background:${bg};color:${col};border:1px solid ${col}55">${safeText(severity)}</span>` : ""}
+    ${tags.map(t => `<span class="alert-modal-tag">${safeText(t)}</span>`).join("")}
+  </div>`;
+
+  // Meta
+  const expires = alert.expires ? new Date(alert.expires).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "--";
+  const areas = alert.areaDesc || selectedLocation.name;
+  const metaHtml = `<div class="alert-modal-meta">
+    <span>Expires: ${safeText(expires)}</span>
+    <span class="alert-modal-area">${safeText(areas)}</span>
+  </div>`;
+
+  // Main sections — WHAT and IMPACTS most prominent
+  const makeSec = (label, text) => text ? `<div class="alert-section">
+    <div class="alert-section-label">${label}</div>
+    <p>${safeText(text)}</p>
+  </div>` : "";
+
+  const whatHtml    = makeSec("WHAT",    sections.WHAT);
+  const impactsHtml = makeSec("IMPACTS", sections.IMPACTS);
+  const whereHtml   = makeSec("WHERE",   sections.WHERE);
+  const whenHtml    = makeSec("WHEN",    sections.WHEN);
+
+  // Hazard tags
+  const hazardItems = [
+    severeDetectionTag(alert) && `Detection: ${severeDetectionTag(alert)}`,
+    alert.iem_windtag    && `Wind: ${formatWindTag(alert.iem_windtag)}`,
+    alert.iem_hailtag    && `Hail: ${formatHailTag(alert.iem_hailtag)}`,
+    alert.iem_damagetag  && `Damage: ${alert.iem_damagetag}`,
+    alert.iem_tornadotag && `Tornado: ${alert.iem_tornadotag}`,
+    alert.iem_floodtag   && `Flood tag: ${alert.iem_floodtag}`,
   ].filter(Boolean);
-  const sectionRows = Object.entries(sections).map(([key, value]) => [key.replace("ADDITIONAL DETAILS", "Details"), value]);
-  openDetails("Weather Alert", alert.event || "Alert", [
-    ["Headline", alert.headline || "Not reported"],
-    ["Source", alert.source || weatherState.alertSource || "NWS"],
-    ["Severity", alert.severity || "Unknown"],
-    ["Areas", alert.areaDesc || selectedLocation.name],
-    ["Effective", alert.effective ? new Date(alert.effective).toLocaleString() : "--"],
-    ["Expires", alert.expires ? new Date(alert.expires).toLocaleString() : "--"],
-    ["Tags", (alert.tags || []).join(", ") || "None"],
-    ...hazardRows,
-    ...sectionRows,
-    ["What To Do", alert.instruction || alertAdvice(alert)],
-  ], sections.WHAT || alert.headline || "");
+  const hazardHtml = hazardItems.length ? `<div class="alert-hazard-tags">${hazardItems.map(h => `<span class="alert-hazard-tag">${safeText(h)}</span>`).join("")}</div>` : "";
+
+  // Level categories table
+  const categories = ALERT_LEVEL_CATEGORIES[event] || null;
+  const activeLevel = categories ? (() => {
+    if (currentTagsLower.some(t => t.includes("emergency"))) return "EMERGENCY";
+    if (currentTagsLower.some(t => t.includes("pds") || t.includes("particularly dangerous"))) return "PDS";
+    if (currentTagsLower.some(t => t.includes("destructive"))) return "DESTRUCTIVE";
+    if (currentTagsLower.some(t => t.includes("considerable"))) return "CONSIDERABLE";
+    if (currentTagsLower.some(t => t.includes("observed"))) return "OBSERVED";
+    return "WARNING";
+  })() : null;
+  const categoriesHtml = categories ? `<div class="alert-level-table">
+    <div class="alert-level-title">${safeText(event.toUpperCase())} LEVELS</div>
+    ${categories.map(cat => `<div class="alert-level-row${cat.label === activeLevel ? " active-level" : ""}">
+      <span class="alert-level-label" style="color:${cat.color}">${safeText(cat.label)}</span>
+      <span class="alert-level-desc">${safeText(cat.desc)}</span>
+    </div>`).join("")}
+  </div>` : "";
+
+  // Safety tips: custom > PRECAUTIONARY/PREPAREDNESS ACTIONS > instruction
+  const customTips = ALERT_CUSTOM_TIPS[event];
+  const prepActions = sections["PRECAUTIONARY/PREPAREDNESS ACTIONS"];
+  let tipsHtml = "";
+  const tipsTitle = ALERT_TIPS_TITLES[event] || "What You Should Do";
+  if (customTips) {
+    tipsHtml = `<div class="alert-tips">
+      <div class="alert-tips-title">${safeText(tipsTitle)}</div>
+      <ul>${customTips.map(tip => `<li>${safeText(tip)}</li>`).join("")}</ul>
+    </div>`;
+  } else if (prepActions) {
+    tipsHtml = `<div class="alert-tips">
+      <div class="alert-tips-title">Precautionary Actions</div>
+      <p>${safeText(prepActions)}</p>
+    </div>`;
+  } else if (alert.instruction) {
+    tipsHtml = `<div class="alert-tips">
+      <div class="alert-tips-title">${safeText(tipsTitle)}</div>
+      <p>${safeText(alert.instruction)}</p>
+    </div>`;
+  } else {
+    tipsHtml = `<div class="alert-tips">
+      <div class="alert-tips-title">${safeText(tipsTitle)}</div>
+      <p>${safeText(alertAdvice(alert))}</p>
+    </div>`;
+  }
+
+  const srcHtml = `<p class="alert-modal-source">[Text source: NWS API] ${safeText(alert.source || weatherState.alertSource || "NWS")}</p>`;
+
+  modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + categoriesHtml + tipsHtml + srcHtml;
+  detailModal.hidden = false;
+  document.body.classList.add("modal-open");
 }
 
 function renderMetar(aviation) {
@@ -2736,14 +2934,25 @@ async function addSpcLayer() {
 async function addFireWeatherLayer() {
   if (!radarMap || !mapLoaded) return;
   if (!fireWeatherData) {
-    fireWeatherData = normalizeSpcData(await fetchOutlookGeoJson(FIRE_WX_URLS[0]));
+    const queryUrl = `${FIRE_WX_MAPSERVER_BASE}/0/query?where=1%3D1&outFields=*&f=geojson&outSR=4326`;
+    const raw = await fetchOutlookGeoJson(queryUrl);
+    // Normalize label field — MapServer may use "label", "Label", or "LABEL"
+    fireWeatherData = {
+      ...raw,
+      features: (raw?.features || []).map(feat => {
+        const p = feat.properties || {};
+        const label = String(p.label ?? p.Label ?? p.LABEL ?? p.risk ?? p.Risk ?? p.RISK ?? "").toUpperCase();
+        return { ...feat, properties: { ...p, LABEL: label } };
+      }),
+    };
   }
   radarMap.addSource("fire-source", { type: "geojson", data: fireWeatherData });
   radarMap.addLayer({
     id: "fire-fill", type: "fill", source: "fire-source",
     paint: {
       "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "ELEVATED", "#fbbf24", "CRITICAL", "#f97316", "EXTREME CRITICAL", "#ef4444", "rgba(0,0,0,0)"],
+        "ELEVATED", "#fbbf24", "CRITICAL", "#f97316", "EXTREME CRITICAL", "#ef4444",
+        "rgba(0,0,0,0)"],
       "fill-opacity": 0.44,
     },
   });
@@ -2751,29 +2960,25 @@ async function addFireWeatherLayer() {
     id: "fire-line", type: "line", source: "fire-source",
     paint: {
       "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
-        "ELEVATED", "#d97706", "CRITICAL", "#ea580c", "EXTREME CRITICAL", "#b91c1c", "rgba(0,0,0,0)"],
+        "ELEVATED", "#d97706", "CRITICAL", "#ea580c", "EXTREME CRITICAL", "#b91c1c",
+        "rgba(0,0,0,0)"],
       "line-width": 1.5,
     },
   });
-
   if (!popupWiredLayers.has("fire")) {
     radarMap.on("click", "fire-fill", ev => {
       const f = ev.features?.[0];
       if (!f) return;
       const label = f.properties?.LABEL || "Fire Weather Area";
+      const labelNice = label === "EXTREME CRITICAL" ? "Extreme Critical" : label.charAt(0) + label.slice(1).toLowerCase();
       new mapboxgl.Popup({ offset: 8 })
         .setLngLat(ev.lngLat)
-        .setHTML(`
-          <div class="popup-header">
-            <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
-            <div>
-              <div class="popup-title">SPC Fire Weather Outlook</div>
-              <div class="popup-subtitle">Day 1 Forecast</div>
-            </div>
-          </div>
-          <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(label)}</span></div>
-          <div class="popup-note">Elevated fire weather conditions. Monitor local alerts and fire restrictions.</div>
-        `)
+        .setHTML(`<div class="popup-header">
+          <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
+          <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day 1 Forecast</div></div>
+        </div>
+        <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNice)}</span></div>
+        <div class="popup-note">Elevated fire weather conditions. Monitor local alerts and fire restrictions.</div>`)
         .addTo(radarMap);
     });
     radarMap.on("mouseenter", "fire-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
@@ -2784,25 +2989,48 @@ async function addFireWeatherLayer() {
 
 async function addWpcRainfallLayer() {
   if (!radarMap || !mapLoaded) return;
-  // WPC Day 1 QPF as a WMS raster overlay from NOAA nowCOAST
-  const params = [
-    "SERVICE=WMS", "VERSION=1.3.0", "REQUEST=GetMap",
-    "FORMAT=image%2Fpng", "TRANSPARENT=true",
-    "LAYERS=day1_qpf_amount",
-    "CRS=EPSG%3A3857", "WIDTH=256", "HEIGHT=256",
-    "STYLES=",
-  ].join("&");
-
-  radarMap.addSource("wpc-rain-source", {
-    type: "raster",
-    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(WPC_QPF_WMS)}&BBOX={bbox-epsg-3857}`],
-    tileSize: 256,
-    attribution: "NOAA WPC QPF Day 1",
+  if (!wpcRainData) {
+    wpcRainData = normalizeSpcData(await fetchOutlookGeoJson(WPC_ERO_URL));
+  }
+  radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainData });
+  radarMap.addLayer({
+    id: "wpc-rain-fill", type: "fill", source: "wpc-rain-source",
+    paint: {
+      "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
+        "MRGL", "#66d4ff", "SLGT", "#7dce82", "MDT", "#f5d020", "HIGH", "#e05020",
+        "rgba(0,0,0,0)"],
+      "fill-opacity": 0.46,
+    },
   });
   radarMap.addLayer({
-    id: "wpc-rain-layer", type: "raster", source: "wpc-rain-source",
-    paint: { "raster-opacity": 0.78 },
+    id: "wpc-rain-line", type: "line", source: "wpc-rain-source",
+    paint: {
+      "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
+        "MRGL", "#40b0e0", "SLGT", "#50aa50", "MDT", "#c8aa00", "HIGH", "#b03010",
+        "rgba(0,0,0,0)"],
+      "line-width": 1.4,
+    },
   });
+  if (!popupWiredLayers.has("wpc-rain")) {
+    radarMap.on("click", "wpc-rain-fill", ev => {
+      const f = ev.features?.[0];
+      if (!f) return;
+      const label = f.properties?.LABEL || "Unknown";
+      const labelNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
+      new mapboxgl.Popup({ offset: 8 })
+        .setLngLat(ev.lngLat)
+        .setHTML(`<div class="popup-header">
+          <div class="popup-icon" style="background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);">🌧️</div>
+          <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day 1 Outlook</div></div>
+        </div>
+        <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNames[label] || label)}</span></div>
+        <div class="popup-note">WPC Day 1 Excessive Rainfall Outlook — NOAA</div>`)
+        .addTo(radarMap);
+    });
+    radarMap.on("mouseenter", "wpc-rain-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
+    radarMap.on("mouseleave", "wpc-rain-fill", () => { radarMap.getCanvas().style.cursor = ""; });
+    popupWiredLayers.add("wpc-rain");
+  }
 }
 
 async function addSurfaceAnalysisLayer() {
@@ -2818,7 +3046,7 @@ async function addSurfaceAnalysisLayer() {
 
   radarMap.addSource("surface-source", {
     type: "raster",
-    tiles: [`/api/wmstile?${params}&BASE_URL=${encodeURIComponent(SURFACE_WMS)}&BBOX={bbox-epsg-3857}`],
+    tiles: [`${SURFACE_WMS}?${params}&BBOX={bbox-epsg-3857}`],
     tileSize: 256,
     attribution: "NOAA WPC Surface Analysis",
   });
@@ -2950,23 +3178,22 @@ async function nwsAlertFeatureCollection() {
 function buildAlertFeatureHtml(feature, idx, total) {
   const p = feature.properties || {};
   const isIem = p.phenomena != null;
-  let title, subtitle, detailHtml, noteHtml, iconStyle;
+  let title, subtitle, detailHtml, iconStyle;
 
   if (isIem) {
-    const key = `${p.phenomena}.${p.significance}`;
-    const eventName = iemPhenomenaMap[key] || key;
+    const rawKey = `${p.phenomena}.${p.significance}`;
+    const key = rawKey.toUpperCase();
+    const eventName = iemPhenomenaMap[key] || iemPhenomenaMap[rawKey] || rawKey;
     const expires = p.expire ? new Date(p.expire).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
     title = safeText(eventName);
     subtitle = "IEM Storm-Based Warning";
     iconStyle = "background:rgba(251,146,60,0.18);border:1px solid rgba(251,146,60,0.35);";
     detailHtml = `
-      <div class="popup-stat"><span class="popup-key">Phenomena</span><span class="popup-val">${safeText(key)}</span></div>
       <div class="popup-stat"><span class="popup-key">WFO</span><span class="popup-val">${safeText(p.wfo || "--")}</span></div>
       <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
       ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${safeText(p.windtag)} mph</span></div>` : ""}
       ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${safeText(p.hailtag)}"</span></div>` : ""}
       ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}`;
-    noteHtml = "Click the alert panel for full details and instructions.";
   } else {
     const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
     title = safeText(p.event || "Weather Alert");
@@ -2976,7 +3203,6 @@ function buildAlertFeatureHtml(feature, idx, total) {
       <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
       <div class="popup-stat"><span class="popup-key">Severity</span><span class="popup-val">${safeText(p.severity || "--")}</span></div>
       <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>`;
-    noteHtml = safeText(p.headline || "Tap the alert panel for full details.");
   }
 
   const navHtml = total > 1 ? `
@@ -2996,7 +3222,7 @@ function buildAlertFeatureHtml(feature, idx, total) {
     </div>
     ${navHtml}
     ${detailHtml}
-    <div class="popup-note">${noteHtml}</div>`;
+    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${idx})">View Alert Details</button>`;
 }
 
 async function addAlertsLayer() {
@@ -3022,7 +3248,7 @@ async function addAlertsLayer() {
       paint: {
         "fill-color": ["match", ["get", "phenomena"],
           "TO", "#dc2626", "SV", "#f97316", "FF", "#10b981",
-          "FA", "#22d3ee", "SQ", "#a78bfa", "MA", "#38bdf8",
+          "SQ", "#a78bfa", "MA", "#38bdf8",
           "rgba(0,0,0,0)"],
         "fill-opacity": 0.3,
       },
@@ -3034,7 +3260,7 @@ async function addAlertsLayer() {
       paint: {
         "line-color": ["match", ["get", "phenomena"],
           "TO", "#ef4444", "SV", "#fb923c", "FF", "#34d399",
-          "FA", "#67e8f9", "SQ", "#c4b5fd", "MA", "#7dd3fc",
+          "SQ", "#c4b5fd", "MA", "#7dd3fc",
           "rgba(0,0,0,0)"],
         "line-width": 2,
       },
@@ -3081,6 +3307,7 @@ async function addAlertsLayer() {
       if (!features.length) return;
 
       let idx = 0;
+      window._alertMapFeatures = features;
       const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
       window._alertNav = delta => {
         idx = Math.max(0, Math.min(features.length - 1, idx + delta));
@@ -3247,7 +3474,7 @@ function renderSpcSubControls() {
   const typeEl = document.querySelector("#spcTypeBtns");
   if (!dayEl || !typeEl) return;
 
-  const days  = [1, 2, 3];
+  const days  = [1, 2, 3, 4, 5];
   const types = [
     { id: "cat",  label: "Categorical" },
     { id: "torn", label: "Tornado"     },
@@ -3259,15 +3486,20 @@ function renderSpcSubControls() {
     `<button type="button" data-spc-day="${d}" class="${d === activeSpcDay ? "active" : ""}">Day ${d}</button>`
   ).join("");
 
-  typeEl.innerHTML = types.map(t =>
-    `<button type="button" data-spc-type="${t.id}" class="${t.id === activeSpcType ? "active" : ""}">${t.label}</button>`
-  ).join("");
+  // Days 3-5 only have categorical; hide type selector for those days
+  const catOnly = activeSpcDay >= 3;
+  typeEl.hidden = catOnly;
+  if (!catOnly) {
+    typeEl.innerHTML = types.map(t =>
+      `<button type="button" data-spc-type="${t.id}" class="${t.id === activeSpcType ? "active" : ""}">${t.label}</button>`
+    ).join("");
+  }
 
   dayEl.querySelectorAll("button").forEach(btn => {
     btn.addEventListener("click", () => {
       activeSpcDay = Number(btn.dataset.spcDay);
-      // Day 3 only has categorical; days 1-2 have all types
-      if (activeSpcDay === 3 && activeSpcType !== "cat") activeSpcType = "cat";
+      // Days 3-5 only support categorical
+      if (activeSpcDay >= 3 && activeSpcType !== "cat") activeSpcType = "cat";
       renderSpcSubControls();
       drawRadar(false);
     });
@@ -3514,3 +3746,49 @@ refreshLiveData().then(() => {
   }
 });
 drawAtmosphere();
+
+// Auto-refresh alerts every 3 minutes so new alerts are caught without a manual refresh
+setInterval(async () => {
+  try {
+    const { alerts, source } = await alertsPayload(selectedLocation.lat, selectedLocation.lon);
+    weatherState.alerts = alerts;
+    weatherState.alertSource = source;
+    renderAlerts();
+    notifyNewWeatherAlerts();
+    // Refresh alert polygons on the map
+    alertPolygonData = null;
+    nwsAlertPolygonData = null;
+    if (activeOverlays.has("Alerts")) drawRadar(false);
+  } catch (e) {
+    console.warn("Alert auto-refresh failed", e);
+  }
+}, 3 * 60 * 1000);
+
+// Find matching alert in weatherState.alerts from a map popup click
+window._viewAlertFromMapFeature = function(featureIdx) {
+  const feature = window._alertMapFeatures?.[featureIdx];
+  if (!feature) return;
+  const p = feature.properties || {};
+  const alerts = weatherState.alerts || [];
+  let alertIdx = -1;
+
+  if (p.phenomena != null) {
+    // IEM storm-based warning — match by event name
+    const rawKey = `${p.phenomena}.${p.significance}`;
+    const eventName = iemPhenomenaMap[rawKey.toUpperCase()] || iemPhenomenaMap[rawKey] || rawKey;
+    alertIdx = alerts.findIndex(a =>
+      a.event === eventName ||
+      a.event?.toLowerCase() === eventName.toLowerCase()
+    );
+  } else {
+    // NWS alert — match by event type
+    const evtLower = (p.event || "").toLowerCase();
+    alertIdx = alerts.findIndex(a => a.event?.toLowerCase() === evtLower);
+  }
+
+  if (alertIdx !== -1) {
+    showAlertDetails(alertIdx);
+  } else {
+    alertsPanel?.scrollIntoView({ behavior: "smooth" });
+  }
+};
