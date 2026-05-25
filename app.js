@@ -41,10 +41,10 @@ const WPC_QPF_WMS  = "https://nowcoast.noaa.gov/geoserver/forecasts/qpf/ows";
 const SURFACE_WMS  = "https://nowcoast.noaa.gov/geoserver/observations/surface_analysis/ows";
 const SATELLITE_WMS = "https://nowcoast.noaa.gov/geoserver/observations/satellite/ows";
 const SATELLITE_LAYERS = {
-  geocolor:   "goes_east_conus_geocolor",
-  truecolor:  "goes_east_conus_truecolor",
-  infrared:   "goes_east_conus_clean_ir",
-  watervapor: "goes_east_conus_water_vapor",
+  geocolor:   "goes_visible_imagery",
+  truecolor:  "goes_shortwave_imagery",
+  infrared:   "goes_longwave_imagery",
+  watervapor: "goes_water_vapor_imagery",
 };
 
 // Basemap styles
@@ -3289,8 +3289,8 @@ function renderSatelliteSubControls() {
   const typeEl = document.querySelector("#satelliteTypeBtns");
   if (!typeEl) return;
   const types = [
-    { id: "geocolor",   label: "GeoColor"    },
-    { id: "truecolor",  label: "True Color"  },
+    { id: "geocolor",   label: "Visible"     },
+    { id: "truecolor",  label: "Shortwave"   },
     { id: "infrared",   label: "Infrared"    },
     { id: "watervapor", label: "Water Vapor" },
   ];
