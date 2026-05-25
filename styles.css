@@ -1509,11 +1509,29 @@ dd {
   }
 
   .metric-grid,
-  .daily-grid,
   .climate-result,
   .space-readouts,
   dl {
     grid-template-columns: 1fr;
+  }
+
+  .daily-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .daily-card {
+    min-height: auto;
+    padding: 12px;
+  }
+
+  .daily-card .eyebrow {
+    flex-wrap: wrap;
+  }
+
+  .current-icon {
+    margin: 0 0 8px 0;
+    width: 96px;
+    height: 96px;
   }
 
   .tabs {

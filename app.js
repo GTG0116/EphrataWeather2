@@ -729,7 +729,7 @@ function normalizeAlertTag(value) {
   if (/radar indicated/i.test(text)) return "Radar indicated";
   if (/^considerable$/i.test(text)) return "Considerable threat";
   if (/^destructive$/i.test(text)) return "Destructive";
-  if (/^catastrophic$/i.test(text)) return "Catastrophic threat";
+  if (/^catastrophic$/i.test(text)) return "Emergency";
   return text;
 }
 
@@ -1819,7 +1819,7 @@ function renderAlerts() {
         <button class="tile alert-card severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-alert-index="${index}">
           <div>
             <p class="eyebrow">${safeText(alert.source || "Alert")}</p>
-            <h3>${safeText(alert.event)}</h3>
+            <h3>${safeText(alertDisplayEvent(alert))}</h3>
             <p>${safeText(alert.headline || alert.description || "Weather alert")}</p>
             ${alert.areaDesc ? `<small class="alert-area">Areas: ${safeText(alert.areaDesc)}</small>` : ""}
             <div class="alert-tags">${(alert.tags || []).slice(0, 8).map(tag => `<span>${safeText(tag)}</span>`).join("")}</div>
@@ -2114,6 +2114,15 @@ function parseAlertSections(text = "") {
   return sections;
 }
 
+function alertDisplayEvent(alert) {
+  const event = alert.event || "Weather Alert";
+  const tags = (alert.tags || []).map(t => t.toLowerCase());
+  if (event.toLowerCase() === "flash flood warning" && tags.some(t => t.includes("emergency"))) {
+    return "Flash Flood Emergency";
+  }
+  return event;
+}
+
 function alertAdvice(alert) {
   const event = (alert.event || "").toLowerCase();
   if (event.includes("tornado warning")) return "Take shelter now in a lowest-floor interior room, away from windows.";
@@ -2224,12 +2233,13 @@ function showAlertDetails(indexOrAlert) {
   if (!alert) return;
   const sections = parseAlertSections(alert.description);
   const event = alert.event || "Weather Alert";
+  const displayEvent = alertDisplayEvent(alert);
   const severity = alert.severity || "";
   const tags = alert.tags || [];
   const currentTagsLower = tags.map(t => t.toLowerCase());
 
   modalEyebrow.textContent = "Weather Alert";
-  modalTitle.textContent = event;
+  modalTitle.textContent = displayEvent;
 
   // Severity badge colors
   const sevBg = { Extreme: "#dc262622", Severe: "#f9731622", Moderate: "#f59e0b22", Minor: "#22d3ee22" };
@@ -2257,7 +2267,9 @@ function showAlertDetails(indexOrAlert) {
     <p>${safeText(text)}</p>
   </div>` : "";
 
-  const whatHtml    = makeSec("WHAT",    sections.WHAT);
+  // Fall back to headline when description has no parseable sections (common for IEM-only alerts)
+  const noSections = !sections.WHAT && !sections.WHERE && !sections.WHEN && !sections.IMPACTS;
+  const whatHtml    = makeSec("WHAT",    sections.WHAT || (noSections ? (alert.headline || null) : null));
   const impactsHtml = makeSec("IMPACTS", sections.IMPACTS);
   const whereHtml   = makeSec("WHERE",   sections.WHERE);
   const whenHtml    = makeSec("WHEN",    sections.WHEN);
@@ -2284,7 +2296,7 @@ function showAlertDetails(indexOrAlert) {
     return "WARNING";
   })() : null;
   const categoriesHtml = categories ? `<div class="alert-level-table">
-    <div class="alert-level-title">${safeText(event.toUpperCase())} LEVELS</div>
+    <div class="alert-level-title">${safeText(displayEvent.toUpperCase())} LEVELS</div>
     ${categories.map(cat => `<div class="alert-level-row${cat.label === activeLevel ? " active-level" : ""}">
       <span class="alert-level-label" style="color:${cat.color}">${safeText(cat.label)}</span>
       <span class="alert-level-desc">${safeText(cat.desc)}</span>
@@ -2318,7 +2330,8 @@ function showAlertDetails(indexOrAlert) {
     </div>`;
   }
 
-  const srcHtml = `<p class="alert-modal-source">[Text source: NWS API] ${safeText(alert.source || weatherState.alertSource || "NWS")}</p>`;
+  const srcLabel = alert.source === "IEM" ? "IEM storm-based warning" : `NWS API (${alert.source || "NWS"})`;
+  const srcHtml = `<p class="alert-modal-source">Source: ${safeText(srcLabel)}</p>`;
 
   modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + categoriesHtml + tipsHtml + srcHtml;
   detailModal.hidden = false;
@@ -3113,11 +3126,23 @@ async function addWpcRainfallLayer() {
 
 async function addSurfaceAnalysisLayer() {
   if (!radarMap || !mapLoaded) return;
-  // WPC surface analysis fronts and pressure centers via WMS.
-  // Route through corsproxy.io — NOAA's nowCOAST WMS lacks CORS headers for
-  // this workspace so direct browser fetch is blocked.
-  const wmsParams = "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=0&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&STYLES=&BBOX=";
-  const wmsBase = `${SURFACE_WMS}?${wmsParams}`;
+  // Route through worker proxy — NOAA nowCOAST ArcGIS WMS lacks CORS headers.
+  // TIME parameter is required for this time-aware service.
+  const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const params = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: "1.3.0",
+    REQUEST: "GetMap",
+    FORMAT: "image/png",
+    TRANSPARENT: "true",
+    LAYERS: "0",
+    CRS: "EPSG:3857",
+    WIDTH: "256",
+    HEIGHT: "256",
+    STYLES: "",
+    TIME: now,
+  });
+  const wmsBase = `${SURFACE_WMS}?${params.toString()}&BBOX=`;
   const tileUrl = `${WORKER_PROXY}${encodeURIComponent(wmsBase)}{bbox-epsg-3857}`;
   radarMap.addSource("surface-source", {
     type: "raster",
