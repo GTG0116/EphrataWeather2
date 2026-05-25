@@ -41,6 +41,31 @@ export default {
       return json({ ok: true });
     }
 
+    if (url.pathname === "/proxy" && request.method === "GET") {
+      const target = url.searchParams.get("url");
+      if (!target) return json({ ok: false, error: "Missing url parameter" }, 400);
+      let targetUrl;
+      try { targetUrl = new URL(target); } catch {
+        return json({ ok: false, error: "Invalid url" }, 400);
+      }
+      const allowed = ["nowcoast.noaa.gov", "www.wpc.ncep.noaa.gov", "www.wpc.ncep.noaa.gov"];
+      if (!allowed.some(host => targetUrl.hostname === host)) {
+        return json({ ok: false, error: "Domain not allowed" }, 403);
+      }
+      const upstream = await fetch(targetUrl.toString(), {
+        headers: { "User-Agent": "WeatherPortal/1.0" },
+      });
+      const body = await upstream.arrayBuffer();
+      return new Response(body, {
+        status: upstream.status,
+        headers: {
+          ...CORS_HEADERS,
+          "Content-Type": upstream.headers.get("Content-Type") || "application/octet-stream",
+          "Cache-Control": "public, max-age=120",
+        },
+      });
+    }
+
     return json({ ok: false, error: "Not found" }, 404);
   },
 

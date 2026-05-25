@@ -6,6 +6,7 @@ const RADAR_FRAME_MS = 700;
 // Fill these after deploying the alert worker described in NOTIFICATIONS.md.
 const PUSH_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0";
 const PUSH_SUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/subscribe";
+const WORKER_PROXY = "https://weather-alert-worker.gtg0116scratch.workers.dev/proxy?url=";
 // SPC Categorical + probabilistic outlooks, Days 1-2
 const SPC_URLS = {
   cat:  ["https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
@@ -1234,7 +1235,7 @@ async function fetchOutlookGeoJson(url) {
   try {
     return await getJson(url, { cache: "no-store" });
   } catch {
-    const proxy = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+    const proxy = `${WORKER_PROXY}${encodeURIComponent(url)}`;
     return getJson(proxy, { cache: "no-store" });
   }
 }
@@ -3102,7 +3103,7 @@ async function addSurfaceAnalysisLayer() {
   // this workspace so direct browser fetch is blocked.
   const wmsParams = "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=surface_analysis_fronts&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&STYLES=&BBOX=";
   const wmsBase = `${SURFACE_WMS}?${wmsParams}`;
-  const tileUrl = `https://corsproxy.io/?${encodeURIComponent(wmsBase)}{bbox-epsg-3857}`;
+  const tileUrl = `${WORKER_PROXY}${encodeURIComponent(wmsBase)}{bbox-epsg-3857}`;
   radarMap.addSource("surface-source", {
     type: "raster",
     tiles: [tileUrl],
