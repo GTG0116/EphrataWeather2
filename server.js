@@ -270,13 +270,21 @@ async function proxyWmsTile(url, res) {
       res.end(EMPTY_PNG);
       return;
     }
-    const buffer = await response.arrayBuffer();
+    const buffer = Buffer.from(await response.arrayBuffer());
+    // Validate magic bytes — guards against XML errors served with image/png content-type
+    const isPng  = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+    const isJpeg = buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+    if (!isPng && !isJpeg) {
+      res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" });
+      res.end(EMPTY_PNG);
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": contentType,
       "Cache-Control": "max-age=300",
       "Access-Control-Allow-Origin": "*",
     });
-    res.end(Buffer.from(buffer));
+    res.end(buffer);
   } catch {
     res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" });
     res.end(EMPTY_PNG);
