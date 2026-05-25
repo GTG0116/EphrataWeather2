@@ -2117,7 +2117,8 @@ function parseAlertSections(text = "") {
 function alertDisplayEvent(alert) {
   const event = alert.event || "Weather Alert";
   const tags = (alert.tags || []).map(t => t.toLowerCase());
-  if (event.toLowerCase() === "flash flood warning" && tags.some(t => t.includes("emergency"))) {
+  if (event.toLowerCase() === "flash flood warning" &&
+      (tags.some(t => t.includes("emergency")) || tags.some(t => t.includes("catastrophic")))) {
     return "Flash Flood Emergency";
   }
   return event;
