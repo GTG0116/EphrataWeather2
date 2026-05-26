@@ -96,20 +96,30 @@ async function checkSubscriptions(env) {
     const currentIds = alerts.map(alert => alert.id);
 
     for (const { key, record } of subscribers) {
-      const seen = new Set(record.seenAlertIds || []);
-      const newest = alerts.find(alert => !seen.has(alert.id));
-      if (newest) {
-        const result = await sendPush(record.subscription, newest, record.location, env);
-        if (result === "gone") {
-          await env.SUBSCRIPTIONS.delete(key);
-          continue;
+      try {
+        const seen = new Set(record.seenAlertIds || []);
+        const newest = alerts.find(alert => !seen.has(alert.id));
+        if (newest) {
+          const result = await sendPush(record.subscription, newest, record.location, env);
+          if (result === "gone") {
+            await env.SUBSCRIPTIONS.delete(key);
+            continue;
+          }
         }
+        // Prune stale IDs (expired alerts) and only mark the single delivered alert
+        // as seen — leave other unseen alerts un-marked so they are delivered on
+        // subsequent cron runs.
+        const currentIdSet = new Set(currentIds);
+        const updatedSeen = [...seen].filter(id => currentIdSet.has(id));
+        if (newest) updatedSeen.push(newest.id);
+        await env.SUBSCRIPTIONS.put(key, JSON.stringify({
+          ...record,
+          seenAlertIds: [...new Set(updatedSeen)],
+          updatedAt: new Date().toISOString(),
+        }));
+      } catch (e) {
+        console.warn("Push processing failed for subscriber", key, e);
       }
-      await env.SUBSCRIPTIONS.put(key, JSON.stringify({
-        ...record,
-        seenAlertIds: currentIds,
-        updatedAt: new Date().toISOString(),
-      }));
     }
   }
 }
