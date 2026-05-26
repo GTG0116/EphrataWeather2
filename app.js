@@ -248,7 +248,10 @@ let activeSpcType = "cat";   // cat | torn | wind | hail
 let activeSpcDay  = 1;       // 1 or 2
 let activeWpcDay  = 1;       // 1-5
 let activeFireDay = 1;       // 1 or 2
-let activeBasemap = "dark-v11";
+let activeBasemap = (() => {
+  const saved = localStorage.getItem("weatherBasemap");
+  return BASEMAP_STYLES.some(s => s.id === saved) ? saved : "dark-v11";
+})();
 let activeSatelliteType = "infrared";
 let satelliteActive = false;
 let hourlyChartMetric = "temperature";
@@ -3066,6 +3069,7 @@ function renderBasemapButtons() {
   container.querySelectorAll("button").forEach(btn => {
     btn.addEventListener("click", () => {
       activeBasemap = btn.dataset.basemap;
+      localStorage.setItem("weatherBasemap", activeBasemap);
       container.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
       if (radarMap) {
         radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
