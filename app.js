@@ -1235,6 +1235,30 @@ async function spcForecastPayload() {
   ];
 }
 
+async function wpcForecastPayload() {
+  const loc = point();
+  const WPC_ERO_RANK = { MRGL: 1, SLGT: 2, MDT: 3, HIGH: 4 };
+
+  const findWpcLabel = (raw) => {
+    if (!raw) return null;
+    const normalized = normalizeWpcEroData(raw);
+    const matches = (normalized.features || [])
+      .filter(f => pointInGeometry(loc.lon, loc.lat, f.geometry));
+    if (!matches.length) return null;
+    return matches.reduce((best, f) =>
+      (WPC_ERO_RANK[f.properties?.LABEL] || 0) > (WPC_ERO_RANK[best?.properties?.LABEL] || 0) ? f : best
+    ).properties?.LABEL || null;
+  };
+
+  const results = await Promise.allSettled(
+    WPC_ERO_URLS.map(url => fetchOutlookGeoJson(url).catch(() => null))
+  );
+
+  return results.map(r => ({
+    label: r.status === "fulfilled" ? findWpcLabel(r.value) : null,
+  }));
+}
+
 async function fetchOutlookGeoJson(url) {
   try {
     return await getJson(url, { cache: "no-store" });
@@ -1928,6 +1952,89 @@ function notifyNewWeatherAlerts() {
   newAlerts.slice(0, 3).forEach(showAlertNotification);
 }
 
+function checkMorningOutlookNotification() {
+  if (!notificationSupported() || Notification.permission !== "granted") return;
+
+  const tz = selectedLocation.timezone || "America/New_York";
+  const now = new Date();
+  // Get the local hour in the user's timezone
+  const localHourStr = now.toLocaleString("en-US", { timeZone: tz, hour: "numeric", hour12: false });
+  const localHour = parseInt(localHourStr, 10);
+
+  // Only trigger between 6:00am and 9:00am local time
+  if (localHour < 6 || localHour >= 9) return;
+
+  // One notification per calendar day per location
+  const todayKey = now.toLocaleDateString("en-US", { timeZone: tz });
+  const storageKey = `morningOutlookSentDate_${selectedLocation.lat}_${selectedLocation.lon}`;
+  if (localStorage.getItem(storageKey) === todayKey) return;
+
+  const spcDay1 = weatherState.spcDays?.[0];
+  const catLabel = spcDay1?.catLabel || null;
+
+  const wpcDay1 = weatherState.wpcDays?.[0];
+  const wpcLabel = wpcDay1?.label || null;
+
+  // SPC severe weather text (per screenshot legend)
+  const spcMessages = {
+    MRGL: "Isolated severe storms are possible in your area today.",
+    SLGT: "Isolated to scattered severe storms are expected in your area today.",
+    ENH:  "Scattered to numerous severe storms are expected in your area today.",
+    MDT:  "Scattered to numerous severe storms are expected in your area today.",
+    HIGH: "Numerous severe storms are expected in your area today.",
+  };
+
+  // WPC excessive rainfall text (parallel phrasing, no enhanced level, uses flooding)
+  const wpcMessages = {
+    MRGL: "Isolated flooding instances are possible in your area today.",
+    SLGT: "Isolated to scattered flooding instances are expected in your area today.",
+    MDT:  "Scattered to numerous flooding instances are expected in your area today.",
+    HIGH: "Numerous flooding instances are expected in your area today.",
+  };
+
+  const toSend = [];
+  if (catLabel && spcMessages[catLabel]) {
+    toSend.push({ title: "Severe Weather Outlook", body: spcMessages[catLabel], tag: `spc-morning-${todayKey}` });
+  }
+  if (wpcLabel && wpcMessages[wpcLabel]) {
+    toSend.push({ title: "Excessive Rainfall Outlook", body: wpcMessages[wpcLabel], tag: `wpc-morning-${todayKey}` });
+  }
+
+  if (!toSend.length) return;
+
+  localStorage.setItem(storageKey, todayKey);
+  toSend.forEach(async ({ title, body, tag }) => {
+    const options = { body, tag, renotify: false, badge: "icon-192.png", icon: "icon-192.png", data: { url: location.href } };
+    const reg = serviceWorkerRegistration || await navigator.serviceWorker.ready.catch(() => null);
+    if (reg?.showNotification) reg.showNotification(title, options);
+    else new Notification(title, options);
+  });
+}
+
+function scheduleMorningNotificationCheck() {
+  const tz = selectedLocation.timezone || "America/New_York";
+  const now = new Date();
+  // Determine local clock time
+  const localParts = now.toLocaleString("en-US", { timeZone: tz, hour: "numeric", minute: "numeric", hour12: false }).split(":");
+  const localHour = parseInt(localParts[0], 10);
+  const localMin  = parseInt(localParts[1], 10);
+
+  // Calculate ms until next 7:00am local
+  let minutesUntil7am;
+  if (localHour < 7 || (localHour === 7 && localMin === 0)) {
+    minutesUntil7am = (7 - localHour) * 60 - localMin;
+  } else {
+    minutesUntil7am = (24 - localHour + 7) * 60 - localMin;
+  }
+
+  setTimeout(async () => {
+    try {
+      await refreshLiveData();
+    } catch {}
+    scheduleMorningNotificationCheck();
+  }, minutesUntil7am * 60 * 1000);
+}
+
 async function enableNotifications() {
   if (!notificationSupported()) {
     document.querySelector("#statusBadge").textContent = "Notifications unavailable in this browser";
@@ -1975,6 +2082,38 @@ async function registerAppWorker() {
   }
 }
 
+function generateDailySummary(day, precip) {
+  const detailed = (day.detailedForecast || "").trim();
+  const short = day.shortForecast || "";
+
+  if (!detailed) {
+    // Humanize NWS shortForecast jargon into readable text
+    return short
+      .replace(/\bSlight Chance\b/gi, "Slight chance of")
+      .replace(/\bChance\b/gi, "Chance of")
+      .replace(/\bLikely\b/gi, "Likely")
+      .replace(/T-storms/gi, "thunderstorms")
+      .replace(/TSTM/gi, "thunderstorms") || "Forecast details unavailable.";
+  }
+
+  // Extract first 1–2 sentences, skipping pure precipitation-chance/amount lines
+  const sentences = detailed
+    .split(/\.(?:\s|$)/)
+    .map(s => s.trim())
+    .filter(s => s &&
+      !/^chance of precipitation is/i.test(s) &&
+      !/^new (rainfall|snow)/i.test(s) &&
+      !/^total (snow|rainfall)/i.test(s));
+
+  const parts = [];
+  for (const s of sentences) {
+    parts.push(s);
+    if (parts.join(". ").length >= 90 || parts.length >= 2) break;
+  }
+
+  return (parts.join(". ") + (parts.length ? "." : "")).trim() || short;
+}
+
 function renderDaily() {
   const periods = (weatherState.daily || []).slice(0, 14);
   const days = [];
@@ -2010,15 +2149,22 @@ function renderDaily() {
       ? `<span class="spc-risk-badge" style="background:${spcColor}22;color:${spcColor};border:1px solid ${spcColor}88" title="SPC Day ${index + 1} ${spcLabel(spcCat)} risk"><svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 110 1.5.75.75 0 010-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg> ${safeText(spcCat)}</span>`
       : "";
 
+    const wpcDay = index < 5 ? (weatherState.wpcDays?.[index] || null) : null;
+    const wpcCat = wpcDay?.label || null;
+    const wpcColor = spcRiskColor(wpcCat);
+    const wpcBadge = (wpcColor && wpcCat)
+      ? `<span class="spc-risk-badge wpc-risk-badge" style="background:${wpcColor}22;color:${wpcColor};border:1px solid ${wpcColor}88" title="WPC Day ${index + 1} Excessive Rainfall — ${wpcCat}"><svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="vertical-align:-1px" aria-hidden="true"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><line x1="8" y1="19" x2="8" y2="21"/><line x1="12" y1="17" x2="12" y2="19"/><line x1="16" y1="19" x2="16" y2="21"/></svg> ${safeText(wpcCat)}</span>`
+      : "";
+
     return `
     <button class="daily-card" type="button" data-day-index="${index}">
       <p class="eyebrow">
         ${day.name}
-        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}
+        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </p>
       ${weatherIcon(iconForCondition(day.shortForecast))}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
-      <p class="daily-summary">${day.shortForecast || "Forecast details"}</p>
+      <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
       <div class="daily-chip-row">
         <span>${f(precip)}% precip</span>
         <span>Feels ${f(feelsHigh)}° / ${f(feelsLow)}°</span>
@@ -2097,7 +2243,20 @@ function showDailyDetails(index) {
     }
   }
 
+  if (index < 5) {
+    const wpcDay = weatherState.wpcDays?.[index];
+    const wpcLabel = wpcDay?.label || null;
+    if (wpcLabel) {
+      const wpcNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
+      rows.push(["Excessive Rainfall Risk", `${wpcNames[wpcLabel] || wpcLabel} — WPC Day ${index + 1}`, "precip"]);
+    }
+  }
+
   openDetails("Daily Forecast", day.name || "Forecast", rows, day.detailedForecast || day.shortForecast || "");
+
+  // Inject weather icon next to the modal title after openDetails sets it
+  const iconHtml = weatherIcon(iconForCondition(day.shortForecast));
+  modalTitle.innerHTML = `${iconHtml}<span>${safeText(day.name || "Forecast")}</span>`;
 }
 
 function parseAlertSections(text = "") {
@@ -2277,10 +2436,19 @@ function showAlertDetails(indexOrAlert) {
 
   // Fall back to headline when description has no parseable sections (common for IEM-only alerts)
   const noSections = !sections.WHAT && !sections.WHERE && !sections.WHEN && !sections.IMPACTS;
-  const whatHtml    = makeSec("WHAT",    sections.WHAT || (noSections ? (alert.headline || null) : null));
+  const rawDesc = (alert.description || "").trim();
+  // When no structured sections, show raw description if available; otherwise use headline
+  const whatFallback = noSections
+    ? (rawDesc ? null : (alert.headline || null))
+    : null;
+  const whatHtml    = makeSec("WHAT",    sections.WHAT || whatFallback);
   const impactsHtml = makeSec("IMPACTS", sections.IMPACTS);
   const whereHtml   = makeSec("WHERE",   sections.WHERE);
   const whenHtml    = makeSec("WHEN",    sections.WHEN);
+  // Show raw description text when sections couldn't be parsed (e.g. IEM alerts without structured NWS text)
+  const rawDescHtml = (noSections && rawDesc)
+    ? `<div class="alert-section"><div class="alert-section-label">Details</div><p class="alert-raw-desc">${safeText(rawDesc)}</p></div>`
+    : "";
 
   // Hazard tags
   const hazardItems = [
@@ -2341,7 +2509,7 @@ function showAlertDetails(indexOrAlert) {
   const srcLabel = alert.source === "IEM" ? "IEM storm-based warning" : `NWS API (${alert.source || "NWS"})`;
   const srcHtml = `<p class="alert-modal-source">Source: ${safeText(srcLabel)}</p>`;
 
-  modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + categoriesHtml + tipsHtml + srcHtml;
+  modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + rawDescHtml + categoriesHtml + tipsHtml + srcHtml;
   detailModal.hidden = false;
   document.body.classList.add("modal-open");
 }
@@ -3201,14 +3369,14 @@ async function addLsrLayer() {
 
   // LSR markers as custom HTML elements
   const LSR_ICONS = {
-    "T": { icon: "🌪", color: "#ef4444", label: "Tornado" },
-    "H": { icon: "🧊", color: "#f97316", label: "Hail" },
-    "W": { icon: "💨", color: "#38bdf8", label: "Wind" },
-    "F": { icon: "💧", color: "#10b981", label: "Flood" },
-    "R": { icon: "🌧", color: "#60a5fa", label: "Rain" },
-    "S": { icon: "❄", color: "#a5f3fc", label: "Snow" },
-    "Z": { icon: "🌬", color: "#bfdbfe", label: "Ice" },
-    "M": { icon: "⛈", color: "#94a3b8", label: "TSTM" },
+    "T": { svg: `<path d="M12 3c-1 3-4 5-4 9h3l-2 9 9-12h-5z" fill="currentColor"/><path d="M10 21c0 0 1-2 3-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`, color: "#ef4444", label: "Tornado" },
+    "H": { svg: `<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="5" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="5" y1="12" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#f97316", label: "Hail" },
+    "W": { svg: `<path d="M5 8h10.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12h14.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 16h8.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#38bdf8", label: "Wind" },
+    "F": { svg: `<path d="M7 10c0-3 5-7 5-7s5 4 5 7a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 19c2-3 5-3 7-1.5s5 1.5 7-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#10b981", label: "Flood" },
+    "R": { svg: `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="19" x2="8" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="19" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#60a5fa", label: "Rain" },
+    "S": { svg: `<line x1="2" x2="22" y1="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" x2="12" y1="2" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m20 16-4-4 4-4m-16 8 4-4-4-4m12-4-4 4-4-4m0 16 4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`, color: "#a5f3fc", label: "Snow" },
+    "Z": { svg: `<polygon points="12,2 14.5,8.5 22,8.5 16.5,13 18.5,20 12,16 5.5,20 7.5,13 2,8.5 9.5,8.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>`, color: "#bfdbfe", label: "Ice" },
+    "M": { svg: `<path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="currentColor"/>`, color: "#94a3b8", label: "TSTM" },
   };
 
   features.forEach((feat, idx) => {
@@ -3216,21 +3384,23 @@ async function addLsrLayer() {
     const coords = feat.geometry?.coordinates;
     if (!coords) return;
     const typeKey = (p.type || "").toUpperCase().charAt(0);
-    const cfg = LSR_ICONS[typeKey] || { icon: "⚠", color: "#94a3b8", label: p.type || "LSR" };
+    const defaultSvg = `<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="9" x2="12" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`;
+    const cfg = LSR_ICONS[typeKey] || { svg: defaultSvg, color: "#94a3b8", label: p.type || "LSR" };
 
     const wrap = document.createElement("div");
     wrap.className = "lsr-marker-wrap";
     const dot = document.createElement("div");
     dot.className = "lsr-marker";
     dot.style.background = cfg.color;
-    dot.textContent = cfg.icon;
+    dot.style.color = "#fff";
+    dot.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">${cfg.svg}</svg>`;
     wrap.appendChild(dot);
 
     const marker = new mapboxgl.Marker({ element: wrap, anchor: "center" })
       .setLngLat([coords[0], coords[1]])
       .setPopup(new mapboxgl.Popup({ offset: 12 }).setHTML(`
         <div class="popup-header">
-          <div class="popup-icon" style="background:${cfg.color}22;border:1px solid ${cfg.color}66;">${cfg.icon}</div>
+          <div class="popup-icon" style="background:${cfg.color}22;border:1px solid ${cfg.color}66;color:${cfg.color}"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">${cfg.svg}</svg></div>
           <div>
             <div class="popup-title">${safeText(p.remark || cfg.label)}</div>
             <div class="popup-subtitle">${safeText(cfg.label)} — Local Storm Report</div>
@@ -3733,12 +3903,13 @@ async function refreshLiveData() {
   alertPolygonData = null;
   nwsAlertPolygonData = null;
 
-  const [weather, aviation, space, maps, spcForecast] = await Promise.allSettled([
+  const [weather, aviation, space, maps, spcForecast, wpcForecast] = await Promise.allSettled([
     weatherPayload(),
     aviationPayload(),
     spacePayload(),
     mapsPayload(),
     spcForecastPayload(),
+    wpcForecastPayload(),
   ]);
 
   if (weather.status === "fulfilled") {
@@ -3751,11 +3922,15 @@ async function refreshLiveData() {
   if (spcForecast.status === "fulfilled") {
     weatherState.spcDays = spcForecast.value;
   }
+  if (wpcForecast.status === "fulfilled") {
+    weatherState.wpcDays = wpcForecast.value;
+  }
 
   renderCurrent();
   renderAlerts();
   await syncPushShownAlerts();
   notifyNewWeatherAlerts();
+  checkMorningOutlookNotification();
   renderDaily();
   renderMetar(aviation.status === "fulfilled" ? aviation.value : null);
   renderSpace(space.status === "fulfilled" ? space.value : null);
@@ -3881,6 +4056,7 @@ window.addEventListener("resize", drawRadar);
 renderLayers();
 registerAppWorker();
 initHistoricalCalendar();
+scheduleMorningNotificationCheck();
 renderBasemapButtons();
 tabs.forEach(tab => {
   if (tab.dataset.tab === "climate") {
