@@ -1532,8 +1532,8 @@ function conditionClass(current) {
   return "clear";
 }
 
-function weatherIcon(type) {
-  return `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(type, isNightPeriod(type))}</span>`;
+function weatherIcon(type, forceDay = false) {
+  return `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(type, forceDay ? false : isNightPeriod(type))}</span>`;
 }
 
 function uiIcon(name) {
@@ -2170,7 +2170,7 @@ function renderDaily() {
         ${day.name}
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </p>
-      ${weatherIcon(iconForCondition(day.shortForecast))}
+      ${weatherIcon(iconForCondition(day.shortForecast), true)}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
       <div class="daily-chip-row">
@@ -2262,7 +2262,7 @@ function showDailyDetails(index) {
   openDetails("Daily Forecast", day.name || "Forecast", rows, day.detailedForecast || day.shortForecast || "");
 
   // Inject weather icon next to the modal title after openDetails sets it
-  const iconHtml = weatherIcon(iconForCondition(day.shortForecast));
+  const iconHtml = weatherIcon(iconForCondition(day.shortForecast), true);
   modalTitle.innerHTML = `${iconHtml}<span>${safeText(day.name || "Forecast")}</span>`;
 }
 
