@@ -2082,6 +2082,18 @@ async function registerAppWorker() {
   }
 }
 
+function getDailyPairs(all = []) {
+  // NWS periods start with "Tonight" when the app loads in the evening.
+  // Skip any leading night-only period so day/night pairs are always aligned.
+  let start = 0;
+  if (all[0]?.isDaytime === false) start = 1;
+  const pairs = [];
+  for (let i = start; i < all.length && pairs.length < 7; i += 2) {
+    pairs.push({ day: all[i], night: all[i + 1] || null });
+  }
+  return pairs;
+}
+
 function generateDailySummary(day, precip) {
   const detailed = (day.detailedForecast || "").trim();
   const short = day.shortForecast || "";
@@ -2115,15 +2127,11 @@ function generateDailySummary(day, precip) {
 }
 
 function renderDaily() {
-  const periods = (weatherState.daily || []).slice(0, 14);
-  const days = [];
-  for (let i = 0; i < periods.length; i += 2) {
-    days.push({ day: periods[i], night: periods[i + 1] });
-  }
+  const days = getDailyPairs(weatherState.daily || []);
 
   const extras = weatherState.dailyExtras || {};
   const pollenForecast = weatherState.pollenForecast || [];
-  dailyGrid.innerHTML = days.slice(0, 7).map(({ day, night }, index) => {
+  dailyGrid.innerHTML = days.map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
     const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, parseInt(day.windSpeed, 10));
     const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, parseInt(night.windSpeed, 10)) : null);
@@ -2199,9 +2207,8 @@ function showHourDetails(index) {
 }
 
 function showDailyDetails(index) {
-  const periods = (weatherState.daily || []).slice(0, 14);
-  const day = periods[index * 2];
-  const night = periods[index * 2 + 1];
+  const pairs = getDailyPairs(weatherState.daily || []);
+  const { day, night } = pairs[index] || {};
   if (!day) return;
   const extras = weatherState.dailyExtras || {};
   const precip = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
