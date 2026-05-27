@@ -98,20 +98,28 @@ async function checkSubscriptions(env) {
     for (const { key, record } of subscribers) {
       try {
         const seen = new Set(record.seenAlertIds || []);
-        const newest = alerts.find(alert => !seen.has(alert.id));
-        if (newest) {
-          const result = await sendPush(record.subscription, newest, record.location, env);
+        const unseenAlerts = alerts.filter(alert => !seen.has(alert.id));
+        const deliveredIds = [];
+
+        for (const alert of unseenAlerts) {
+          const result = await sendPush(record.subscription, alert, record.location, env);
           if (result === "gone") {
             await env.SUBSCRIPTIONS.delete(key);
-            continue;
+            deliveredIds.length = 0;
+            break;
           }
+          deliveredIds.push(alert.id);
         }
-        // Prune stale IDs (expired alerts) and only mark the single delivered alert
-        // as seen — leave other unseen alerts un-marked so they are delivered on
-        // subsequent cron runs.
+
+        if (!deliveredIds.length && unseenAlerts.length && !currentIds.length) {
+          continue;
+        }
+
+        // Prune stale IDs (expired alerts) and mark all successfully delivered
+        // alert IDs as seen so each new alert generates one notification.
         const currentIdSet = new Set(currentIds);
         const updatedSeen = [...seen].filter(id => currentIdSet.has(id));
-        if (newest) updatedSeen.push(newest.id);
+        deliveredIds.forEach(id => updatedSeen.push(id));
         await env.SUBSCRIPTIONS.put(key, JSON.stringify({
           ...record,
           seenAlertIds: [...new Set(updatedSeen)],
