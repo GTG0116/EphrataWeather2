@@ -86,11 +86,11 @@ const SEASONAL_CENTER = [45, 48, 55, 63, 70, 76, 82, 80, 72, 62, 51, 45];
 const FWI = (() => {
   const COMFORT_WINDOW = 8;
   const RATINGS = [
-    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)"   },
-    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)" },
-    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)"   },
-    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)"   },
-    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)"   },
+    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   sentence: "Conditions are excellent for outdoor activities." },
+    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)",  sentence: "Conditions are generally favorable for outdoor activities." },
+    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)",   sentence: "Conditions are marginal; outdoor activities are not recommended." },
+    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)",   sentence: "Conditions are poor; outdoor activities are strongly discouraged." },
+    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)",   sentence: "Conditions are very poor; outdoor activities should be avoided." },
   ];
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -2176,6 +2176,7 @@ function renderDaily() {
       ${weatherIcon(iconForCondition(day.shortForecast), true)}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
+      <p class="fwi-sentence" style="margin:2px 0 4px;font-size:0.72rem;color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</p>
       <div class="daily-chip-row">
         <span>${f(precip)}% precip</span>
         <span>Feels ${f(feelsHigh)}° / ${f(feelsLow)}°</span>
