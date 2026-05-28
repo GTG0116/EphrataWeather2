@@ -818,11 +818,16 @@ dd {
 }
 
 .daily-card .eyebrow {
+  margin-bottom: 4px;
+}
+
+.daily-badge-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  flex-wrap: nowrap;
+  gap: 4px;
+  min-height: 22px;
+  margin-bottom: 4px;
 }
 
 .daily-range {
@@ -1545,9 +1550,6 @@ dd {
     padding: 12px;
   }
 
-  .daily-card .eyebrow {
-    flex-wrap: wrap;
-  }
 
   .current-icon {
     margin: 0 0 8px 0;
@@ -2751,7 +2753,6 @@ dd {
   letter-spacing: 0.03em;
   white-space: nowrap;
   flex-shrink: 0;
-  margin-left: 4px;
 }
 
 /* ═══════════════════════════════════════════════
