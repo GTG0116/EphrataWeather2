@@ -1870,11 +1870,26 @@ function notificationSupported() {
   return "Notification" in window && "serviceWorker" in navigator;
 }
 
+function isIOSDevice() {
+  return /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneMode() {
+  return !!navigator.standalone ||
+    window.matchMedia("(display-mode: standalone)").matches;
+}
+
 function setNotifyButtonState() {
   if (!notifyButton || !notifyButtonText) return;
   if (!notificationSupported()) {
     notifyButton.disabled = true;
     notifyButtonText.textContent = "No Alerts";
+    return;
+  }
+  if (isIOSDevice() && !isStandaloneMode()) {
+    notifyButton.disabled = false;
+    notifyButtonText.textContent = "Alerts";
     return;
   }
   notifyButtonText.textContent = Notification.permission === "granted" ? "Alerts On" : "Alerts";
@@ -1888,7 +1903,8 @@ function urlBase64ToUint8Array(value) {
 
 async function registerPushSubscription() {
   if (!PUSH_PUBLIC_KEY || !PUSH_SUBSCRIBE_ENDPOINT) return false;
-  const registration = serviceWorkerRegistration || await navigator.serviceWorker.ready;
+  const registration = await navigator.serviceWorker.ready;
+  if (!registration?.pushManager) return false;
   const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(PUSH_PUBLIC_KEY),
@@ -1917,8 +1933,8 @@ async function showAlertNotification(alert) {
     body,
     tag: alertNotificationId(alert),
     renotify: true,
-    badge: "icon-192.png",
-    icon: "icon-192.png",
+    badge: "./icon-192.png",
+    icon: "./icon-192.png",
     data: { url: location.href },
   };
   const registration = serviceWorkerRegistration || await navigator.serviceWorker.ready.catch(() => null);
@@ -2007,7 +2023,7 @@ function checkMorningOutlookNotification() {
 
   localStorage.setItem(storageKey, todayKey);
   toSend.forEach(async ({ title, body, tag }) => {
-    const options = { body, tag, renotify: false, badge: "icon-192.png", icon: "icon-192.png", data: { url: location.href } };
+    const options = { body, tag, renotify: false, badge: "./icon-192.png", icon: "./icon-192.png", data: { url: location.href } };
     const reg = serviceWorkerRegistration || await navigator.serviceWorker.ready.catch(() => null);
     if (reg?.showNotification) reg.showNotification(title, options);
     else new Notification(title, options);
@@ -2043,7 +2059,15 @@ async function enableNotifications() {
     document.querySelector("#statusBadge").textContent = "Notifications unavailable in this browser";
     return;
   }
-  const permission = await Notification.requestPermission();
+  if (isIOSDevice() && !isStandaloneMode()) {
+    document.querySelector("#statusBadge").textContent =
+      "To enable alerts on iPhone/iPad, tap Share → Add to Home Screen, then open the app from your home screen";
+    return;
+  }
+  let permission = Notification.permission;
+  if (permission !== "granted") {
+    permission = await Notification.requestPermission();
+  }
   setNotifyButtonState();
   if (permission === "granted") {
     rememberCurrentAlerts();
@@ -2169,10 +2193,10 @@ function renderDaily() {
 
     return `
     <button class="daily-card" type="button" data-day-index="${index}">
-      <p class="eyebrow">
-        ${day.name}
+      <p class="eyebrow">${day.name}</p>
+      <div class="daily-badge-row">
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
-      </p>
+      </div>
       ${weatherIcon(iconForCondition(day.shortForecast), true)}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
