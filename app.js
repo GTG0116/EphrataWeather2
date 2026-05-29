@@ -293,6 +293,7 @@ let userLocationMarker = null;
 let liveLocationWatchId = null;
 let currentSunrise = null;   // actual Date object
 let currentSunset  = null;   // actual Date object
+let metarStationOverride = null; // user-specified METAR station ID
 let popupWiredLayers = new Set(); // track which layers have popup handlers
 let alertPopupRegistry = new Map(); // popupId → features array for alert popups
 let alertPopupCounter = 0;
@@ -1025,13 +1026,19 @@ async function weatherPayload() {
 }
 
 async function aviationPayload() {
-  const loc = point();
-  const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
-  const stations = await getJson(gridPoint.properties.observationStations);
-  const station = stations.features?.[0];
-  const stationId = station?.properties?.stationIdentifier;
-  if (!stationId) throw new Error("No NWS aviation station found nearby");
-  const stationName = station?.properties?.name || stationId;
+  let stationId, stationName;
+  if (metarStationOverride) {
+    stationId = metarStationOverride.toUpperCase();
+    stationName = stationId;
+  } else {
+    const loc = point();
+    const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
+    const stations = await getJson(gridPoint.properties.observationStations);
+    const station = stations.features?.[0];
+    stationId = station?.properties?.stationIdentifier;
+    if (!stationId) throw new Error("No NWS aviation station found nearby");
+    stationName = station?.properties?.name || stationId;
+  }
   const data = await getJson(`https://api.weather.gov/stations/${stationId}/observations/latest`);
   const p = data.properties || {};
   const temp = fahrenheit(p.temperature?.value);
@@ -1635,10 +1642,19 @@ function renderCurrent() {
   hourlyStrip.innerHTML = (weatherState.hourly || []).slice(0, 24).map((hour, index) => {
     const time = new Date(hour.startTime);
     const precip = hour.probabilityOfPrecipitation?.value;
+    const isHourNight = (() => {
+      if (currentSunrise && currentSunset) {
+        const ms = time.getTime();
+        return ms < currentSunrise.getTime() || ms > currentSunset.getTime();
+      }
+      const h = localHour(time);
+      return h >= 20 || h <= 5;
+    })();
+    const iconHtml = `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(hour.shortForecast), isHourNight)}</span>`;
     return `
       <button class="hour-card compact" type="button" data-hour-index="${index}">
         <strong>${index === 0 ? "Now" : time.toLocaleTimeString([], { hour: "numeric" })}</strong>
-        ${weatherIcon(iconForCondition(hour.shortForecast))}
+        ${iconHtml}
         <div class="hour-temp">${f(hour.temperature)}°</div>
         <small>${f(precip)}%</small>
       </button>
@@ -2665,14 +2681,12 @@ async function renderClimate(date) {
     const stats = [
       ["Peak Wind", windMax != null ? `${Math.round(windMax)} mph` : "--", windGust != null ? `${Math.round(windGust)} mph gusts · ${windDirLabel(windDir)}` : "--", "wind"],
       ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? Math.round(dew) + "°F" : "--"}`, "humidity"],
-      ["Peak UV", uv != null ? uv.toFixed(1) : "--", uvRiskLabel(uv), "uv"],
       ["Avg Pressure", pressure != null ? (pressure * 0.02953).toFixed(2) + " inHg" : "--", pressure != null ? Math.round(pressure) + " hPa" : "--", "pressure"],
       ["Cloud Cover", cloud != null ? `${Math.round(cloud)}%` : "--", cloudCoverLabel(cloud), "cloud"],
       ["Precipitation", precip != null ? precip.toFixed(2) + '"' : '0.00"', precipDetail, "precip"],
       ...(snow != null && snow > 0 ? [["Snowfall", snow.toFixed(1) + '"', "Snow total", "snow"]] : []),
       ["Sunshine", sunshineHours(sunshine), "Duration of sunshine", "sunshine"],
       ["Sun Times", fmtTime(sunriseStr), `Sunrise · Sunset ${fmtTime(sunsetStr)}`, "sunrise"],
-      ["Degree Days", average != null ? `HDD ${Math.max(0, 65 - average)}` : "--", average != null ? `CDD ${Math.max(0, average - 65)}` : "--", "degree"],
     ];
     result.innerHTML = `
       <div class="hist-hero tile">
@@ -3712,7 +3726,6 @@ function drawRadar(relocate = false) {
   if (activeOverlays.has("Alerts"))       addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
   if (activeOverlays.has("Fire Wx"))      addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
   if (activeOverlays.has("WPC Rain"))     addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
-  if (activeOverlays.has("Surface"))      addSurfaceAnalysisLayer().catch(e => console.warn("Surface unavailable", e));
   if (activeOverlays.has("LSR"))          addLsrLayer().catch(e => console.warn("LSR unavailable", e));
   if (satelliteActive)                    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
 
@@ -3743,7 +3756,7 @@ function renderLayers() {
     { id: "Radar",     isActive: () => radarActive,     toggle: () => { radarActive = !radarActive; } },
     { id: "Satellite", isActive: () => satelliteActive, toggle: () => { satelliteActive = !satelliteActive; } },
   ];
-  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "Surface", "LSR", "Drought"];
+  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
     `<button type="button" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}">${l.id}</button>`
@@ -4065,6 +4078,41 @@ document.querySelector("#locateMeBtn")?.addEventListener("click", async () => {
   } finally {
     if (btn) btn.disabled = false;
     if (label) label.textContent = "Locate Me";
+  }
+});
+document.querySelector("#metarSearchForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.querySelector("#metarStationInput");
+  const clearBtn = document.querySelector("#metarClearBtn");
+  const val = input?.value?.trim().toUpperCase();
+  if (!val) return;
+  metarStationOverride = val;
+  if (clearBtn) clearBtn.hidden = false;
+  document.querySelector(".metar-card .eyebrow").textContent = `Loading ${val}…`;
+  document.querySelector("#flightRule").textContent = "…";
+  document.querySelector("#metarRaw").textContent = "";
+  document.querySelector("#metarDecoded").innerHTML = "";
+  try {
+    const aviation = await aviationPayload();
+    renderMetar(aviation);
+  } catch (err) {
+    document.querySelector(".metar-card .eyebrow").textContent = val;
+    document.querySelector("#metarRaw").textContent = `Station not found: ${err.message}`;
+    document.querySelector("#flightRule").textContent = "UNK";
+  }
+});
+document.querySelector("#metarClearBtn")?.addEventListener("click", async () => {
+  metarStationOverride = null;
+  const input = document.querySelector("#metarStationInput");
+  const clearBtn = document.querySelector("#metarClearBtn");
+  if (input) input.value = "";
+  if (clearBtn) clearBtn.hidden = true;
+  document.querySelector(".metar-card .eyebrow").textContent = "Loading…";
+  try {
+    const aviation = await aviationPayload();
+    renderMetar(aviation);
+  } catch (err) {
+    renderMetar(null);
   }
 });
 document.querySelector("#radarTimeline")?.addEventListener("input", event => {

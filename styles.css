@@ -998,6 +998,50 @@ dd {
   padding: 22px;
 }
 
+.metar-search-form {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 4px;
+}
+
+.metar-search-input {
+  flex: 1 1 auto;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(2, 6, 23, 0.5);
+  color: inherit;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.metar-search-input::placeholder {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.metar-search-btn,
+.metar-search-clear {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.metar-search-btn:hover,
+.metar-search-clear:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
 .aviation-grid {
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
 }
@@ -1824,6 +1868,19 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  overflow: hidden;
+}
+
+.hist-hero-left {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.hist-hero-left .eyebrow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hist-hero-icon {
@@ -1948,16 +2005,27 @@ dd {
 .hist-stat-card {
   padding: 16px;
   min-height: 100px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .hist-stat-head {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+.hist-stat-head .ui-icon {
+  flex: 0 0 auto;
 }
 
 .hist-stat-head .eyebrow {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hist-stat-card strong {
