@@ -235,6 +235,11 @@
             <article class="tile metar-card">
               <p class="eyebrow">Nearest Aviation Weather</p>
               <h2 id="aviation-title">NWS Aviation Conditions</h2>
+              <form class="metar-search-form" id="metarSearchForm" autocomplete="off">
+                <input type="text" id="metarStationInput" class="metar-search-input" placeholder="Search METAR station (e.g. KPAE)" maxlength="6" spellcheck="false" aria-label="METAR station ID" />
+                <button type="submit" class="metar-search-btn">Go</button>
+                <button type="button" class="metar-search-clear" id="metarClearBtn" hidden>Reset</button>
+              </form>
               <div class="flight-rule" id="flightRule">VFR</div>
               <pre id="metarRaw"></pre>
               <dl id="metarDecoded"></dl>
