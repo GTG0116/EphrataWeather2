@@ -68,7 +68,7 @@ const MRMS_BASE = "https://raw.githubusercontent.com/EphrataWeather/MRMS/main/pu
 const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
 const MRMS_PRODUCTS = {
   rate:      { label: "Precip Type",     getImg: i => i === 0 ? "master.png" : `master_${i}.png`,  getMeta: i => `metadata_${i}.json`,          hasVal: false },
-  refl:      { label: "Reflectivity",    getImg: i => `refl_${i}.png`,                              getMeta: i => `metadata_refl_${i}.json`,      hasVal: false },
+  refl:      { label: "Reflectivity",    getImg: i => `refl_${i}.png`,                              getMeta: i => `metadata_refl_${i}.json`,      hasVal: true,  getVal: i => `refl_val_${i}.png`,      valMax: 80.0, valUnit: "dBZ" },
   mesh:      { label: "Hail (MESH)",     getImg: i => `mesh_${i}.png`,                              getMeta: i => `metadata_mesh_${i}.json`,      hasVal: true,  getVal: i => `mesh_val_${i}.png`,      valMax: 8.0,  valUnit: "in" },
   qpe6h:     { label: "6-Hr Precip",     getImg: i => `qpe6h_${i}.png`,                             getMeta: i => `metadata_qpe6h_${i}.json`,     hasVal: true,  getVal: i => `qpe6h_val_${i}.png`,     valMax: 40.0, valUnit: "in" },
   qpe24h:    { label: "24-Hr Precip",    getImg: i => `qpe24h_${i}.png`,                            getMeta: i => `metadata_qpe24h_${i}.json`,    hasVal: true,  getVal: i => `qpe24h_val_${i}.png`,    valMax: 80.0, valUnit: "in" },
@@ -2058,12 +2058,23 @@ async function registerPushSubscription() {
     });
   }
 
+  // Fetch NWS forecast zone + county zone codes so the worker can use the
+  // more reliable ?zone= endpoint instead of ?point= for county-level alerts.
+  let nwsZones = [];
+  try {
+    const gp = await getJson(`https://api.weather.gov/points/${selectedLocation.lat},${selectedLocation.lon}`);
+    nwsZones = [gp.properties?.forecastZone, gp.properties?.county, gp.properties?.fireWeatherZone]
+      .filter(Boolean)
+      .map(url => url.split("/").pop())
+      .filter(Boolean);
+  } catch {}
+
   const response = await fetch(PUSH_SUBSCRIBE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       subscription,
-      location: selectedLocation,
+      location: { ...selectedLocation, nwsZones },
     }),
   });
   if (!response.ok) throw new Error(`Push subscribe failed: ${response.status}`);

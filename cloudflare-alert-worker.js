@@ -133,16 +133,37 @@ async function checkSubscriptions(env) {
 }
 
 async function activeAlerts(location, env) {
-  const endpoint = `https://api.weather.gov/alerts/active?point=${location.lat},${location.lon}`;
-  const response = await fetch(endpoint, {
-    headers: {
-      "Accept": "application/geo+json, application/json",
-      "User-Agent": env.NWS_USER_AGENT || "WeatherPortal/1.0 weather-alert-worker",
-    },
-  });
-  if (!response.ok) throw new Error(`NWS alerts failed: ${response.status}`);
-  const data = await response.json();
-  return (data.features || []).map(feature => ({
+  const nwsHeaders = {
+    "Accept": "application/geo+json, application/json",
+    "User-Agent": env.NWS_USER_AGENT || "WeatherPortal/1.0 weather-alert-worker",
+  };
+
+  // Use stored NWS zone codes (forecast zone + county zone) when available.
+  // ?zone= is more reliable than ?point= and captures county-level warnings directly.
+  const zones = (location.nwsZones || []).filter(z => /^[A-Z]{2}[CFZ]\d{3}$/i.test(z));
+  if (zones.length) {
+    const zoneResp = await fetch(
+      `https://api.weather.gov/alerts/active?zone=${zones.join(",")}`,
+      { headers: nwsHeaders }
+    );
+    if (zoneResp.ok) {
+      const data = await zoneResp.json();
+      return parseAlertFeatures(data.features || []);
+    }
+    // Zone-based call failed — fall through to point-based fallback below.
+  }
+
+  const pointResp = await fetch(
+    `https://api.weather.gov/alerts/active?point=${location.lat},${location.lon}`,
+    { headers: nwsHeaders }
+  );
+  if (!pointResp.ok) throw new Error(`NWS alerts failed: ${pointResp.status}`);
+  const data = await pointResp.json();
+  return parseAlertFeatures(data.features || []);
+}
+
+function parseAlertFeatures(features) {
+  return features.map(feature => ({
     id: feature.id || feature.properties?.id || `${feature.properties?.event}-${feature.properties?.sent}`,
     event: feature.properties?.event || "Weather Alert",
     headline: feature.properties?.headline || null,
@@ -318,6 +339,7 @@ function normalizeLocation(location = {}) {
     lon: Number(location.lon),
     name: String(location.name || "Saved location"),
     timezone: location.timezone || null,
+    nwsZones: Array.isArray(location.nwsZones) ? location.nwsZones : [],
   };
 }
 
