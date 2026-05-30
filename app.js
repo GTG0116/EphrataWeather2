@@ -63,6 +63,63 @@ const DROUGHT_URLS = [
   "https://idpgis.ncep.noaa.gov/arcgis/rest/services/NWS_Climate_Outlooks/cpc_usdm/MapServer/0/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
 ];
 
+// ─── MRMS Radar (EphrataWeather/MRMS on GitHub) ───────────────────────────────
+const MRMS_BASE = "https://raw.githubusercontent.com/EphrataWeather/MRMS/main/public/data/";
+const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
+const MRMS_PRODUCTS = {
+  rate:      { label: "Precip Type",     getImg: i => i === 0 ? "master.png" : `master_${i}.png`,  getMeta: i => `metadata_${i}.json`,          hasVal: false },
+  refl:      { label: "Reflectivity",    getImg: i => `refl_${i}.png`,                              getMeta: i => `metadata_refl_${i}.json`,      hasVal: false },
+  mesh:      { label: "Hail (MESH)",     getImg: i => `mesh_${i}.png`,                              getMeta: i => `metadata_mesh_${i}.json`,      hasVal: true,  getVal: i => `mesh_val_${i}.png`,      valMax: 8.0,  valUnit: "in" },
+  qpe6h:     { label: "6-Hr Precip",     getImg: i => `qpe6h_${i}.png`,                             getMeta: i => `metadata_qpe6h_${i}.json`,     hasVal: true,  getVal: i => `qpe6h_val_${i}.png`,     valMax: 40.0, valUnit: "in" },
+  qpe24h:    { label: "24-Hr Precip",    getImg: i => `qpe24h_${i}.png`,                            getMeta: i => `metadata_qpe24h_${i}.json`,    hasVal: true,  getVal: i => `qpe24h_val_${i}.png`,    valMax: 80.0, valUnit: "in" },
+  lightning: { label: "Lightning Prob",  getImg: i => `lightning_${i}.png`,                         getMeta: i => `metadata_lightning_${i}.json`, hasVal: true,  getVal: i => `lightning_val_${i}.png`, valMax: 100,  valUnit: "%" },
+  rotation:  { label: "Azimuthal Shear", getImg: i => `rotation_${i}.png`,                          getMeta: i => `metadata_rotation_${i}.json`,  hasVal: true,  getVal: i => `rotation_val_${i}.png`,  valMax: 1.0,  valUnit: "s⁻¹" },
+};
+const MRMS_LEGENDS = {
+  rate: [
+    { color: "#00fb90", label: "Light Rain" },
+    { color: "#019400", label: "Heavy Rain" },
+    { color: "#ff0000", label: "Extreme Rain" },
+    { color: "#ff00ff", label: "Freezing/Ice Mix" },
+    { color: "#640064", label: "Heavy Ice Mix" },
+    { color: "#00ffff", label: "Light Snow" },
+    { color: "#ffffff", label: "Heavy Snow" },
+  ],
+  refl: [
+    { color: "#646464", label: "5 dBZ" }, { color: "#04e9e7", label: "15 dBZ" },
+    { color: "#019ff4", label: "25 dBZ" }, { color: "#0300f4", label: "30 dBZ" },
+    { color: "#02fd02", label: "35 dBZ" }, { color: "#01c501", label: "40 dBZ" },
+    { color: "#ffff00", label: "45 dBZ" }, { color: "#ff9900", label: "50 dBZ" },
+    { color: "#ff0000", label: "55 dBZ" }, { color: "#d40000", label: "60 dBZ" },
+    { color: "#ff00ff", label: "65 dBZ" }, { color: "#9955ff", label: "70+ dBZ" },
+  ],
+  mesh: [
+    { color: "#c8f500", label: "0.25 in" }, { color: "#ffff00", label: "0.5 in" },
+    { color: "#ff9600", label: "1.0 in" },  { color: "#ff0000", label: "2.0 in" },
+    { color: "#aa0000", label: "3.0 in" },  { color: "#7f0000", label: "4+ in" },
+  ],
+  qpe6h: [
+    { color: "#88ff88", label: "0.1 in" }, { color: "#ffff00", label: "0.5 in" },
+    { color: "#ff9900", label: "1.0 in" }, { color: "#ff0000", label: "2.0 in" },
+    { color: "#aa00aa", label: "5+ in" },
+  ],
+  qpe24h: [
+    { color: "#88ff88", label: "0.5 in" }, { color: "#ffff00", label: "1.0 in" },
+    { color: "#ff9900", label: "2.0 in" }, { color: "#ff0000", label: "5.0 in" },
+    { color: "#aa00aa", label: "10+ in" },
+  ],
+  lightning: [
+    { color: "#ffffb2", label: "1-5%" }, { color: "#fecc5c", label: "5-10%" },
+    { color: "#fd8d3c", label: "10-20%" }, { color: "#f03b20", label: "20-40%" },
+    { color: "#bd0026", label: "40%+" },
+  ],
+  rotation: [
+    { color: "#0000ff", label: "−0.8 s⁻¹" }, { color: "#8888ff", label: "−0.4 s⁻¹" },
+    { color: "#cccccc", label: "0" },
+    { color: "#ff8888", label: "+0.4 s⁻¹" }, { color: "#ff0000", label: "+0.8 s⁻¹" },
+  ],
+};
+
 const WMO_CODES = {
   0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
   45: "Fog", 48: "Freezing fog",
@@ -295,8 +352,12 @@ let currentSunrise = null;   // actual Date object
 let currentSunset  = null;   // actual Date object
 let metarStationOverride = null; // user-specified METAR station ID
 let popupWiredLayers = new Set(); // track which layers have popup handlers
-let alertPopupRegistry = new Map(); // popupId → features array for alert popups
+let alertPopupRegistry = new Map(); // popupId → alert features array (for _viewAlertFromMapFeature)
 let alertPopupCounter = 0;
+let activeMrmsProduct = (() => { const s = localStorage.getItem("mrmsProduct"); return MRMS_PRODUCTS[s] ? s : "rate"; })();
+let mrmsImageBounds = null;  // {west, east, north, south}
+let mrmsTimeCache = {};      // `${product}_${frameIdx}` → time string
+let mrmsCanvasCache = {};    // `${product}_${frameIdx}` → {imgData, width, height}
 
 async function getJson(url, options = {}) {
   const response = await fetch(url, {
@@ -2894,11 +2955,9 @@ function radarLayerForLocation(location = selectedLocation) {
   return "conus_base_reflectivity_mosaic";
 }
 
-function radarFrameTimes() {
-  const now = Date.now();
-  const rounded = now - (now % (4 * 60 * 1000));
-  radarFrames = Array.from({ length: 9 }, (_, i) => new Date(rounded - (8 - i) * 4 * 60 * 1000));
-  return radarFrames;
+function mrmsFrameArray() {
+  // Returns [MRMS_FRAMES-1, ..., 1, 0] so slider 0=oldest, slider max=latest(mrmsIdx=0)
+  return Array.from({ length: MRMS_FRAMES }, (_, i) => MRMS_FRAMES - 1 - i);
 }
 
 
@@ -2989,65 +3048,47 @@ function renderMapSidebar() {
   `;
 }
 
-function radarTileUrl(time) {
-  const params = new URLSearchParams({
-    SERVICE: "WMS",
-    VERSION: "1.3.0",
-    REQUEST: "GetMap",
-    FORMAT: "image/png",
-    TRANSPARENT: "true",
-    CRS: "EPSG:3857",
-    WIDTH: "256",
-    HEIGHT: "256",
-    STYLES: "weather_radar_base_reflectivity",
-    LAYERS: radarLayerForLocation(),
-    TIME: time.toISOString(),
-  });
-  return `${NOAA_RADAR_WMS}?${params.toString()}&BBOX={bbox-epsg-3857}`;
+function mrmsImgUrl(mrmsIdx) {
+  return MRMS_BASE + MRMS_PRODUCTS[activeMrmsProduct].getImg(mrmsIdx);
 }
 
 function updateRadarLabel() {
   const labelEl = document.querySelector("#radarTimeLabel");
   if (!labelEl) return;
-  const frame = radarFrames[radarFrameIndex];
-  labelEl.textContent = frame instanceof Date
-    ? frame.toLocaleTimeString("en-US", { timeZone: selectedLocation.timezone || "America/New_York", hour: "numeric", minute: "2-digit" })
-    : "Latest";
   const slider = document.querySelector("#radarTimeline");
   if (slider) slider.value = String(radarFrameIndex);
+  const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
+  if (mrmsIdx === 0) { labelEl.textContent = "Latest"; return; }
+  const key = `${activeMrmsProduct}_${mrmsIdx}`;
+  if (mrmsTimeCache[key]) { labelEl.textContent = mrmsTimeCache[key]; return; }
+  labelEl.textContent = `−${mrmsIdx * 10}min`;
+  // Lazily fetch time from metadata
+  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
+  const capturedIdx = mrmsIdx;
+  fetch(`${MRMS_BASE}${cfg.getMeta(capturedIdx)}`)
+    .then(r => r.json())
+    .then(meta => {
+      if (meta.time) {
+        mrmsTimeCache[key] = meta.time;
+        if (radarFrames[radarFrameIndex] === capturedIdx) labelEl.textContent = meta.time;
+      }
+    })
+    .catch(() => {});
 }
 
 function setRadarFrame(index) {
   radarFrameIndex = Math.max(0, Math.min(radarFrames.length - 1, Number(index)));
   if (radarMap && mapLoaded && radarActive) {
-    clearTimeout(radarFrameTransitionTimer);
-    const slots = ["a", "b"];
-    const curSlot = slots[radarSlot];
-    const nextSlot = slots[1 - radarSlot];
-    const curLayerId = `radar-layer-${curSlot}`;
-    const curSrcId   = `radar-source-${curSlot}`;
-    const nextLayerId = `radar-layer-${nextSlot}`;
-    const nextSrcId   = `radar-source-${nextSlot}`;
-
-    removeMapLayer(nextLayerId);
-    removeMapSource(nextSrcId);
-
-    radarMap.addSource(nextSrcId, {
-      type: "raster",
-      tiles: [radarTileUrl(radarFrames[radarFrameIndex])],
-      tileSize: 256,
-      attribution: "NOAA nowCOAST / NWS MRMS",
-    });
-    radarMap.addLayer({
-      id: nextLayerId, type: "raster", source: nextSrcId,
-      paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 500 },
-    });
-    radarSlot = 1 - radarSlot;
-
-    radarFrameTransitionTimer = setTimeout(() => {
-      removeMapLayer(curLayerId);
-      removeMapSource(curSrcId);
-    }, 600);
+    const src = radarMap.getSource("mrms-source");
+    if (src) {
+      const mrmsIdx = radarFrames[radarFrameIndex];
+      const url = mrmsImgUrl(mrmsIdx);
+      // Preload to avoid blank flash, then update
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => src.updateImage({ url });
+      img.src = url;
+    }
   }
   updateRadarLabel();
 }
@@ -3055,10 +3096,8 @@ function setRadarFrame(index) {
 function setRainfallOpacity(pct) {
   radarOpacity = pct / 100;
   if (radarMap && mapLoaded) {
-    for (const slot of ["a", "b"]) {
-      if (radarMap.getLayer(`radar-layer-${slot}`))
-        radarMap.setPaintProperty(`radar-layer-${slot}`, "raster-opacity", radarOpacity);
-    }
+    if (radarMap.getLayer("mrms-layer"))
+      radarMap.setPaintProperty("mrms-layer", "raster-opacity", radarOpacity);
   }
   const label = document.querySelector("#radarOpacityLabel");
   if (label) label.textContent = `${pct}%`;
@@ -3075,7 +3114,8 @@ function removeMapSource(id) {
 function clearWeatherLayers() {
   stopRadarAnimation();
   clearTimeout(radarFrameTransitionTimer);
-  ["radar-layer-a", "radar-layer-b",
+  ["mrms-layer",
+   "radar-layer-a", "radar-layer-b",
    "spc-fill", "spc-line",
    "drought-fill", "drought-line",
    "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
@@ -3084,7 +3124,8 @@ function clearWeatherLayers() {
    "surface-layer",
    "satellite-layer",
   ].forEach(removeMapLayer);
-  ["radar-source-a", "radar-source-b",
+  ["mrms-source",
+   "radar-source-a", "radar-source-b",
    "spc-source",
    "drought-source",
    "alerts-source", "nws-alerts-source",
@@ -3096,6 +3137,8 @@ function clearWeatherLayers() {
   document.querySelectorAll(".lsr-marker-wrap").forEach(el => el.remove());
   const leg = document.querySelector("#spcLegendBox");
   if (leg) leg.hidden = true;
+  const mrmsLeg = document.querySelector("#mrmsLegendBox");
+  if (mrmsLeg) mrmsLeg.hidden = true;
   radarSlot = 0;
 }
 
@@ -3114,6 +3157,10 @@ function renderBasemapButtons() {
         radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
         radarMap.once("style.load", () => {
           mapLoaded = true;
+          // Clear per-layer wiring flags so cursor handlers are re-added
+          popupWiredLayers.delete("spc"); popupWiredLayers.delete("fire");
+          popupWiredLayers.delete("wpc-rain"); popupWiredLayers.delete("all-alerts");
+          droughtPopupWired = false;
           drawRadar(false);
         });
       }
@@ -3135,6 +3182,7 @@ function initMap() {
   radarMap.on("load", () => {
     mapLoaded = true;
     drawRadar(true);
+    wireUnifiedClickHandler();
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(pos => {
         updateUserLocationMarker(pos.coords.latitude, pos.coords.longitude);
@@ -3145,24 +3193,45 @@ function initMap() {
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
 }
 
-function addRadarLayer() {
-  radarFrames = radarFrameTimes();
-  radarFrameIndex = radarFrames.length - 1;
+async function addRadarLayer() {
+  // Fetch bounds once (all MRMS products share the same CONUS extent)
+  if (!mrmsImageBounds) {
+    try {
+      const meta = await fetch(`${MRMS_BASE}metadata_0.json?t=${Date.now()}`).then(r => r.json());
+      if (meta.bounds) {
+        const [[south, west], [north, east]] = meta.bounds;
+        mrmsImageBounds = { south, west, north, east };
+      }
+    } catch {}
+    if (!mrmsImageBounds) mrmsImageBounds = { south: 24, west: -130, north: 50, east: -60 };
+  }
+
+  radarFrames = mrmsFrameArray();
+  radarFrameIndex = radarFrames.length - 1; // latest = mrmsIdx 0
   const slider = document.querySelector("#radarTimeline");
   if (slider) { slider.max = radarFrames.length - 1; slider.value = radarFrameIndex; }
 
-  const slot = radarSlot === 0 ? "a" : "b";
-  radarMap.addSource(`radar-source-${slot}`, {
-    type: "raster",
-    tiles: [radarTileUrl(radarFrames[radarFrameIndex])],
-    tileSize: 256,
-    attribution: "NOAA nowCOAST / NWS MRMS",
+  const mrmsIdx = radarFrames[radarFrameIndex]; // 0 = latest
+  const { west, east, north, south } = mrmsImageBounds;
+  const coords = [[west, north], [east, north], [east, south], [west, south]];
+
+  radarMap.addSource("mrms-source", {
+    type: "image",
+    url: mrmsImgUrl(mrmsIdx),
+    coordinates: coords,
   });
   radarMap.addLayer({
-    id: `radar-layer-${slot}`, type: "raster", source: `radar-source-${slot}`,
+    id: "mrms-layer",
+    type: "raster",
+    source: "mrms-source",
     paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400 },
   });
   updateRadarLabel();
+  renderMrmsLegend();
+
+  // Update the product select to reflect current product
+  const sel = document.querySelector("#mrmsProductSelect");
+  if (sel) sel.value = activeMrmsProduct;
 }
 
 async function addSpcLayer() {
@@ -3209,29 +3278,6 @@ async function addSpcLayer() {
   });
 
   if (!popupWiredLayers.has("spc")) {
-    radarMap.on("click", "spc-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const typeLabel = activeSpcType === "cat" ? "Categorical" : activeSpcType.charAt(0).toUpperCase() + activeSpcType.slice(1);
-      const risk = spcPopupLabel(f.properties || {});
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`
-          <div class="popup-header">
-            <div class="popup-icon popup-spc" style="background:rgba(250,204,21,0.15);border:1px solid rgba(250,204,21,0.35);">⚡</div>
-            <div>
-              <div class="popup-title">SPC Day ${activeSpcDay} Outlook</div>
-              <div class="popup-subtitle">${safeText(typeLabel)}</div>
-            </div>
-          </div>
-          <div class="popup-stat">
-            <span class="popup-key">Risk Level</span>
-            <span class="popup-val">${safeText(risk)}</span>
-          </div>
-          <div class="popup-note">Storm Prediction Center — NOAA</div>
-        `)
-        .addTo(radarMap);
-    });
     radarMap.on("mouseenter", "spc-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
     radarMap.on("mouseleave", "spc-fill", () => { radarMap.getCanvas().style.cursor = ""; });
     popupWiredLayers.add("spc");
@@ -3282,21 +3328,6 @@ async function addFireWeatherLayer() {
     },
   });
   if (!popupWiredLayers.has("fire")) {
-    radarMap.on("click", "fire-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const label = f.properties?.LABEL || "Fire Weather Area";
-      const labelNice = { ELEVATED: "Elevated", CRITICAL: "Critical", EXTREME: "Extreme" }[label] ?? (label.charAt(0) + label.slice(1).toLowerCase());
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`<div class="popup-header">
-          <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
-          <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day ${activeFireDay} Forecast</div></div>
-        </div>
-        <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNice)}</span></div>
-        <div class="popup-note">Elevated fire weather conditions. Monitor local alerts and fire restrictions.</div>`)
-        .addTo(radarMap);
-    });
     radarMap.on("mouseenter", "fire-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
     radarMap.on("mouseleave", "fire-fill", () => { radarMap.getCanvas().style.cursor = ""; });
     popupWiredLayers.add("fire");
@@ -3329,21 +3360,6 @@ async function addWpcRainfallLayer() {
     },
   });
   if (!popupWiredLayers.has("wpc-rain")) {
-    radarMap.on("click", "wpc-rain-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const label = f.properties?.LABEL || "Unknown";
-      const labelNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`<div class="popup-header">
-          <div class="popup-icon" style="background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);">🌧️</div>
-          <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day ${activeWpcDay} Outlook</div></div>
-        </div>
-        <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNames[label] || label)}</span></div>
-        <div class="popup-note">WPC Day ${activeWpcDay} Excessive Rainfall Outlook — NOAA</div>`)
-        .addTo(radarMap);
-    });
     radarMap.on("mouseenter", "wpc-rain-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
     radarMap.on("mouseleave", "wpc-rain-fill", () => { radarMap.getCanvas().style.cursor = ""; });
     popupWiredLayers.add("wpc-rain");
@@ -3503,7 +3519,17 @@ async function nwsAlertFeatureCollection() {
   return { type: "FeatureCollection", features };
 }
 
-function buildAlertFeatureHtml(feature, idx, total, popupId) {
+function buildPopupNavHtml(idx, total) {
+  if (total <= 1) return "";
+  return `
+    <div class="popup-alert-nav">
+      <button class="popup-nav-btn" onclick="window._alertNav(-1)" ${idx === 0 ? "disabled" : ""}>&#8249;</button>
+      <span class="popup-nav-counter">${idx + 1} / ${total}</span>
+      <button class="popup-nav-btn" onclick="window._alertNav(1)" ${idx === total - 1 ? "disabled" : ""}>&#8250;</button>
+    </div>`;
+}
+
+function buildAlertBodyHtml(feature, alertIdx, popupId) {
   const p = feature.properties || {};
   const isIem = p.phenomena != null;
   let title, subtitle, detailHtml, iconStyle;
@@ -3537,13 +3563,6 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
       <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>`;
   }
 
-  const navHtml = total > 1 ? `
-    <div class="popup-alert-nav">
-      <button class="popup-nav-btn" onclick="window._alertNav(-1)" ${idx === 0 ? "disabled" : ""}>&#8249;</button>
-      <span class="popup-nav-counter">${idx + 1} / ${total}</span>
-      <button class="popup-nav-btn" onclick="window._alertNav(1)" ${idx === total - 1 ? "disabled" : ""}>&#8250;</button>
-    </div>` : "";
-
   return `
     <div class="popup-header">
       <div class="popup-icon popup-alert" style="${iconStyle}">⚠️</div>
@@ -3552,9 +3571,13 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
         <div class="popup-subtitle">${safeText(subtitle)}</div>
       </div>
     </div>
-    ${navHtml}
+    [NAV_SLOT]
     ${detailHtml}
-    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${popupId},${idx})">View Alert Details</button>`;
+    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${popupId},${alertIdx})">View Alert Details</button>`;
+}
+
+function buildAlertFeatureHtml(feature, idx, total, popupId) {
+  return buildAlertBodyHtml(feature, idx, popupId).replace("[NAV_SLOT]", buildPopupNavHtml(idx, total));
 }
 
 async function addAlertsLayer() {
@@ -3621,38 +3644,13 @@ async function addAlertsLayer() {
     });
   }
 
-  // Unified click handler for all alert layers — shows paginated popup when multiple alerts overlap
+  // Cursor changes only — clicks handled by wireUnifiedClickHandler()
   if ((hasIemAlerts || hasNwsAlerts) && !popupWiredLayers.has("all-alerts")) {
-    const alertClickLayers = [
+    const alertCursorLayers = [
       ...(hasIemAlerts ? ["alerts-fill"] : []),
       ...(hasNwsAlerts ? ["nws-alerts-fill"] : []),
     ];
-
-    let _alertClickPending = false;
-    const handleAlertClick = ev => {
-      if (_alertClickPending) return;
-      _alertClickPending = true;
-      queueMicrotask(() => { _alertClickPending = false; });
-
-      const activeLayers = alertClickLayers.filter(l => radarMap.getLayer(l));
-      const features = radarMap.queryRenderedFeatures(ev.point, { layers: activeLayers });
-      if (!features.length) return;
-
-      let idx = 0;
-      window._alertMapFeatures = features;
-      const popupId = ++alertPopupCounter;
-      alertPopupRegistry.set(popupId, features);
-      const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
-      popup.on("close", () => alertPopupRegistry.delete(popupId));
-      window._alertNav = delta => {
-        idx = Math.max(0, Math.min(features.length - 1, idx + delta));
-        popup.setHTML(buildAlertFeatureHtml(features[idx], idx, features.length, popupId));
-      };
-      popup.setHTML(buildAlertFeatureHtml(features[0], 0, features.length, popupId));
-    };
-
-    alertClickLayers.forEach(layer => {
-      radarMap.on("click", layer, handleAlertClick);
+    alertCursorLayers.forEach(layer => {
       radarMap.on("mouseenter", layer, () => { radarMap.getCanvas().style.cursor = "pointer"; });
       radarMap.on("mouseleave", layer, () => { radarMap.getCanvas().style.cursor = ""; });
     });
@@ -3686,28 +3684,6 @@ async function addDroughtLayer() {
     },
   });
   if (!droughtPopupWired) {
-    radarMap.on("click", "drought-fill", ev => {
-      const f = ev.features?.[0];
-      if (!f) return;
-      const cat = f.properties?.CATEGORY || "";
-      new mapboxgl.Popup({ offset: 8 })
-        .setLngLat(ev.lngLat)
-        .setHTML(`
-          <div class="popup-header">
-            <div class="popup-icon" style="background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.35);">🌵</div>
-            <div>
-              <div class="popup-title">U.S. Drought Monitor</div>
-              <div class="popup-subtitle">USDA / NOAA / UNL</div>
-            </div>
-          </div>
-          <div class="popup-stat">
-            <span class="popup-key">Classification</span>
-            <span class="popup-val">${safeText(droughtLabel(cat))}</span>
-          </div>
-          <div class="popup-note">Updated weekly every Thursday. Data: drought.gov</div>
-        `)
-        .addTo(radarMap);
-    });
     radarMap.on("mouseenter", "drought-fill", () => { radarMap.getCanvas().style.cursor = "pointer"; });
     radarMap.on("mouseleave", "drought-fill", () => { radarMap.getCanvas().style.cursor = ""; });
     droughtPopupWired = true;
@@ -3720,7 +3696,7 @@ function drawRadar(relocate = false) {
   if (!radarMap || !mapLoaded) return;
   clearWeatherLayers();
 
-  if (radarActive)                        addRadarLayer();
+  if (radarActive)                        addRadarLayer().catch(e => console.warn("Radar unavailable", e));
   if (activeOverlays.has("SPC"))          addSpcLayer().catch(e => console.warn("SPC unavailable", e));
   if (activeOverlays.has("Drought"))      addDroughtLayer().catch(e => console.warn("Drought unavailable", e));
   if (activeOverlays.has("Alerts"))       addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
@@ -3743,6 +3719,7 @@ function animateRadarLayer() {
   const lbl = document.querySelector("#playLabel");
   if (lbl) lbl.textContent = "Pause";
   radarAnimationTimer = setInterval(() => {
+    // Animate oldest→newest: radarFrameIndex 0=oldest → MRMS_FRAMES-1=latest
     setRadarFrame((radarFrameIndex + 1) % radarFrames.length);
   }, RADAR_FRAME_MS);
 }
@@ -3812,6 +3789,7 @@ function renderLayers() {
   const radCtrl = document.querySelector("#radarSubControls");
   if (radCtrl) {
     radCtrl.hidden = !radarActive;
+    if (radarActive) renderRadarSubControls();
   }
 }
 
@@ -3943,6 +3921,265 @@ function renderSpcLegend() {
       </div>
     `).join("")}
   `;
+}
+
+function renderRadarSubControls() {
+  const sel = document.querySelector("#mrmsProductSelect");
+  if (!sel) return;
+  sel.value = activeMrmsProduct;
+}
+
+function renderMrmsLegend() {
+  const box = document.querySelector("#mrmsLegendBox");
+  if (!box) return;
+  if (!radarActive) { box.hidden = true; return; }
+  box.hidden = false;
+  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
+  const entries = MRMS_LEGENDS[activeMrmsProduct] || [];
+  box.innerHTML = `
+    <div class="legend-title">MRMS ${safeText(cfg.label)}</div>
+    ${entries.map(e => `
+      <div class="legend-row">
+        <span class="legend-swatch" style="background:${e.color};border:1px solid ${e.color}88"></span>
+        ${safeText(e.label)}
+      </div>
+    `).join("")}
+  `;
+}
+
+// ─── Pixel value sampling ────────────────────────────────────────────────────
+
+async function loadImgCors(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Image load failed: ${url}`));
+    img.src = url;
+  });
+}
+
+async function sampleMrmsValue(lng, lat) {
+  if (!mrmsImageBounds) return null;
+  const { west, east, north, south } = mrmsImageBounds;
+  const xFrac = (lng - west) / (east - west);
+  const yFrac = (north - lat) / (north - south);
+  if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return null;
+
+  const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
+  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
+
+  // Try val image first (16-bit precision)
+  if (cfg.hasVal && cfg.getVal) {
+    const valKey = `${activeMrmsProduct}_val_${mrmsIdx}`;
+    let ve = mrmsCanvasCache[valKey];
+    if (!ve) {
+      try {
+        const img = await loadImgCors(MRMS_BASE + cfg.getVal(mrmsIdx));
+        const c = document.createElement("canvas");
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const cx = c.getContext("2d"); cx.drawImage(img, 0, 0);
+        ve = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
+        mrmsCanvasCache[valKey] = ve;
+      } catch {}
+    }
+    if (ve) {
+      const x = Math.min(ve.width - 1, Math.max(0, Math.round(xFrac * ve.width)));
+      const y = Math.min(ve.height - 1, Math.max(0, Math.round(yFrac * ve.height)));
+      const i = (y * ve.width + x) * 4;
+      const [r, g, b, a] = [ve.imgData.data[i], ve.imgData.data[i+1], ve.imgData.data[i+2], ve.imgData.data[i+3]];
+      if (a < 20) return { noData: true };
+      const val = (((r << 8) | g) / 65535) * cfg.valMax;
+      return { hasVal: true, value: val, unit: cfg.valUnit, product: cfg.label };
+    }
+  }
+
+  // Fall back: sample main image for color-based label
+  const mainKey = `${activeMrmsProduct}_${mrmsIdx}`;
+  let me = mrmsCanvasCache[mainKey];
+  if (!me) {
+    try {
+      const img = await loadImgCors(MRMS_BASE + cfg.getImg(mrmsIdx));
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const cx = c.getContext("2d"); cx.drawImage(img, 0, 0);
+      me = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
+      mrmsCanvasCache[mainKey] = me;
+    } catch { return null; }
+  }
+  const x = Math.min(me.width - 1, Math.max(0, Math.round(xFrac * me.width)));
+  const y = Math.min(me.height - 1, Math.max(0, Math.round(yFrac * me.height)));
+  const i = (y * me.width + x) * 4;
+  const [r, g, b, a] = [me.imgData.data[i], me.imgData.data[i+1], me.imgData.data[i+2], me.imgData.data[i+3]];
+  if (a < 20) return { noData: true };
+  return { hasVal: false, r, g, b, product: cfg.label, label: interpretMrmsColor(r, g, b) };
+}
+
+function interpretMrmsColor(r, g, b) {
+  const prod = activeMrmsProduct;
+  if (prod === "rate") {
+    if (r > 220 && g > 220 && b > 220) return "Heavy Snow";
+    if (b > 180 && b > r + 30 && b > g - 40) return "Snow";
+    if (r > 150 && b > 90 && g < 70) return "Freezing/Ice Mix";
+    if (g > 180 && g > r + 40 && g > b + 20) {
+      if (r > 160) return "Heavy Rain";
+      if (r > 80) return "Moderate Rain";
+      return "Light Rain";
+    }
+    if (r > 150 && g < 60 && b < 60) return "Heavy Rain";
+    return "Precipitation";
+  }
+  if (prod === "refl") {
+    if (r < 120 && g < 120 && b < 120) return "~5-10 dBZ";
+    if (b > 200 && g > 200 && r < 30) return "~15-20 dBZ";
+    if (b > 200 && r < 30) return "~25-30 dBZ";
+    if (g > 200 && r < 50 && b < 50) return "~35 dBZ";
+    if (g > 200 && r > 150 && b < 50) return "~40-45 dBZ";
+    if (r > 200 && g > 150 && b < 50) return "~50 dBZ";
+    if (r > 200 && g > 50 && g < 120 && b < 50) return "~55 dBZ";
+    if (r > 200 && g < 50 && b < 50) return "~60 dBZ";
+    if (r > 150 && b > 120 && g < 50) return "~65-70 dBZ";
+    return "Radar return";
+  }
+  return "Data detected";
+}
+
+function buildRadarPixelHtml(data) {
+  let valueStr, iconBg;
+  if (data.hasVal) {
+    const dec = data.unit === "%" ? 0 : data.unit === "s⁻¹" ? 3 : 2;
+    valueStr = `${data.value.toFixed(dec)} ${data.unit}`;
+    iconBg = "background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4)";
+  } else {
+    valueStr = data.label || "Precipitation detected";
+    const hexR = data.r?.toString(16).padStart(2, "0") ?? "88";
+    const hexG = data.g?.toString(16).padStart(2, "0") ?? "cc";
+    const hexB = data.b?.toString(16).padStart(2, "0") ?? "ff";
+    iconBg = `background:#${hexR}${hexG}${hexB}22;border:1px solid #${hexR}${hexG}${hexB}66`;
+  }
+  return `
+    <div class="popup-header">
+      <div class="popup-icon popup-mrms" style="${iconBg}">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><polyline points="16 16 12 20 8 16"/><line x1="12" y1="12" x2="12" y2="20"/></svg>
+      </div>
+      <div>
+        <div class="popup-title">MRMS ${safeText(data.product)}</div>
+        <div class="popup-subtitle">Pixel Value</div>
+      </div>
+    </div>
+    [NAV_SLOT]
+    <div class="popup-stat"><span class="popup-key">Value</span><span class="popup-val">${safeText(valueStr)}</span></div>
+    <div class="popup-note">NOAA/MRMS — EphrataWeather</div>`;
+}
+
+// ─── Overlay popup content builders ──────────────────────────────────────────
+
+function buildOverlayItemHtml(feature) {
+  const f = feature.properties || {};
+  const lid = feature.layer?.id || "";
+  if (lid === "spc-fill") {
+    const typeLabel = activeSpcType === "cat" ? "Categorical" : activeSpcType.charAt(0).toUpperCase() + activeSpcType.slice(1);
+    const risk = spcPopupLabel(f);
+    return `<div class="popup-header">
+        <div class="popup-icon popup-spc" style="background:rgba(250,204,21,0.15);border:1px solid rgba(250,204,21,0.35);">⚡</div>
+        <div><div class="popup-title">SPC Day ${activeSpcDay} Outlook</div><div class="popup-subtitle">${safeText(typeLabel)}</div></div>
+      </div>
+      [NAV_SLOT]
+      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(risk)}</span></div>
+      <div class="popup-note">Storm Prediction Center — NOAA</div>`;
+  }
+  if (lid === "drought-fill") {
+    const cat = f.CATEGORY || "";
+    return `<div class="popup-header">
+        <div class="popup-icon" style="background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.35);">🌵</div>
+        <div><div class="popup-title">U.S. Drought Monitor</div><div class="popup-subtitle">USDA / NOAA / UNL</div></div>
+      </div>
+      [NAV_SLOT]
+      <div class="popup-stat"><span class="popup-key">Classification</span><span class="popup-val">${safeText(droughtLabel(cat))}</span></div>
+      <div class="popup-note">Updated weekly. Data: drought.gov</div>`;
+  }
+  if (lid === "fire-fill") {
+    const label = f.LABEL || "Fire Weather Area";
+    const labelNice = { ELEVATED: "Elevated", CRITICAL: "Critical", EXTREME: "Extreme" }[label] ?? (label.charAt(0) + label.slice(1).toLowerCase());
+    return `<div class="popup-header">
+        <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
+        <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day ${activeFireDay} Forecast</div></div>
+      </div>
+      [NAV_SLOT]
+      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNice)}</span></div>
+      <div class="popup-note">Monitor local alerts and fire restrictions.</div>`;
+  }
+  if (lid === "wpc-rain-fill") {
+    const label = f.LABEL || "Unknown";
+    const labelNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
+    return `<div class="popup-header">
+        <div class="popup-icon" style="background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);">🌧️</div>
+        <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day ${activeWpcDay} Outlook</div></div>
+      </div>
+      [NAV_SLOT]
+      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNames[label] || label)}</span></div>
+      <div class="popup-note">WPC Day ${activeWpcDay} Excessive Rainfall Outlook — NOAA</div>`;
+  }
+  return `<div class="popup-header"><div><div class="popup-title">Map Feature</div></div></div>[NAV_SLOT]`;
+}
+
+// ─── Unified click handler ────────────────────────────────────────────────────
+
+function wireUnifiedClickHandler() {
+  if (popupWiredLayers.has("unified-click")) return;
+
+  radarMap.on("click", async ev => {
+    const items = [];
+
+    // Collect overlay features (SPC, drought, fire, WPC rain)
+    const overlayLayerIds = ["spc-fill", "drought-fill", "fire-fill", "wpc-rain-fill"].filter(l => radarMap.getLayer(l));
+    if (overlayLayerIds.length) {
+      radarMap.queryRenderedFeatures(ev.point, { layers: overlayLayerIds })
+        .forEach(f => items.push({ type: "overlay", feature: f }));
+    }
+
+    // Collect alert features
+    const alertLayerIds = ["alerts-fill", "nws-alerts-fill"].filter(l => radarMap.getLayer(l));
+    if (alertLayerIds.length) {
+      radarMap.queryRenderedFeatures(ev.point, { layers: alertLayerIds })
+        .forEach(f => items.push({ type: "alert", feature: f }));
+    }
+
+    // Collect radar pixel value (put first so it's the default view)
+    if (radarActive && mrmsImageBounds) {
+      try {
+        const px = await sampleMrmsValue(ev.lngLat.lng, ev.lngLat.lat);
+        if (px && !px.noData) items.unshift({ type: "radar", data: px });
+      } catch {}
+    }
+
+    if (!items.length) return;
+
+    let currentIdx = 0;
+    const popupId = ++alertPopupCounter;
+    const alertFeatures = items.filter(x => x.type === "alert").map(x => x.feature);
+    alertPopupRegistry.set(popupId, alertFeatures);
+
+    const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
+    popup.on("close", () => alertPopupRegistry.delete(popupId));
+
+    const buildItem = (item, idx, total) => {
+      const nav = buildPopupNavHtml(idx, total);
+      if (item.type === "radar") return buildRadarPixelHtml(item.data).replace("[NAV_SLOT]", nav);
+      if (item.type === "overlay") return buildOverlayItemHtml(item.feature).replace("[NAV_SLOT]", nav);
+      const alertIdx = alertFeatures.indexOf(item.feature);
+      return buildAlertBodyHtml(item.feature, alertIdx, popupId).replace("[NAV_SLOT]", nav);
+    };
+
+    window._alertNav = delta => {
+      currentIdx = Math.max(0, Math.min(items.length - 1, currentIdx + delta));
+      popup.setHTML(buildItem(items[currentIdx], currentIdx, items.length));
+    };
+
+    popup.setHTML(buildItem(items[0], 0, items.length));
+  });
+
+  popupWiredLayers.add("unified-click");
 }
 
 async function refreshLiveData() {
@@ -4125,6 +4362,13 @@ document.querySelector("#radarPlayButton")?.addEventListener("click", () => {
 });
 document.querySelector("#radarOpacitySlider")?.addEventListener("input", event => {
   setRainfallOpacity(Number(event.target.value));
+});
+document.querySelector("#mrmsProductSelect")?.addEventListener("change", event => {
+  activeMrmsProduct = event.target.value;
+  localStorage.setItem("mrmsProduct", activeMrmsProduct);
+  mrmsCanvasCache = {}; // Clear pixel cache on product switch
+  mrmsImageBounds = null; // Re-fetch bounds for new product
+  drawRadar(false);
 });
 
 document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event => {
