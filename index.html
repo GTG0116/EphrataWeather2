@@ -182,6 +182,18 @@
 
                 <!-- Radar timeline controls -->
                 <div class="sub-controls" id="radarSubControls" hidden>
+                  <div class="ctrl-row">
+                    <span class="ctrl-label">Product</span>
+                    <select id="mrmsProductSelect" class="mrms-select" aria-label="MRMS data product">
+                      <option value="rate">Precip Type</option>
+                      <option value="refl">Reflectivity</option>
+                      <option value="mesh">Hail (MESH)</option>
+                      <option value="qpe6h">6-Hr Precip</option>
+                      <option value="qpe24h">24-Hr Precip</option>
+                      <option value="lightning">Lightning Prob</option>
+                      <option value="rotation">Azimuthal Shear</option>
+                    </select>
+                  </div>
                   <div class="ctrl-row radar-timeline-row">
                     <button type="button" id="radarPlayButton" class="play-btn">
                       <svg id="playIcon" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><polygon points="5,3 19,12 5,21"/></svg>
@@ -207,6 +219,8 @@
                 </button>
                 <!-- SPC Legend -->
                 <div class="spc-legend-box" id="spcLegendBox" hidden></div>
+                <!-- MRMS Legend -->
+                <div class="mrms-legend-box" id="mrmsLegendBox" hidden></div>
               </div>
 
               <!-- Map Options -->

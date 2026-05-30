@@ -2434,6 +2434,48 @@ dd {
 
 .spc-legend-box[hidden] { display: none; }
 
+.mrms-legend-box {
+  position: absolute;
+  bottom: 52px;
+  left: 12px;
+  z-index: 10;
+  padding: 10px 13px;
+  background: rgba(6, 12, 30, 0.92);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 0.72rem;
+  min-width: 130px;
+  max-height: 260px;
+  overflow-y: auto;
+  animation: legendIn 200ms ease both;
+}
+.mrms-legend-box[hidden] { display: none; }
+
+.mrms-select {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  appearance: auto;
+}
+.mrms-select:focus {
+  outline: 1px solid rgba(56, 189, 248, 0.6);
+}
+.mrms-select option {
+  background: #0f172a;
+  color: #e8f0ff;
+}
+
+.popup-mrms {
+  color: rgba(56, 189, 248, 0.9);
+}
+
 .legend-title {
   font-size: 0.62rem;
   font-weight: 800;
