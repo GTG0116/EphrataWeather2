@@ -76,48 +76,91 @@ const MRMS_PRODUCTS = {
   rotation:  { label: "Azimuthal Shear", getImg: i => `rotation_${i}.png`,                          getMeta: i => `metadata_rotation_${i}.json`,  hasVal: true,  getVal: i => `rotation_val_${i}.png`,  valMax: 1.0,  valUnit: "s⁻¹" },
 };
 const MRMS_LEGENDS = {
-  rate: [
-    { color: "#00fb90", label: "Light Rain" },
-    { color: "#019400", label: "Heavy Rain" },
-    { color: "#ff0000", label: "Extreme Rain" },
-    { color: "#ff00ff", label: "Freezing/Ice Mix" },
-    { color: "#640064", label: "Heavy Ice Mix" },
-    { color: "#00ffff", label: "Light Snow" },
-    { color: "#ffffff", label: "Heavy Snow" },
-  ],
-  refl: [
-    { color: "#646464", label: "5 dBZ" }, { color: "#04e9e7", label: "15 dBZ" },
-    { color: "#019ff4", label: "25 dBZ" }, { color: "#0300f4", label: "30 dBZ" },
-    { color: "#02fd02", label: "35 dBZ" }, { color: "#01c501", label: "40 dBZ" },
-    { color: "#ffff00", label: "45 dBZ" }, { color: "#ff9900", label: "50 dBZ" },
-    { color: "#ff0000", label: "55 dBZ" }, { color: "#d40000", label: "60 dBZ" },
-    { color: "#ff00ff", label: "65 dBZ" }, { color: "#9955ff", label: "70+ dBZ" },
-  ],
-  mesh: [
-    { color: "#c8f500", label: "0.25 in" }, { color: "#ffff00", label: "0.5 in" },
-    { color: "#ff9600", label: "1.0 in" },  { color: "#ff0000", label: "2.0 in" },
-    { color: "#aa0000", label: "3.0 in" },  { color: "#7f0000", label: "4+ in" },
-  ],
-  qpe6h: [
-    { color: "#88ff88", label: "0.1 in" }, { color: "#ffff00", label: "0.5 in" },
-    { color: "#ff9900", label: "1.0 in" }, { color: "#ff0000", label: "2.0 in" },
-    { color: "#aa00aa", label: "5+ in" },
-  ],
-  qpe24h: [
-    { color: "#88ff88", label: "0.5 in" }, { color: "#ffff00", label: "1.0 in" },
-    { color: "#ff9900", label: "2.0 in" }, { color: "#ff0000", label: "5.0 in" },
-    { color: "#aa00aa", label: "10+ in" },
-  ],
-  lightning: [
-    { color: "#ffffb2", label: "1-5%" }, { color: "#fecc5c", label: "5-10%" },
-    { color: "#fd8d3c", label: "10-20%" }, { color: "#f03b20", label: "20-40%" },
-    { color: "#bd0026", label: "40%+" },
-  ],
-  rotation: [
-    { color: "#0000ff", label: "−0.8 s⁻¹" }, { color: "#8888ff", label: "−0.4 s⁻¹" },
-    { color: "#cccccc", label: "0" },
-    { color: "#ff8888", label: "+0.4 s⁻¹" }, { color: "#ff0000", label: "+0.8 s⁻¹" },
-  ],
+  rate: {
+    title: "PRECIP TYPE",
+    sections: [
+      {
+        label: "RAIN (IN/HR)",
+        gradient: "linear-gradient(90deg, #00ff9d 0%, #00d85f 28%, #1e8c00 43%, #ffff00 62%, #ff9b00 78%, #ff0000 100%)",
+        ticks: ["0.02\"", "0.12\"", "0.50\"", "2.0\"", "5.0\""],
+      },
+      {
+        label: "ICE PELLETS (IN/HR)",
+        gradient: "linear-gradient(90deg, #ff4dff 0%, #e000df 45%, #b000aa 72%, #7a0078 100%)",
+        ticks: ["Light", "Heavy"],
+      },
+      {
+        label: "SNOW (IN/HR)",
+        gradient: "linear-gradient(90deg, #00ffff 0%, #78f2ff 42%, #b6d5ff 72%, #d8d1ff 100%)",
+        ticks: ["0.004\"", "0.04\"", "0.24\""],
+      },
+    ],
+  },
+  refl: {
+    title: "REFLECTIVITY",
+    sections: [
+      {
+        label: "REFLECTIVITY (DBZ)",
+        gradient: "linear-gradient(90deg, #9ca3af 0%, #9ca3af 8%, #60a5fa 19%, #00b050 34%, #fff200 55%, #ff8a00 67%, #ff0000 80%, #e040fb 100%)",
+        ticks: ["0", "35", "55", "75"],
+      },
+    ],
+  },
+  mesh: {
+    title: "MAX HAIL SIZE (MESH)",
+    sections: [
+      {
+        label: "HAIL DIAMETER (IN)",
+        gradient: "linear-gradient(90deg, #bfff00 0%, #fff200 36%, #ff9800 58%, #ff3b00 78%, #c00000 100%)",
+        ticks: [
+          { value: "0.25\"", note: "Pea" },
+          "0.75\"",
+          { value: "1.75\"", note: "Golf" },
+          { value: "3.0\"", note: "Baseball+" },
+        ],
+      },
+    ],
+  },
+  qpe6h: {
+    title: "6-HR PRECIP ESTIMATE",
+    sections: [
+      {
+        label: "6-HR ACCUMULATION (IN)",
+        gradient: "linear-gradient(90deg, #00ff9d 0%, #00d85f 31%, #c6e600 48%, #ffff00 58%, #ff9800 75%, #ff0000 100%)",
+        ticks: ["0.05\"", "0.50\"", "2.0\"", "4.0\"", "8.0\""],
+      },
+    ],
+  },
+  qpe24h: {
+    title: "24-HR PRECIP ESTIMATE",
+    sections: [
+      {
+        label: "24-HR ACCUMULATION (IN)",
+        gradient: "linear-gradient(90deg, #00ff9d 0%, #00d85f 28%, #42a500 42%, #ffff00 59%, #ff9800 76%, #ff0000 100%)",
+        ticks: ["0.25\"", "1.0\"", "3.0\"", "8.0\"", "16\""],
+      },
+    ],
+  },
+  lightning: {
+    title: "CG LIGHTNING PROBABILITY",
+    sections: [
+      {
+        label: "1-HR CG LIGHTNING PROB (%)",
+        gradient: "linear-gradient(90deg, #ffff9d 0%, #ffd447 28%, #ff9a00 49%, #ff2a00 72%, #8f0018 100%)",
+        ticks: ["5%", "30%", "60%", "90%"],
+      },
+    ],
+  },
+  rotation: {
+    title: "AZIMUTH SHEAR/ROTATION",
+    sections: [
+      {
+        label: "AZ SHEAR (S⁻¹)",
+        gradient: "linear-gradient(90deg, #00ff00 0%, #a8ff00 26%, #ffff00 42%, #ff8c00 59%, #ff0000 72%, #ff00ff 87%, #9b00c8 100%)",
+        ticks: ["0.003", "0.012", "0.030", "0.050"],
+      },
+    ],
+  },
 };
 
 const WMO_CODES = {
@@ -3991,14 +4034,21 @@ function renderMrmsLegend() {
   if (!box) return;
   if (!radarActive) { box.hidden = true; return; }
   box.hidden = false;
-  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
-  const entries = MRMS_LEGENDS[activeMrmsProduct] || [];
+  const legend = MRMS_LEGENDS[activeMrmsProduct];
+  if (!legend) { box.innerHTML = ""; return; }
   box.innerHTML = `
-    <div class="legend-title">MRMS ${safeText(cfg.label)}</div>
-    ${entries.map(e => `
-      <div class="legend-row">
-        <span class="legend-swatch" style="background:${e.color};border:1px solid ${e.color}88"></span>
-        ${safeText(e.label)}
+    <div class="legend-title">${safeText(legend.title)}</div>
+    ${legend.sections.map(section => `
+      <div class="mrms-legend-section">
+        <div class="legend-subtitle">${safeText(section.label)}</div>
+        <div class="legend-gradient" style="background:${section.gradient}"></div>
+        <div class="legend-ticks" style="--tick-count:${section.ticks.length}">
+          ${section.ticks.map(tick => {
+            const value = typeof tick === "string" ? tick : tick.value;
+            const note = typeof tick === "string" ? "" : tick.note;
+            return `<span class="legend-tick"><span>${safeText(value)}</span>${note ? `<small>${safeText(note)}</small>` : ""}</span>`;
+          }).join("")}
+        </div>
       </div>
     `).join("")}
   `;
