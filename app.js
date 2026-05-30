@@ -353,6 +353,8 @@ let currentSunset  = null;   // actual Date object
 let metarStationOverride = null; // user-specified METAR station ID
 let popupWiredLayers = new Set(); // track which layers have popup handlers
 let alertPopupRegistry = new Map(); // popupId → alert features array (for _viewAlertFromMapFeature)
+let activeUnifiedPopup = null;
+let activeUnifiedPopupNav = null;
 let alertPopupCounter = 0;
 let activeMrmsProduct = (() => { const s = localStorage.getItem("mrmsProduct"); return MRMS_PRODUCTS[s] ? s : "rate"; })();
 let mrmsImageBounds = null;  // {west, east, north, south}
@@ -661,7 +663,7 @@ async function chooseLocation(location) {
   }
   await refreshLiveData();
   try { localStorage.setItem("weatherLastLocation", JSON.stringify(selectedLocation)); } catch {}
-  if (Notification.permission === "granted") {
+  if (notificationSupported() && Notification.permission === "granted") {
     registerPushSubscription().catch(e => console.warn("Push location update failed", e));
   }
 }
@@ -1947,6 +1949,10 @@ function notificationSupported() {
   return "Notification" in window && "serviceWorker" in navigator;
 }
 
+function pushSupported() {
+  return notificationSupported() && "PushManager" in window;
+}
+
 function isIOSDevice() {
   return /iP(hone|ad|od)/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -1978,15 +1984,38 @@ function urlBase64ToUint8Array(value) {
   return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
 }
 
+function buffersEqual(a, b) {
+  if (!a || !b || a.byteLength !== b.byteLength) return false;
+  const aa = new Uint8Array(a);
+  const bb = new Uint8Array(b);
+  return aa.every((value, index) => value === bb[index]);
+}
+
 async function registerPushSubscription() {
-  if (!PUSH_PUBLIC_KEY || !PUSH_SUBSCRIBE_ENDPOINT) return false;
+  if (!PUSH_PUBLIC_KEY || !PUSH_SUBSCRIBE_ENDPOINT || !pushSupported()) return false;
   const registration = await navigator.serviceWorker.ready;
   if (!registration?.pushManager) return false;
-  const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlBase64ToUint8Array(PUSH_PUBLIC_KEY),
-  });
-  await fetch(PUSH_SUBSCRIBE_ENDPOINT, {
+
+  const applicationServerKey = urlBase64ToUint8Array(PUSH_PUBLIC_KEY);
+  let subscription = await registration.pushManager.getSubscription();
+
+  // iOS Home Screen apps can keep an old APNs-backed subscription after a
+  // deployment or key rotation. Sending that stale endpoint succeeds locally but
+  // never reaches the device, so force a clean subscription when the key differs.
+  const existingKey = subscription?.options?.applicationServerKey;
+  if (subscription && existingKey && !buffersEqual(existingKey, applicationServerKey)) {
+    await subscription.unsubscribe().catch(() => false);
+    subscription = null;
+  }
+
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey,
+    });
+  }
+
+  const response = await fetch(PUSH_SUBSCRIBE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1994,6 +2023,7 @@ async function registerPushSubscription() {
       location: selectedLocation,
     }),
   });
+  if (!response.ok) throw new Error(`Push subscribe failed: ${response.status}`);
   return true;
 }
 
@@ -2176,7 +2206,7 @@ async function registerAppWorker() {
         });
       }
     });
-    if (Notification.permission === "granted") {
+    if (notificationSupported() && Notification.permission === "granted") {
       registerPushSubscription().catch(e => console.warn("Startup push re-subscribe failed", e));
     }
   } catch (error) {
@@ -3121,6 +3151,7 @@ function clearWeatherLayers() {
    "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
    "fire-fill", "fire-line",
    "wpc-rain-fill", "wpc-rain-line",
+   "lsr-hit",
    "surface-layer",
    "satellite-layer",
   ].forEach(removeMapLayer);
@@ -3131,6 +3162,7 @@ function clearWeatherLayers() {
    "alerts-source", "nws-alerts-source",
    "fire-source",
    "wpc-rain-source",
+   "lsr-source",
    "surface-source",
    "satellite-source",
   ].forEach(removeMapSource);
@@ -3224,7 +3256,7 @@ async function addRadarLayer() {
     id: "mrms-layer",
     type: "raster",
     source: "mrms-source",
-    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400 },
+    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400, "raster-resampling": "nearest" },
   });
   updateRadarLabel();
   renderMrmsLegend();
@@ -3425,6 +3457,41 @@ async function addSatelliteLayer() {
   });
 }
 
+const LSR_ICONS = {
+  "T": { svg: `<path d="M12 3c-1 3-4 5-4 9h3l-2 9 9-12h-5z" fill="currentColor"/><path d="M10 21c0 0 1-2 3-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`, color: "#ef4444", label: "Tornado" },
+  "H": { svg: `<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="5" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="5" y1="12" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#f97316", label: "Hail" },
+  "W": { svg: `<path d="M5 8h10.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12h14.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 16h8.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#38bdf8", label: "Wind" },
+  "F": { svg: `<path d="M7 10c0-3 5-7 5-7s5 4 5 7a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 19c2-3 5-3 7-1.5s5 1.5 7-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#10b981", label: "Flood" },
+  "R": { svg: `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="19" x2="8" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="19" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#60a5fa", label: "Rain" },
+  "S": { svg: `<line x1="2" x2="22" y1="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" x2="12" y1="2" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m20 16-4-4 4-4m-16 8 4-4-4-4m12-4-4 4-4-4m0 16 4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`, color: "#a5f3fc", label: "Snow" },
+  "Z": { svg: `<polygon points="12,2 14.5,8.5 22,8.5 16.5,13 18.5,20 12,16 5.5,20 7.5,13 2,8.5 9.5,8.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>`, color: "#bfdbfe", label: "Ice" },
+  "M": { svg: `<path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="currentColor"/>`, color: "#94a3b8", label: "TSTM" },
+};
+
+function lsrIconConfig(properties = {}) {
+  const typeKey = (properties.type || "").toUpperCase().charAt(0);
+  const defaultSvg = `<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="9" x2="12" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`;
+  return LSR_ICONS[typeKey] || { svg: defaultSvg, color: "#94a3b8", label: properties.type || "LSR" };
+}
+
+function buildLsrItemHtml(feature) {
+  const p = feature.properties || {};
+  const cfg = lsrIconConfig(p);
+  return `
+    <div class="popup-header">
+      <div class="popup-icon" style="background:${cfg.color}22;border:1px solid ${cfg.color}66;color:${cfg.color}"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">${cfg.svg}</svg></div>
+      <div>
+        <div class="popup-title">${safeText(p.remark || cfg.label)}</div>
+        <div class="popup-subtitle">${safeText(cfg.label)} — Local Storm Report</div>
+      </div>
+    </div>
+    [NAV_SLOT]
+    <div class="popup-stat"><span class="popup-key">Location</span><span class="popup-val">${safeText(p.city || p.county || "--")}</span></div>
+    ${p.magnitude ? `<div class="popup-stat"><span class="popup-key">Magnitude</span><span class="popup-val">${safeText(String(p.magnitude))} ${safeText(p.magUnit || "")}</span></div>` : ""}
+    <div class="popup-stat"><span class="popup-key">Source</span><span class="popup-val">${safeText(p.source || "Public")}</span></div>
+    ${p.valid ? `<div class="popup-stat"><span class="popup-key">Time</span><span class="popup-val">${new Date(p.valid).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}</span></div>` : ""}`;
+}
+
 async function addLsrLayer() {
   if (!radarMap || !mapLoaded) return;
   if (!lsrData) {
@@ -3433,25 +3500,23 @@ async function addLsrLayer() {
   const features = lsrData?.features || [];
   if (!features.length) return;
 
-  // LSR markers as custom HTML elements
-  const LSR_ICONS = {
-    "T": { svg: `<path d="M12 3c-1 3-4 5-4 9h3l-2 9 9-12h-5z" fill="currentColor"/><path d="M10 21c0 0 1-2 3-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`, color: "#ef4444", label: "Tornado" },
-    "H": { svg: `<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="5" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="5" y1="12" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#f97316", label: "Hail" },
-    "W": { svg: `<path d="M5 8h10.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12h14.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 16h8.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#38bdf8", label: "Wind" },
-    "F": { svg: `<path d="M7 10c0-3 5-7 5-7s5 4 5 7a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 19c2-3 5-3 7-1.5s5 1.5 7-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#10b981", label: "Flood" },
-    "R": { svg: `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="19" x2="8" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="19" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#60a5fa", label: "Rain" },
-    "S": { svg: `<line x1="2" x2="22" y1="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" x2="12" y1="2" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m20 16-4-4 4-4m-16 8 4-4-4-4m12-4-4 4-4-4m0 16 4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`, color: "#a5f3fc", label: "Snow" },
-    "Z": { svg: `<polygon points="12,2 14.5,8.5 22,8.5 16.5,13 18.5,20 12,16 5.5,20 7.5,13 2,8.5 9.5,8.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>`, color: "#bfdbfe", label: "Ice" },
-    "M": { svg: `<path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="currentColor"/>`, color: "#94a3b8", label: "TSTM" },
-  };
+  radarMap.addSource("lsr-source", { type: "geojson", data: lsrData });
+  radarMap.addLayer({
+    id: "lsr-hit",
+    type: "circle",
+    source: "lsr-source",
+    paint: {
+      "circle-radius": 18,
+      "circle-opacity": 0,
+      "circle-stroke-opacity": 0,
+    },
+  });
 
-  features.forEach((feat, idx) => {
+  features.forEach(feat => {
     const p = feat.properties || {};
     const coords = feat.geometry?.coordinates;
     if (!coords) return;
-    const typeKey = (p.type || "").toUpperCase().charAt(0);
-    const defaultSvg = `<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="9" x2="12" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`;
-    const cfg = LSR_ICONS[typeKey] || { svg: defaultSvg, color: "#94a3b8", label: p.type || "LSR" };
+    const cfg = lsrIconConfig(p);
 
     const wrap = document.createElement("div");
     wrap.className = "lsr-marker-wrap";
@@ -3461,22 +3526,14 @@ async function addLsrLayer() {
     dot.style.color = "#fff";
     dot.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">${cfg.svg}</svg>`;
     wrap.appendChild(dot);
+    wrap.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      showUnifiedMapPopup({ lng: coords[0], lat: coords[1] }, radarMap.project([coords[0], coords[1]]), feat);
+    });
 
-    const marker = new mapboxgl.Marker({ element: wrap, anchor: "center" })
+    new mapboxgl.Marker({ element: wrap, anchor: "center" })
       .setLngLat([coords[0], coords[1]])
-      .setPopup(new mapboxgl.Popup({ offset: 12 }).setHTML(`
-        <div class="popup-header">
-          <div class="popup-icon" style="background:${cfg.color}22;border:1px solid ${cfg.color}66;color:${cfg.color}"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">${cfg.svg}</svg></div>
-          <div>
-            <div class="popup-title">${safeText(p.remark || cfg.label)}</div>
-            <div class="popup-subtitle">${safeText(cfg.label)} — Local Storm Report</div>
-          </div>
-        </div>
-        <div class="popup-stat"><span class="popup-key">Location</span><span class="popup-val">${safeText(p.city || p.county || "--")}</span></div>
-        ${p.magnitude ? `<div class="popup-stat"><span class="popup-key">Magnitude</span><span class="popup-val">${safeText(String(p.magnitude))} ${safeText(p.magUnit || "")}</span></div>` : ""}
-        <div class="popup-stat"><span class="popup-key">Source</span><span class="popup-val">${safeText(p.source || "Public")}</span></div>
-        ${p.valid ? `<div class="popup-stat"><span class="popup-key">Time</span><span class="popup-val">${new Date(p.valid).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}</span></div>` : ""}
-      `))
       .addTo(radarMap);
   });
 }
@@ -3978,14 +4035,16 @@ async function sampleMrmsValue(lng, lat) {
         const img = await loadImgCors(MRMS_BASE + cfg.getVal(mrmsIdx));
         const c = document.createElement("canvas");
         c.width = img.naturalWidth; c.height = img.naturalHeight;
-        const cx = c.getContext("2d"); cx.drawImage(img, 0, 0);
+        const cx = c.getContext("2d", { willReadFrequently: true });
+        cx.imageSmoothingEnabled = false;
+        cx.drawImage(img, 0, 0);
         ve = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
         mrmsCanvasCache[valKey] = ve;
       } catch {}
     }
     if (ve) {
-      const x = Math.min(ve.width - 1, Math.max(0, Math.round(xFrac * ve.width)));
-      const y = Math.min(ve.height - 1, Math.max(0, Math.round(yFrac * ve.height)));
+      const x = Math.min(ve.width - 1, Math.max(0, Math.floor(xFrac * ve.width)));
+      const y = Math.min(ve.height - 1, Math.max(0, Math.floor(yFrac * ve.height)));
       const i = (y * ve.width + x) * 4;
       const [r, g, b, a] = [ve.imgData.data[i], ve.imgData.data[i+1], ve.imgData.data[i+2], ve.imgData.data[i+3]];
       if (a < 20) return { noData: true };
@@ -4002,13 +4061,15 @@ async function sampleMrmsValue(lng, lat) {
       const img = await loadImgCors(MRMS_BASE + cfg.getImg(mrmsIdx));
       const c = document.createElement("canvas");
       c.width = img.naturalWidth; c.height = img.naturalHeight;
-      const cx = c.getContext("2d"); cx.drawImage(img, 0, 0);
+      const cx = c.getContext("2d", { willReadFrequently: true });
+      cx.imageSmoothingEnabled = false;
+      cx.drawImage(img, 0, 0);
       me = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
       mrmsCanvasCache[mainKey] = me;
     } catch { return null; }
   }
-  const x = Math.min(me.width - 1, Math.max(0, Math.round(xFrac * me.width)));
-  const y = Math.min(me.height - 1, Math.max(0, Math.round(yFrac * me.height)));
+  const x = Math.min(me.width - 1, Math.max(0, Math.floor(xFrac * me.width)));
+  const y = Math.min(me.height - 1, Math.max(0, Math.floor(yFrac * me.height)));
   const i = (y * me.width + x) * 4;
   const [r, g, b, a] = [me.imgData.data[i], me.imgData.data[i+1], me.imgData.data[i+2], me.imgData.data[i+3]];
   if (a < 20) return { noData: true };
@@ -4125,62 +4186,105 @@ function buildOverlayItemHtml(feature) {
 
 // ─── Unified click handler ────────────────────────────────────────────────────
 
+async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
+  const items = [];
+
+  if (preferredLsrFeature) items.push({ type: "lsr", feature: preferredLsrFeature });
+
+  // Collect point-based LSRs before polygon overlays so storm reports clicked on
+  // marker DOM elements still participate in the shared popup navigator.
+  if (radarMap.getLayer("lsr-hit")) {
+    radarMap.queryRenderedFeatures(point, { layers: ["lsr-hit"] })
+      .forEach(f => {
+        const sameAsPreferred = preferredLsrFeature &&
+          f.geometry?.coordinates?.[0] === preferredLsrFeature.geometry?.coordinates?.[0] &&
+          f.geometry?.coordinates?.[1] === preferredLsrFeature.geometry?.coordinates?.[1] &&
+          f.properties?.valid === preferredLsrFeature.properties?.valid &&
+          f.properties?.type === preferredLsrFeature.properties?.type;
+        if (!sameAsPreferred) items.push({ type: "lsr", feature: f });
+      });
+  }
+
+  // Collect overlay features (SPC, drought, fire, WPC rain)
+  const overlayLayerIds = ["spc-fill", "drought-fill", "fire-fill", "wpc-rain-fill"].filter(l => radarMap.getLayer(l));
+  if (overlayLayerIds.length) {
+    radarMap.queryRenderedFeatures(point, { layers: overlayLayerIds })
+      .forEach(f => items.push({ type: "overlay", feature: f }));
+  }
+
+  // Collect alert features
+  const alertLayerIds = ["alerts-fill", "nws-alerts-fill"].filter(l => radarMap.getLayer(l));
+  if (alertLayerIds.length) {
+    radarMap.queryRenderedFeatures(point, { layers: alertLayerIds })
+      .forEach(f => items.push({ type: "alert", feature: f }));
+  }
+
+  // Collect radar pixel value (put first so it's the default view for map clicks)
+  if (radarActive && mrmsImageBounds && !preferredLsrFeature) {
+    try {
+      const px = await sampleMrmsValue(lngLat.lng, lngLat.lat);
+      if (px && !px.noData) items.unshift({ type: "radar", data: px });
+    } catch {}
+  }
+
+  return items;
+}
+
+function showPopupItems(lngLat, items) {
+  if (!items.length) return;
+  activeUnifiedPopup?.remove();
+
+  let currentIdx = 0;
+  const popupId = ++alertPopupCounter;
+  const alertFeatures = items.filter(x => x.type === "alert").map(x => x.feature);
+  alertPopupRegistry.set(popupId, alertFeatures);
+
+  const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(lngLat).addTo(radarMap);
+  activeUnifiedPopup = popup;
+  popup.on("close", () => {
+    alertPopupRegistry.delete(popupId);
+    if (activeUnifiedPopup === popup) activeUnifiedPopup = null;
+    if (activeUnifiedPopupNav?.popup === popup) activeUnifiedPopupNav = null;
+  });
+
+  const buildItem = (item, idx, total) => {
+    const nav = buildPopupNavHtml(idx, total);
+    if (item.type === "radar") return buildRadarPixelHtml(item.data).replace("[NAV_SLOT]", nav);
+    if (item.type === "lsr") return buildLsrItemHtml(item.feature).replace("[NAV_SLOT]", nav);
+    if (item.type === "overlay") return buildOverlayItemHtml(item.feature).replace("[NAV_SLOT]", nav);
+    const alertIdx = alertFeatures.indexOf(item.feature);
+    return buildAlertBodyHtml(item.feature, alertIdx, popupId).replace("[NAV_SLOT]", nav);
+  };
+
+  activeUnifiedPopupNav = {
+    popup,
+    move(delta) {
+      currentIdx = Math.max(0, Math.min(items.length - 1, currentIdx + delta));
+      popup.setHTML(buildItem(items[currentIdx], currentIdx, items.length));
+    },
+  };
+
+  popup.setHTML(buildItem(items[0], 0, items.length));
+}
+
+async function showUnifiedMapPopup(lngLat, point, preferredLsrFeature = null) {
+  const items = await collectPopupItems(lngLat, point, preferredLsrFeature);
+  showPopupItems(lngLat, items);
+}
+
 function wireUnifiedClickHandler() {
   if (popupWiredLayers.has("unified-click")) return;
 
-  radarMap.on("click", async ev => {
-    const items = [];
-
-    // Collect overlay features (SPC, drought, fire, WPC rain)
-    const overlayLayerIds = ["spc-fill", "drought-fill", "fire-fill", "wpc-rain-fill"].filter(l => radarMap.getLayer(l));
-    if (overlayLayerIds.length) {
-      radarMap.queryRenderedFeatures(ev.point, { layers: overlayLayerIds })
-        .forEach(f => items.push({ type: "overlay", feature: f }));
-    }
-
-    // Collect alert features
-    const alertLayerIds = ["alerts-fill", "nws-alerts-fill"].filter(l => radarMap.getLayer(l));
-    if (alertLayerIds.length) {
-      radarMap.queryRenderedFeatures(ev.point, { layers: alertLayerIds })
-        .forEach(f => items.push({ type: "alert", feature: f }));
-    }
-
-    // Collect radar pixel value (put first so it's the default view)
-    if (radarActive && mrmsImageBounds) {
-      try {
-        const px = await sampleMrmsValue(ev.lngLat.lng, ev.lngLat.lat);
-        if (px && !px.noData) items.unshift({ type: "radar", data: px });
-      } catch {}
-    }
-
-    if (!items.length) return;
-
-    let currentIdx = 0;
-    const popupId = ++alertPopupCounter;
-    const alertFeatures = items.filter(x => x.type === "alert").map(x => x.feature);
-    alertPopupRegistry.set(popupId, alertFeatures);
-
-    const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(ev.lngLat).addTo(radarMap);
-    popup.on("close", () => alertPopupRegistry.delete(popupId));
-
-    const buildItem = (item, idx, total) => {
-      const nav = buildPopupNavHtml(idx, total);
-      if (item.type === "radar") return buildRadarPixelHtml(item.data).replace("[NAV_SLOT]", nav);
-      if (item.type === "overlay") return buildOverlayItemHtml(item.feature).replace("[NAV_SLOT]", nav);
-      const alertIdx = alertFeatures.indexOf(item.feature);
-      return buildAlertBodyHtml(item.feature, alertIdx, popupId).replace("[NAV_SLOT]", nav);
-    };
-
-    window._alertNav = delta => {
-      currentIdx = Math.max(0, Math.min(items.length - 1, currentIdx + delta));
-      popup.setHTML(buildItem(items[currentIdx], currentIdx, items.length));
-    };
-
-    popup.setHTML(buildItem(items[0], 0, items.length));
+  radarMap.on("click", ev => {
+    showUnifiedMapPopup(ev.lngLat, ev.point);
   });
 
   popupWiredLayers.add("unified-click");
 }
+
+window._alertNav = delta => {
+  activeUnifiedPopupNav?.move(Number(delta) || 0);
+};
 
 async function refreshLiveData() {
   refreshButton.disabled = true;
