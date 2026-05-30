@@ -2424,6 +2424,7 @@ dd {
   border-radius: 8px;
   font-size: 0.72rem;
   min-width: 130px;
+  pointer-events: none;
   animation: legendIn 200ms ease both;
 }
 
@@ -2448,6 +2449,7 @@ dd {
   min-width: 256px;
   max-height: 260px;
   overflow-y: auto;
+  pointer-events: none;
   animation: legendIn 200ms ease both;
 }
 .mrms-legend-box[hidden] { display: none; }
@@ -2455,37 +2457,39 @@ dd {
 @media (max-width: 600px) {
   .mrms-legend-box {
     min-width: 0;
-    max-width: min(210px, calc(55vw - 8px));
-    left: 8px;
-    bottom: 44px;
-    padding: 6px 7px 8px;
-    font-size: 0.68rem;
-    max-height: 220px;
+    max-width: 140px;
+    left: 6px;
+    bottom: 40px;
+    padding: 5px 6px 6px;
+    font-size: 0.62rem;
+    max-height: 200px;
   }
   .mrms-legend-box .legend-title {
-    font-size: 0.78rem;
-    margin-bottom: 10px;
+    font-size: 0.68rem;
+    margin-bottom: 6px;
   }
   .mrms-legend-box .legend-subtitle {
-    font-size: 0.68rem;
-    margin-bottom: 5px;
+    font-size: 0.60rem;
+    margin-bottom: 4px;
   }
   .mrms-legend-box .legend-gradient {
     width: 100%;
+    height: 13px;
   }
   .mrms-legend-box .legend-ticks {
-    width: 100%;
-    font-size: 0.68rem;
-  }
-  .mrms-legend-box .legend-tick small {
     display: none;
   }
+  .mrms-legend-section {
+    margin-bottom: 10px;
+  }
   .spc-legend-box {
-    max-width: min(155px, calc(45vw - 8px));
-    right: 8px;
-    bottom: 44px;
-    padding: 8px 10px;
-    font-size: 0.68rem;
+    max-width: 130px;
+    min-width: 0;
+    right: 6px;
+    bottom: 40px;
+    padding: 6px 8px;
+    font-size: 0.62rem;
+    pointer-events: none;
   }
 }
 
