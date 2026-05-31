@@ -812,9 +812,23 @@ dd {
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
 }
 
+.daily-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .daily-card .weather-icon {
   width: 44px;
   height: 44px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.daily-card .daily-card-head .eyebrow {
+  margin-bottom: 0;
 }
 
 .daily-card .eyebrow {

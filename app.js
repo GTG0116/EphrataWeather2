@@ -42,13 +42,29 @@ const LSR_URL = "https://mesonet.agron.iastate.edu/geojson/lsr.php?hours=24";
 // NOAA nowCOAST WMS endpoints
 const WPC_QPF_WMS  = "https://nowcoast.noaa.gov/geoserver/forecasts/qpf/ows";
 const SURFACE_WMS  = "https://nowcoast.noaa.gov/arcgis/services/nowcoast/analysis_meteohydro_sfc_fronts_time/MapServer/WMSServer";
-const SATELLITE_WMS = "https://nowcoast.noaa.gov/geoserver/observations/satellite/ows";
-const SATELLITE_LAYERS = {
-  geocolor:   "goes_visible_imagery",
-  truecolor:  "goes_shortwave_imagery",
-  infrared:   "goes_longwave_imagery",
-  watervapor: "goes_water_vapor_imagery",
-};
+// ─── Satellite imagery (GitHub-generated frame buffers) ───────────────────────
+// Each source repo publishes a rolling buffer of frames to site/data/ on `main`.
+// Files are named <band>_NN.png where NN = 00 (newest) … 09 (oldest).
+// extent is [west_lon, east_lon, south_lat, north_lat] and MUST match the
+// EXTENT used by that repo's process_data.py.
+const SATELLITE_RAW = "https://raw.githubusercontent.com/GTG0116";
+const SATELLITE_MAX_FRAMES = 10;
+const SATELLITE_SOURCES = [
+  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81] },
+  { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55] },
+  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80] },
+  { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60] },
+];
+const SATELLITE_BANDS = [
+  { id: "geocolor",   label: "GeoColor",    file: "geocolor"    },
+  { id: "infrared",   label: "Infrared",    file: "infrared"    },
+  { id: "watervapor", label: "Water Vapor", file: "water_vapor" },
+  { id: "visible",    label: "Visible",     file: "visible"     },
+];
+
+// ─── Tropical cyclones overlay (JTWC + NHC, GitHub-generated) ──────────────────
+const CYCLONE_BASE = "https://gtg0116.github.io/JTWCTyphoonData/data";
+const CYCLONE_FEEDS = ["storms.json", "nhc_atlantic.json", "nhc_pacific.json"];
 
 // Basemap styles
 const BASEMAP_STYLES = [
@@ -352,8 +368,16 @@ let activeBasemap = (() => {
   const saved = localStorage.getItem("weatherBasemap");
   return BASEMAP_STYLES.some(s => s.id === saved) ? saved : "dark-v11";
 })();
-let activeSatelliteType = "infrared";
+let activeSatelliteType = "geocolor";
+let activeSatelliteSource = (() => {
+  const saved = localStorage.getItem("satelliteSource");
+  return SATELLITE_SOURCES.some(s => s.id === saved) ? saved : "goes19fd";
+})();
 let satelliteActive = false;
+let satFrames = [];               // e.g. [9,8,…,1,0]; value = file index, 0 = newest
+let satFrameIndex = 0;            // pointer into satFrames; latest = last element
+const satFrameCountCache = {};    // sourceId → detected frame count
+let cycloneData = null;           // cached {storms:[…]} across all feeds
 let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
@@ -2384,11 +2408,13 @@ function renderDaily() {
 
     return `
     <button class="daily-card" type="button" data-day-index="${index}">
-      <p class="eyebrow">${day.name}</p>
+      <div class="daily-card-head">
+        <p class="eyebrow">${day.name}</p>
+        ${weatherIcon(iconForCondition(day.shortForecast), true)}
+      </div>
       <div class="daily-badge-row">
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
-      ${weatherIcon(iconForCondition(day.shortForecast), true)}
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
       <p class="fwi-sentence" style="margin:2px 0 4px;font-size:0.72rem;color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</p>
@@ -3172,6 +3198,15 @@ function updateRadarLabel() {
   const labelEl = document.querySelector("#radarTimeLabel");
   if (!labelEl) return;
   const slider = document.querySelector("#radarTimeline");
+
+  // Satellite owns the timeline whenever it is active.
+  if (satelliteActive) {
+    if (slider) slider.value = String(satFrameIndex);
+    const frame = satFrames.length ? satFrames[satFrameIndex] : 0;
+    labelEl.textContent = frame === 0 ? "Latest" : `−${frame} frame${frame > 1 ? "s" : ""}`;
+    return;
+  }
+
   if (slider) slider.value = String(radarFrameIndex);
   const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
   if (mrmsIdx === 0) { labelEl.textContent = "Latest"; return; }
@@ -3214,6 +3249,8 @@ function setRainfallOpacity(pct) {
   if (radarMap && mapLoaded) {
     if (radarMap.getLayer("mrms-layer"))
       radarMap.setPaintProperty("mrms-layer", "raster-opacity", radarOpacity);
+    if (radarMap.getLayer("satellite-layer"))
+      radarMap.setPaintProperty("satellite-layer", "raster-opacity", radarOpacity);
   }
   const label = document.querySelector("#radarOpacityLabel");
   if (label) label.textContent = `${pct}%`;
@@ -3240,6 +3277,8 @@ function clearWeatherLayers() {
    "lsr-hit",
    "surface-layer",
    "satellite-layer",
+   "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track",
+   "cyclones-points", "cyclones-labels",
   ].forEach(removeMapLayer);
   ["mrms-source",
    "radar-source-a", "radar-source-b",
@@ -3251,6 +3290,7 @@ function clearWeatherLayers() {
    "lsr-source",
    "surface-source",
    "satellite-source",
+   "cyclones-radii-source", "cyclones-track-source", "cyclones-points-source",
   ].forEach(removeMapSource);
   document.querySelectorAll(".lsr-marker-wrap").forEach(el => el.remove());
   const leg = document.querySelector("#spcLegendBox");
@@ -3516,31 +3556,287 @@ async function addSurfaceAnalysisLayer() {
   });
 }
 
+function satSource() {
+  return SATELLITE_SOURCES.find(s => s.id === activeSatelliteSource) || SATELLITE_SOURCES[0];
+}
+function satBand() {
+  return SATELLITE_BANDS.find(b => b.id === activeSatelliteType) || SATELLITE_BANDS[0];
+}
+function satImgUrl(source, band, frame) {
+  const fr = String(frame).padStart(2, "0");
+  return `${SATELLITE_RAW}/${source.repo}/main/site/data/${band.file}_${fr}.png`;
+}
+
+// Probe how many frames the active source currently publishes (rolling buffers
+// can be partially filled, e.g. a freshly seeded CONUS repo). Cached per source.
+async function detectSatFrameCount(source, band) {
+  if (satFrameCountCache[source.id]) return satFrameCountCache[source.id];
+  let count = 1; // frame 00 is assumed to exist
+  for (let i = 1; i < SATELLITE_MAX_FRAMES; i++) {
+    let res;
+    try {
+      res = await fetch(satImgUrl(source, band, i), { method: "HEAD", cache: "no-store" });
+    } catch {
+      // Network/CORS hiccup — assume a full buffer rather than killing animation.
+      count = SATELLITE_MAX_FRAMES;
+      break;
+    }
+    if (!res.ok) break; // genuine 404 → end of the rolling buffer
+    count = i + 1;
+  }
+  satFrameCountCache[source.id] = count;
+  return count;
+}
+
+// Lowest custom weather layer — satellite imagery is inserted beneath it so
+// radar/overlays always draw on top of the basemap imagery.
+function lowestWeatherLayerId() {
+  return ["mrms-layer", "wpc-rain-fill", "fire-fill", "drought-fill",
+          "spc-fill", "alerts-fill", "nws-alerts-fill", "surface-layer"]
+    .find(id => radarMap.getLayer(id));
+}
+
 async function addSatelliteLayer() {
   if (!radarMap || !mapLoaded) return;
-  const layerName = SATELLITE_LAYERS[activeSatelliteType] || SATELLITE_LAYERS.geocolor;
-  const wmsParams = new URLSearchParams({
-    SERVICE: "WMS",
-    VERSION: "1.3.0",
-    REQUEST: "GetMap",
-    FORMAT: "image/png",
-    TRANSPARENT: "true",
-    LAYERS: layerName,
-    CRS: "EPSG:3857",
-    WIDTH: "256",
-    HEIGHT: "256",
-    STYLES: "",
-  });
+  const source = satSource();
+  const band = satBand();
+
+  const count = await detectSatFrameCount(source, band);
+  if (!radarMap || !radarMap.getStyle() || !satelliteActive) return; // bailed mid-await
+  satFrames = Array.from({ length: count }, (_, i) => count - 1 - i); // [count-1 … 0]
+  satFrameIndex = satFrames.length - 1;                                // newest
+
+  const [west, east, south, north] = source.extent;
+  const coords = [[west, north], [east, north], [east, south], [west, south]];
+
+  if (radarMap.getSource("satellite-source")) return; // already present
   radarMap.addSource("satellite-source", {
-    type: "raster",
-    tiles: [`${SATELLITE_WMS}?${wmsParams.toString()}&BBOX={bbox-epsg-3857}`],
-    tileSize: 256,
-    attribution: "NOAA nowCOAST GOES Satellite",
+    type: "image",
+    url: satImgUrl(source, band, satFrames[satFrameIndex]),
+    coordinates: coords,
   });
   radarMap.addLayer({
     id: "satellite-layer", type: "raster", source: "satellite-source",
-    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400 },
+    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 300 },
+  }, lowestWeatherLayerId());
+
+  // Reflect satellite frames on the shared timeline when it owns the controls.
+  if (satelliteActive) {
+    const slider = document.querySelector("#radarTimeline");
+    if (slider) { slider.max = satFrames.length - 1; slider.value = satFrameIndex; }
+    updateRadarLabel();
+  }
+}
+
+function setSatelliteFrame(index) {
+  if (!satFrames.length) return;
+  satFrameIndex = Math.max(0, Math.min(satFrames.length - 1, Number(index)));
+  const src = radarMap?.getSource("satellite-source");
+  if (src && satelliteActive) {
+    const url = satImgUrl(satSource(), satBand(), satFrames[satFrameIndex]);
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => { try { src.updateImage({ url }); } catch {} };
+    img.src = url;
+  }
+  updateRadarLabel();
+}
+
+// ─── Tropical cyclones overlay ────────────────────────────────────────────────
+
+async function fetchCyclones() {
+  const results = await Promise.allSettled(
+    CYCLONE_FEEDS.map(f => fetch(`${CYCLONE_BASE}/${f}?_=${Date.now()}`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }))
+  );
+  const storms = [];
+  for (const r of results) {
+    if (r.status === "fulfilled" && Array.isArray(r.value?.storms)) storms.push(...r.value.storms);
+  }
+  return { storms };
+}
+
+// Approximate geographic circle (nautical-mile radius) as a GeoJSON ring.
+function cycloneCircleRing(lon, lat, radiusNm, steps = 64) {
+  const km = radiusNm * 1.852;
+  const dLat = km / 110.574;
+  const dLon = km / (111.320 * Math.cos(lat * Math.PI / 180) || 1e-6);
+  const ring = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = (i / steps) * 2 * Math.PI;
+    ring.push([lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)]);
+  }
+  return ring;
+}
+
+function buildCycloneFeatures(data) {
+  const radii = [], tracks = [], points = [];
+  const RADII = [
+    { thr: "034", color: "#ffd700", op: 0.10 },
+    { thr: "050", color: "#ff8c00", op: 0.12 },
+    { thr: "064", color: "#ff3a3a", op: 0.14 },
+  ];
+
+  for (const storm of (data.storms || [])) {
+    const fc = Array.isArray(storm.forecast) ? storm.forecast : [];
+    const cur = storm.current || fc.find(p => p.tau === 0) || fc[0];
+    const trackColor = (cur && cur.intensity_color) || "#38bdf8";
+
+    if (fc.length > 1) {
+      tracks.push({
+        type: "Feature",
+        properties: { color: trackColor, name: storm.name || storm.id },
+        geometry: { type: "LineString", coordinates: fc.map(p => [p.lon, p.lat]) },
+      });
+    }
+
+    fc.forEach(p => {
+      points.push({
+        type: "Feature",
+        properties: {
+          color: p.intensity_color || trackColor,
+          isCurrent: p.tau === 0,
+          tau: p.tau,
+          name: storm.name || storm.id,
+          id: storm.id,
+          basin: storm.basin_name || storm.basin || "",
+          classification: p.classification_label || "",
+          wind_kt: p.wind_kt, wind_mph: p.wind_mph, wind_kmh: p.wind_kmh,
+          pressure_mb: p.pressure_mb, datetime: p.datetime,
+          lat: p.lat, lon: p.lon,
+          isFinal: storm.is_final_warning ? 1 : 0,
+        },
+        geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+      });
+    });
+
+    if (cur && cur.wind_radii_nm) {
+      for (const { thr, color, op } of RADII) {
+        const q = cur.wind_radii_nm[thr];
+        if (!q) continue;
+        const maxNm = Math.max(q.NE || 0, q.SE || 0, q.SW || 0, q.NW || 0);
+        if (maxNm <= 0) continue;
+        radii.push({
+          type: "Feature",
+          properties: { color, op },
+          geometry: { type: "Polygon", coordinates: [cycloneCircleRing(cur.lon, cur.lat, maxNm)] },
+        });
+      }
+    }
+  }
+  return { radii, tracks, points };
+}
+
+async function addCyclonesLayer() {
+  if (!radarMap || !mapLoaded) return;
+  if (!cycloneData) cycloneData = await fetchCyclones();
+  if (!radarMap.getStyle() || !activeOverlays.has("Cyclones")) return; // bailed mid-await
+  const { radii, tracks, points } = buildCycloneFeatures(cycloneData);
+
+  if (!radarMap.getSource("cyclones-radii-source")) {
+    radarMap.addSource("cyclones-radii-source", { type: "geojson", data: { type: "FeatureCollection", features: radii } });
+  }
+  if (!radarMap.getSource("cyclones-track-source")) {
+    radarMap.addSource("cyclones-track-source", { type: "geojson", data: { type: "FeatureCollection", features: tracks } });
+  }
+  if (!radarMap.getSource("cyclones-points-source")) {
+    radarMap.addSource("cyclones-points-source", { type: "geojson", data: { type: "FeatureCollection", features: points } });
+  }
+
+  if (!radarMap.getLayer("cyclones-radii-fill")) {
+    radarMap.addLayer({
+      id: "cyclones-radii-fill", type: "fill", source: "cyclones-radii-source",
+      paint: { "fill-color": ["get", "color"], "fill-opacity": ["get", "op"] },
+    });
+  }
+  if (!radarMap.getLayer("cyclones-radii-line")) {
+    radarMap.addLayer({
+      id: "cyclones-radii-line", type: "line", source: "cyclones-radii-source",
+      paint: { "line-color": ["get", "color"], "line-width": 1, "line-opacity": 0.45 },
+    });
+  }
+  if (!radarMap.getLayer("cyclones-track")) {
+    radarMap.addLayer({
+      id: "cyclones-track", type: "line", source: "cyclones-track-source",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 2.5, "line-opacity": 0.9, "line-dasharray": [2, 2] },
+    });
+  }
+  if (!radarMap.getLayer("cyclones-points")) {
+    radarMap.addLayer({
+      id: "cyclones-points", type: "circle", source: "cyclones-points-source",
+      paint: {
+        "circle-radius": ["case", ["get", "isCurrent"], 8, 4],
+        "circle-color": ["get", "color"],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": ["case", ["get", "isCurrent"], 2.5, 1],
+      },
+    });
+  }
+
+  wireCyclonePopups();
+}
+
+function wireCyclonePopups() {
+  if (popupWiredLayers.has("cyclones")) return;
+  popupWiredLayers.add("cyclones");
+  radarMap.on("mouseenter", "cyclones-points", () => { radarMap.getCanvas().style.cursor = "pointer"; });
+  radarMap.on("mouseleave", "cyclones-points", () => { radarMap.getCanvas().style.cursor = ""; });
+  radarMap.on("click", "cyclones-points", e => {
+    const p = e.features?.[0]?.properties;
+    if (!p) return;
+    new mapboxgl.Popup({ offset: 12, maxWidth: "320px" })
+      .setLngLat([Number(p.lon), Number(p.lat)])
+      .setHTML(buildCyclonePopup(p))
+      .addTo(radarMap);
   });
+}
+
+function buildCyclonePopup(p) {
+  const color = p.color || "#38bdf8";
+  const isCur = p.isCurrent === true || p.isCurrent === "true";
+  const tau = Number(p.tau);
+  const tag = isCur
+    ? `<span style="background:${color}22;color:${color};border:1px solid ${color}66;padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">Current</span>`
+    : `<span style="background:rgba(148,163,184,0.18);color:#cbd5e1;border:1px solid rgba(148,163,184,0.4);padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">+${tau}h Forecast</span>`;
+  const finalTag = (Number(p.isFinal) === 1 && isCur)
+    ? ` <span style="background:rgba(239,68,68,0.18);color:#fca5a5;border:1px solid rgba(239,68,68,0.5);padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">Final Warning</span>` : "";
+  const lat = Number(p.lat), lon = Number(p.lon);
+  const pos = `${Math.abs(lat).toFixed(1)}°${lat >= 0 ? "N" : "S"}, ${Math.abs(lon).toFixed(1)}°${lon >= 0 ? "E" : "W"}`;
+  const when = p.datetime ? new Date(p.datetime).toUTCString().replace(/:00 GMT$/, " UTC") : "—";
+  const press = Number(p.pressure_mb) > 0 ? `${p.pressure_mb} mb` : "—";
+  return `
+    <div style="min-width:200px">
+      <div style="border-left:4px solid ${color};padding-left:8px;margin-bottom:6px">
+        <div style="font-weight:800;font-size:0.95rem">${safeText(p.name)} <small style="color:var(--muted)">${safeText(p.id || "")}</small></div>
+        <div style="font-size:0.74rem;color:var(--muted)">${safeText(p.basin || "")}</div>
+      </div>
+      <div style="margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px">${tag}${finalTag}</div>
+      <div style="font-size:0.78rem;color:${color};font-weight:700;margin-bottom:4px">${safeText(p.classification || "")}</div>
+      <table style="font-size:0.78rem;width:100%;border-collapse:collapse">
+        <tr><td style="color:var(--muted);padding:1px 0">Time</td><td style="text-align:right">${safeText(when)}</td></tr>
+        <tr><td style="color:var(--muted);padding:1px 0">Position</td><td style="text-align:right">${pos}</td></tr>
+        <tr><td style="color:var(--muted);padding:1px 0">Max Wind</td><td style="text-align:right"><strong style="color:${color}">${safeText(p.wind_kt)} kt</strong> <span style="color:var(--muted)">${safeText(p.wind_mph)} mph</span></td></tr>
+        <tr><td style="color:var(--muted);padding:1px 0">Pressure</td><td style="text-align:right">${press}</td></tr>
+      </table>
+    </div>`;
+}
+
+function fitCyclonesInView() {
+  if (!radarMap || !cycloneData?.storms?.length) return;
+  let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90, any = false;
+  for (const storm of cycloneData.storms) {
+    for (const p of (storm.forecast || [])) {
+      if (typeof p.lon !== "number" || typeof p.lat !== "number") continue;
+      any = true;
+      minLon = Math.min(minLon, p.lon); maxLon = Math.max(maxLon, p.lon);
+      minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat);
+    }
+  }
+  if (!any) return;
+  radarMap.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 60, maxZoom: 6, duration: 800 });
 }
 
 const LSR_ICONS = {
@@ -3846,6 +4142,7 @@ function drawRadar(relocate = false) {
   if (activeOverlays.has("Fire Wx"))      addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
   if (activeOverlays.has("WPC Rain"))     addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
   if (activeOverlays.has("LSR"))          addLsrLayer().catch(e => console.warn("LSR unavailable", e));
+  if (activeOverlays.has("Cyclones"))     addCyclonesLayer().catch(e => console.warn("Cyclones unavailable", e));
   if (satelliteActive)                    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
@@ -3858,12 +4155,16 @@ function drawRadar(relocate = false) {
 
 function animateRadarLayer() {
   stopRadarAnimation();
-  if (!radarActive || !radarFrames.length) return;
+  // Satellite owns the timeline whenever it is active; otherwise animate radar.
+  const sat = satelliteActive;
+  const frames = sat ? satFrames : radarFrames;
+  if ((sat ? !satelliteActive : !radarActive) || !frames.length) return;
   const lbl = document.querySelector("#playLabel");
   if (lbl) lbl.textContent = "Pause";
   radarAnimationTimer = setInterval(() => {
-    // Animate oldest→newest: radarFrameIndex 0=oldest → MRMS_FRAMES-1=latest
-    setRadarFrame((radarFrameIndex + 1) % radarFrames.length);
+    // Animate oldest→newest, wrapping back to the oldest after the latest frame.
+    if (sat) setSatelliteFrame((satFrameIndex + 1) % satFrames.length);
+    else     setRadarFrame((radarFrameIndex + 1) % radarFrames.length);
   }, RADAR_FRAME_MS);
 }
 
@@ -3876,7 +4177,7 @@ function renderLayers() {
     { id: "Radar",     isActive: () => radarActive,     toggle: () => { radarActive = !radarActive; } },
     { id: "Satellite", isActive: () => satelliteActive, toggle: () => { satelliteActive = !satelliteActive; } },
   ];
-  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought"];
+  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
     `<button type="button" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}">${l.id}</button>`
@@ -3902,6 +4203,13 @@ function renderLayers() {
       else activeOverlays.add(layer);
       renderLayers();
       drawRadar(false);
+      // When cyclones are switched on, pan/zoom to wherever the storms are.
+      if (layer === "Cyclones" && activeOverlays.has("Cyclones")) {
+        (async () => {
+          if (!cycloneData) cycloneData = await fetchCyclones();
+          fitCyclonesInView();
+        })();
+      }
     });
   });
 
@@ -3929,9 +4237,13 @@ function renderLayers() {
     if (satelliteActive) renderSatelliteSubControls();
   }
 
+  // Timeline controls are shared: shown for radar and/or satellite. The MRMS
+  // product picker is radar-only and hidden when only satellite is animating.
   const radCtrl = document.querySelector("#radarSubControls");
   if (radCtrl) {
-    radCtrl.hidden = !radarActive;
+    radCtrl.hidden = !(radarActive || satelliteActive);
+    const prodRow = document.querySelector("#mrmsProductRow");
+    if (prodRow) prodRow.hidden = !radarActive;
     if (radarActive) renderRadarSubControls();
   }
 }
@@ -4009,24 +4321,45 @@ function renderFireWxSubControls() {
 }
 
 function renderSatelliteSubControls() {
-  const typeEl = document.querySelector("#satelliteTypeBtns");
-  if (!typeEl) return;
-  const types = [
-    { id: "infrared",   label: "Infrared"    },
-    { id: "watervapor", label: "Water Vapor" },
-    { id: "geocolor",   label: "Visible"     },
-    { id: "truecolor",  label: "Shortwave"   },
-  ];
-  typeEl.innerHTML = types.map(t =>
-    `<button type="button" data-sat-type="${t.id}" class="${t.id === activeSatelliteType ? "active" : ""}">${t.label}</button>`
-  ).join("");
-  typeEl.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      activeSatelliteType = btn.dataset.satType;
-      renderSatelliteSubControls();
-      drawRadar(false);
+  const sourceEl = document.querySelector("#satelliteSourceBtns");
+  const typeEl   = document.querySelector("#satelliteTypeBtns");
+
+  if (sourceEl) {
+    sourceEl.innerHTML = SATELLITE_SOURCES.map(s =>
+      `<button type="button" data-sat-source="${s.id}" title="${safeText(s.note)}" class="${s.id === activeSatelliteSource ? "active" : ""}">${safeText(s.label)}</button>`
+    ).join("");
+    sourceEl.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if (btn.dataset.satSource === activeSatelliteSource) return;
+        activeSatelliteSource = btn.dataset.satSource;
+        localStorage.setItem("satelliteSource", activeSatelliteSource);
+        renderSatelliteSubControls();
+        drawRadar(false);
+        // Frame the newly selected sector so its imagery is in view.
+        const src = satSource();
+        if (radarMap && src) {
+          const [west, east, south, north] = src.extent;
+          radarMap.fitBounds(
+            [[Math.max(-180, west), Math.max(-85, south)], [Math.min(180, east), Math.min(85, north)]],
+            { padding: 30, duration: 700 }
+          );
+        }
+      });
     });
-  });
+  }
+
+  if (typeEl) {
+    typeEl.innerHTML = SATELLITE_BANDS.map(b =>
+      `<button type="button" data-sat-type="${b.id}" class="${b.id === activeSatelliteType ? "active" : ""}">${safeText(b.label)}</button>`
+    ).join("");
+    typeEl.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        activeSatelliteType = btn.dataset.satType;
+        renderSatelliteSubControls();
+        drawRadar(false);
+      });
+    });
+  }
 }
 
 function renderSpcLegend() {
@@ -4555,7 +4888,8 @@ document.querySelector("#metarClearBtn")?.addEventListener("click", async () => 
 });
 document.querySelector("#radarTimeline")?.addEventListener("input", event => {
   stopRadarAnimation();
-  setRadarFrame(event.target.value);
+  if (satelliteActive) setSatelliteFrame(event.target.value);
+  else                 setRadarFrame(event.target.value);
 });
 document.querySelector("#radarPlayButton")?.addEventListener("click", () => {
   if (radarAnimationTimer) stopRadarAnimation();

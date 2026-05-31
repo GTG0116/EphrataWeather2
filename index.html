@@ -175,14 +175,18 @@
                 <!-- Satellite sub-controls -->
                 <div class="sub-controls" id="satelliteSubControls" hidden>
                   <div class="ctrl-row">
+                    <span class="ctrl-label">Source</span>
+                    <div class="ctrl-btn-group" id="satelliteSourceBtns"></div>
+                  </div>
+                  <div class="ctrl-row">
                     <span class="ctrl-label">Band</span>
                     <div class="ctrl-btn-group" id="satelliteTypeBtns"></div>
                   </div>
                 </div>
 
-                <!-- Radar timeline controls -->
+                <!-- Radar / satellite timeline controls -->
                 <div class="sub-controls" id="radarSubControls" hidden>
-                  <div class="ctrl-row">
+                  <div class="ctrl-row" id="mrmsProductRow">
                     <span class="ctrl-label">Product</span>
                     <select id="mrmsProductSelect" class="mrms-select" aria-label="MRMS data product">
                       <option value="rate">Precip Type</option>
