@@ -393,6 +393,7 @@ let userLocationMarker = null;
 let liveLocationWatchId = null;
 let currentSunrise = null;   // actual Date object
 let currentSunset  = null;   // actual Date object
+let currentSunTimesByDate = new Map(); // local YYYY-MM-DD → { sunriseDate, sunsetDate }
 let metarStationOverride = null; // user-specified METAR station ID
 let popupWiredLayers = new Set(); // track which layers have popup handlers
 let alertPopupRegistry = new Map(); // popupId → alert features array (for _viewAlertFromMapFeature)
@@ -998,18 +999,27 @@ function headlineFor(condition, forecast) {
 async function astronomyPayload() {
   const loc = point();
   const tz = loc.timezone || "America/New_York";
-  const localDate = localDateISO(new Date(), tz);
-  const data = await getJson(`https://api.sunrise-sunset.org/json?lat=${loc.lat}&lng=${loc.lon}&date=${localDate}&formatted=0`);
-  const sunriseDate = new Date(data.results.sunrise);
-  const sunsetDate  = new Date(data.results.sunset);
-  // Store actual Date objects for theme logic
-  currentSunrise = sunriseDate;
-  currentSunset  = sunsetDate;
+  const today = localDateISO(new Date(), tz);
+  const tomorrow = localDateISO(new Date(Date.now() + 24 * 60 * 60 * 1000), tz);
+  const dates = [...new Set([today, tomorrow])];
+  const entries = await Promise.all(dates.map(async date => {
+    const data = await getJson(`https://api.sunrise-sunset.org/json?lat=${loc.lat}&lng=${loc.lon}&date=${date}&formatted=0`);
+    return [date, {
+      sunriseDate: new Date(data.results.sunrise),
+      sunsetDate: new Date(data.results.sunset),
+    }];
+  }));
+  currentSunTimesByDate = new Map(entries);
+  const todayTimes = currentSunTimesByDate.get(today) || entries[0]?.[1];
+  // Store today's actual Date objects for theme logic.
+  currentSunrise = todayTimes?.sunriseDate || null;
+  currentSunset  = todayTimes?.sunsetDate || null;
   return {
-    sunrise: sunriseDate.toLocaleTimeString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }),
-    sunset:  sunsetDate.toLocaleTimeString("en-US",  { timeZone: tz, hour: "numeric", minute: "2-digit" }),
-    sunriseDate,
-    sunsetDate,
+    sunrise: currentSunrise ? currentSunrise.toLocaleTimeString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }) : "--",
+    sunset:  currentSunset ? currentSunset.toLocaleTimeString("en-US",  { timeZone: tz, hour: "numeric", minute: "2-digit" }) : "--",
+    sunriseDate: currentSunrise,
+    sunsetDate: currentSunset,
+    sunTimesByDate: Object.fromEntries(currentSunTimesByDate),
   };
 }
 
@@ -1684,6 +1694,32 @@ function isNightPeriod(text = "") {
   return activeTheme === "midnight" || /\bnight|overnight|after midnight\b/i.test(text);
 }
 
+function isNightAt(date, sunriseDate, sunsetDate) {
+  const time = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(time.getTime())) return false;
+  if (sunriseDate && sunsetDate) {
+    const ms = time.getTime();
+    return ms < sunriseDate.getTime() || ms > sunsetDate.getTime();
+  }
+  const h = localHour(time);
+  return h >= 20 || h < 6;
+}
+
+function forecastSunTimesFor(date) {
+  const tz = selectedLocation.timezone || "America/New_York";
+  const key = localDateISO(date, tz);
+  return currentSunTimesByDate.get(key) || null;
+}
+
+function historicalSunTimesFor(date, sunriseIso, sunsetIso) {
+  const sunriseDate = sunriseIso ? new Date(sunriseIso) : null;
+  const sunsetDate = sunsetIso ? new Date(sunsetIso) : null;
+  if (sunriseDate && sunsetDate && !Number.isNaN(sunriseDate.getTime()) && !Number.isNaN(sunsetDate.getTime())) {
+    return { sunriseDate, sunsetDate };
+  }
+  return forecastSunTimesFor(date);
+}
+
 function renderCurrent() {
   const current = weatherState.current || fallbackWeather.current;
   // Fair Weather Index using actual current conditions
@@ -1748,14 +1784,8 @@ function renderCurrent() {
   hourlyStrip.innerHTML = (weatherState.hourly || []).slice(0, 24).map((hour, index) => {
     const time = new Date(hour.startTime);
     const precip = hour.probabilityOfPrecipitation?.value;
-    const isHourNight = (() => {
-      if (currentSunrise && currentSunset) {
-        const ms = time.getTime();
-        return ms < currentSunrise.getTime() || ms > currentSunset.getTime();
-      }
-      const h = localHour(time);
-      return h >= 20 || h <= 5;
-    })();
+    const sunTimes = forecastSunTimesFor(time);
+    const isHourNight = isNightAt(time, sunTimes?.sunriseDate, sunTimes?.sunsetDate);
     const iconHtml = `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(hour.shortForecast), isHourNight)}</span>`;
     return `
       <button class="hour-card compact" type="button" data-hour-index="${index}">
@@ -2807,11 +2837,13 @@ async function renderClimate(date) {
         const pr = h.precipitation?.[idx];
         const ws = h.wind_speed_10m?.[idx];
         const cond = wmoDescription(h.weather_code?.[idx]);
-        const isNight = hr < 6 || hr >= 20;
+        const hourDate = new Date(t);
+        const sunTimes = historicalSunTimesFor(hourDate, sunriseStr, sunsetStr);
+        const isNight = isNightAt(hourDate, sunTimes?.sunriseDate, sunTimes?.sunsetDate);
         hourlyHtml += `
           <div class="hist-hourly-item">
             <div class="hist-hourly-time">${label}</div>
-            <div class="hist-hourly-icon">${weatherIcon(cond + (isNight ? " Night" : ""))}</div>
+            <div class="hist-hourly-icon"><span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(cond, isNight)}</span></div>
             <div class="hist-hourly-temp">${temp != null ? Math.round(temp) + "°" : "--"}</div>
             <div class="hist-hourly-wind">${ws != null ? Math.round(ws) + " mph" : "--"}</div>
             ${pr != null && pr > 0 ? `<div class="hist-hourly-precip">${pr.toFixed(2)}"</div>` : ""}
@@ -4081,7 +4113,11 @@ async function sampleMrmsValue(lng, lat) {
   if (!mrmsImageBounds) return null;
   const { west, east, north, south } = mrmsImageBounds;
   const xFrac = (lng - west) / (east - west);
-  const yFrac = (north - lat) / (north - south);
+  // MRMS images are generated on a Web Mercator-spaced latitude grid in the
+  // source radar repository, so vertical sampling must use Mercator Y instead
+  // of a linear latitude fraction.
+  const merc = latitude => Math.log(Math.tan(Math.PI / 4 + (latitude * Math.PI / 180) / 2));
+  const yFrac = (merc(north) - merc(lat)) / (merc(north) - merc(south));
   if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return null;
 
   const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
