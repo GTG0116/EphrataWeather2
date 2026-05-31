@@ -50,10 +50,10 @@ const SURFACE_WMS  = "https://nowcoast.noaa.gov/arcgis/services/nowcoast/analysi
 const SATELLITE_RAW = "https://raw.githubusercontent.com/GTG0116";
 const SATELLITE_MAX_FRAMES = 10;
 const SATELLITE_SOURCES = [
-  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81] },
-  { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55] },
-  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80] },
-  { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60] },
+  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81], sectorScheme: "goes" },
+  { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55], sectorScheme: "goes" },
+  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes" },
+  { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60], sectorScheme: "himawari" },
 ];
 const SATELLITE_BANDS = [
   { id: "geocolor",   label: "GeoColor",    file: "geocolor"    },
@@ -376,7 +376,10 @@ let activeSatelliteSource = (() => {
 let satelliteActive = false;
 let satFrames = [];               // e.g. [9,8,…,1,0]; value = file index, 0 = newest
 let satFrameIndex = 0;            // pointer into satFrames; latest = last element
-const satFrameCountCache = {};    // sourceId → detected frame count
+const satFrameCountCache = {};    // cacheKey → detected frame count
+let activeSatelliteSector = null; // null = full disk, else a TC sector id
+const satSectorCache = {};        // sourceId → array of normalized sector objects
+const satWarpCache = new Map();   // frameKey → equirect→Mercator warped data URL
 let cycloneData = null;           // cached {storms:[…]} across all feeds
 let hourlyChartMetric = "temperature";
 let frame = 0;
@@ -3567,29 +3570,99 @@ function satSource() {
 function satBand() {
   return SATELLITE_BANDS.find(b => b.id === activeSatelliteType) || SATELLITE_BANDS[0];
 }
-function satImgUrl(source, band, frame) {
-  const fr = String(frame).padStart(2, "0");
-  return `${SATELLITE_RAW}/${source.repo}/main/site/data/${band.file}_${fr}.png`;
+
+// The active TC sector object (or null for the standard full-disk/region view).
+function currentSatSector() {
+  if (!activeSatelliteSector) return null;
+  return (satSectorCache[activeSatelliteSource] || []).find(s => s.id === activeSatelliteSector) || null;
+}
+function currentSatExtent() {
+  const sector = currentSatSector();
+  return sector ? sector.extent : satSource().extent;
 }
 
-// Probe how many frames the active source currently publishes (rolling buffers
-// can be partially filled, e.g. a freshly seeded CONUS repo). Cached per source.
-async function detectSatFrameCount(source, band) {
-  if (satFrameCountCache[source.id]) return satFrameCountCache[source.id];
+function satDataUrl(repo, file) {
+  return `${SATELLITE_RAW}/${repo}/main/site/data/${file}`;
+}
+// Raw PNG url for a given frame (full-disk or sector), honouring repo naming.
+function satFrameRawUrl(frame) {
+  const source = satSource(), band = satBand(), sector = currentSatSector();
+  const fr = String(frame).padStart(2, "0");
+  if (sector) return satDataUrl(source.repo, sector.fileFor(band.file, fr));
+  return satDataUrl(source.repo, `${band.file}_${fr}.png`);
+}
+// Stable cache key for a frame's warped image.
+function satFrameKey(frame) {
+  const sectorPart = activeSatelliteSector ? `sec:${activeSatelliteSector}` : "full";
+  return `${activeSatelliteSource}|${sectorPart}|${activeSatelliteType}|${frame}`;
+}
+
+// ─── Equirectangular → Web Mercator warp ──────────────────────────────────────
+// The source repos render PlateCarrée (latitude-linear) PNGs, but a Mapbox image
+// source stretches the bitmap linearly in Mercator space. Feeding the raw PNG
+// therefore shifts imagery toward the poles (~2° at CONUS latitudes — "Delaware
+// where PA should be"). We pre-warp each frame to a Mercator-spaced canvas so the
+// linear Mercator placement becomes geographically correct.
+function mercatorY(latDeg) {
+  const lat = Math.max(-85, Math.min(85, latDeg));
+  return Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+}
+function inverseMercatorY(y) {
+  return (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180 / Math.PI;
+}
+const SAT_WARP_MAX = 1536; // cap output dimension to bound warp/encode cost
+function warpEquirectToMercator(img, extent) {
+  const [, , south, north] = extent;
+  const srcW = img.naturalWidth || img.width;
+  const srcH = img.naturalHeight || img.height;
+  const scale = Math.min(1, SAT_WARP_MAX / Math.max(srcW, srcH));
+  const outW = Math.max(1, Math.round(srcW * scale));
+  const outH = Math.max(2, Math.round(srcH * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = outW; canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  const yN = mercatorY(north), yS = mercatorY(south);
+  const latSpan = north - south || 1e-6;
+  // Each output row pulls the source latitude that belongs at that Mercator Y.
+  for (let yo = 0; yo < outH; yo++) {
+    const mercY = yN + (yo / (outH - 1)) * (yS - yN);
+    const lat = inverseMercatorY(mercY);
+    let ysrc = Math.round(((north - lat) / latSpan) * (srcH - 1));
+    if (ysrc < 0) ysrc = 0; else if (ysrc > srcH - 1) ysrc = srcH - 1;
+    ctx.drawImage(img, 0, ysrc, srcW, 1, 0, yo, outW, 1);
+  }
+  return canvas;
+}
+async function warpedFrameUrl(frame) {
+  const key = satFrameKey(frame);
+  if (satWarpCache.has(key)) return satWarpCache.get(key);
+  const img = await loadImgCors(satFrameRawUrl(frame));
+  const dataUrl = warpEquirectToMercator(img, currentSatExtent()).toDataURL("image/png");
+  satWarpCache.set(key, dataUrl);
+  // Keep the cache bounded so band/source/sector churn can't grow unbounded.
+  if (satWarpCache.size > 60) satWarpCache.delete(satWarpCache.keys().next().value);
+  return dataUrl;
+}
+
+// Probe how many frames the active view currently publishes (rolling buffers can
+// be partially filled). Cached per source/sector/band view key.
+async function detectSatFrameCount() {
+  const key = satFrameKey("count"); // distinct per view; band rarely changes count
+  if (satFrameCountCache[key]) return satFrameCountCache[key];
   let count = 1; // frame 00 is assumed to exist
   for (let i = 1; i < SATELLITE_MAX_FRAMES; i++) {
     let res;
     try {
-      res = await fetch(satImgUrl(source, band, i), { method: "HEAD", cache: "no-store" });
+      res = await fetch(satFrameRawUrl(i), { method: "HEAD", cache: "no-store" });
     } catch {
-      // Network/CORS hiccup — assume a full buffer rather than killing animation.
-      count = SATELLITE_MAX_FRAMES;
+      count = SATELLITE_MAX_FRAMES; // network/CORS hiccup → assume a full buffer
       break;
     }
     if (!res.ok) break; // genuine 404 → end of the rolling buffer
     count = i + 1;
   }
-  satFrameCountCache[source.id] = count;
+  satFrameCountCache[key] = count;
   return count;
 }
 
@@ -3603,23 +3676,20 @@ function lowestWeatherLayerId() {
 
 async function addSatelliteLayer() {
   if (!radarMap || !mapLoaded) return;
-  const source = satSource();
-  const band = satBand();
 
-  const count = await detectSatFrameCount(source, band);
+  const count = await detectSatFrameCount();
   if (!radarMap || !radarMap.getStyle() || !satelliteActive) return; // bailed mid-await
   satFrames = Array.from({ length: count }, (_, i) => count - 1 - i); // [count-1 … 0]
   satFrameIndex = satFrames.length - 1;                                // newest
 
-  const [west, east, south, north] = source.extent;
+  const [west, east, south, north] = currentSatExtent();
   const coords = [[west, north], [east, north], [east, south], [west, south]];
 
+  const url = await warpedFrameUrl(satFrames[satFrameIndex]).catch(() => null);
+  if (!url || !radarMap.getStyle() || !satelliteActive) return;
   if (radarMap.getSource("satellite-source")) return; // already present
-  radarMap.addSource("satellite-source", {
-    type: "image",
-    url: satImgUrl(source, band, satFrames[satFrameIndex]),
-    coordinates: coords,
-  });
+
+  radarMap.addSource("satellite-source", { type: "image", url, coordinates: coords });
   radarMap.addLayer({
     id: "satellite-layer", type: "raster", source: "satellite-source",
     paint: {
@@ -3635,20 +3705,77 @@ async function addSatelliteLayer() {
     if (slider) { slider.max = satFrames.length - 1; slider.value = satFrameIndex; }
     updateRadarLabel();
   }
+  prewarmSatFrames(); // warp the rest in the background for smooth animation
+}
+
+// Warp remaining frames ahead of time so scrubbing/animation doesn't stutter.
+function prewarmSatFrames() {
+  satFrames.forEach(frame => { warpedFrameUrl(frame).catch(() => {}); });
 }
 
 function setSatelliteFrame(index) {
   if (!satFrames.length) return;
   satFrameIndex = Math.max(0, Math.min(satFrames.length - 1, Number(index)));
-  const src = radarMap?.getSource("satellite-source");
-  if (src && satelliteActive) {
-    const url = satImgUrl(satSource(), satBand(), satFrames[satFrameIndex]);
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => { try { src.updateImage({ url }); } catch {} };
-    img.src = url;
-  }
+  const frame = satFrames[satFrameIndex];
+  warpedFrameUrl(frame).then(url => {
+    const src = radarMap?.getSource("satellite-source");
+    if (url && src && satelliteActive) { try { src.updateImage({ url }); } catch {} }
+  }).catch(() => {});
   updateRadarLabel();
+}
+
+// ─── Satellite TC sectors ─────────────────────────────────────────────────────
+// Each satellite repo also renders zoomed, native-resolution crops around active
+// tropical cyclones, with its own metadata file and naming convention.
+function sectorMetaUrl(source) {
+  const file = source.sectorScheme === "himawari" ? "sectors_meta.json" : "cyclones.json";
+  return satDataUrl(source.repo, file);
+}
+function parseSatSectors(source, json) {
+  if (!json) return [];
+  if (source.sectorScheme === "himawari") {
+    // sectors_meta.json: bounds already [west,east,south,north]; files
+    // <band>_sector_<safe_id>_NN.png
+    return (json.sectors || []).flatMap(s => {
+      const id = s.safe_id || s.id;
+      if (!id || !Array.isArray(s.bounds) || s.bounds.length !== 4) return [];
+      return [{
+        id,
+        name: s.name || id,
+        label: `${s.name || id}${s.classification ? ` (${s.classification})` : ""}`,
+        extent: s.bounds.map(Number),
+        fileFor: (bandFile, fr) => `${bandFile}_sector_${id}_${fr}.png`,
+      }];
+    });
+  }
+  // GOES cyclones.json: bounds in Leaflet [[south,west],[north,east]]; files
+  // cyclone_<id>_<band>_NN.png  (id is lowercased in the repo)
+  return (json.storms || []).flatMap(s => {
+    const b = s.bounds;
+    if (!s.id || !Array.isArray(b) || b.length !== 2) return [];
+    const extent = [b[0][1], b[1][1], b[0][0], b[1][0]]; // → [west,east,south,north]
+    const id = String(s.id).toLowerCase();
+    return [{
+      id,
+      name: s.name || s.id,
+      label: s.name || s.id,
+      extent,
+      fileFor: (bandFile, fr) => `cyclone_${id}_${bandFile}_${fr}.png`,
+    }];
+  });
+}
+async function ensureSatSectors(sourceId) {
+  if (satSectorCache[sourceId]) return satSectorCache[sourceId];
+  const source = SATELLITE_SOURCES.find(s => s.id === sourceId);
+  let sectors = [];
+  try {
+    const json = await fetch(`${sectorMetaUrl(source)}?_=${Date.now()}`)
+      .then(r => (r.ok ? r.json() : null));
+    sectors = parseSatSectors(source, json);
+  } catch {}
+  satSectorCache[sourceId] = sectors;
+  if (satelliteActive && activeSatelliteSource === sourceId) renderSatelliteSubControls();
+  return sectors;
 }
 
 // ─── Tropical cyclones overlay ────────────────────────────────────────────────
@@ -4329,9 +4456,20 @@ function renderFireWxSubControls() {
   });
 }
 
+function fitSatelliteExtent(extent, padding = 30) {
+  if (!radarMap || !extent) return;
+  const [west, east, south, north] = extent;
+  radarMap.fitBounds(
+    [[Math.max(-180, west), Math.max(-85, south)], [Math.min(180, east), Math.min(85, north)]],
+    { padding, duration: 700 }
+  );
+}
+
 function renderSatelliteSubControls() {
   const sourceEl = document.querySelector("#satelliteSourceBtns");
   const typeEl   = document.querySelector("#satelliteTypeBtns");
+  const sectorEl = document.querySelector("#satelliteSectorBtns");
+  const sectorRow = document.querySelector("#satelliteSectorRow");
 
   if (sourceEl) {
     sourceEl.innerHTML = SATELLITE_SOURCES.map(s =>
@@ -4341,18 +4479,11 @@ function renderSatelliteSubControls() {
       btn.addEventListener("click", () => {
         if (btn.dataset.satSource === activeSatelliteSource) return;
         activeSatelliteSource = btn.dataset.satSource;
+        activeSatelliteSector = null; // sectors are per-source
         localStorage.setItem("satelliteSource", activeSatelliteSource);
         renderSatelliteSubControls();
         drawRadar(false);
-        // Frame the newly selected sector so its imagery is in view.
-        const src = satSource();
-        if (radarMap && src) {
-          const [west, east, south, north] = src.extent;
-          radarMap.fitBounds(
-            [[Math.max(-180, west), Math.max(-85, south)], [Math.min(180, east), Math.min(85, north)]],
-            { padding: 30, duration: 700 }
-          );
-        }
+        fitSatelliteExtent(satSource().extent); // frame the newly selected region
       });
     });
   }
@@ -4368,6 +4499,33 @@ function renderSatelliteSubControls() {
         drawRadar(false);
       });
     });
+  }
+
+  // Storm-sector row: surfaces TC crops the active satellite feed is publishing.
+  if (sectorEl && sectorRow) {
+    const sectors = satSectorCache[activeSatelliteSource];
+    if (sectors === undefined) {
+      sectorRow.hidden = true;
+      ensureSatSectors(activeSatelliteSource); // async; re-renders when ready
+    } else if (!sectors.length) {
+      sectorRow.hidden = true; // no active storms in this feed
+    } else {
+      sectorRow.hidden = false;
+      const btns = [{ id: null, label: "Full Disk" }, ...sectors]
+        .map(s => `<button type="button" data-sat-sector="${s.id ?? ""}" class="${(s.id ?? null) === activeSatelliteSector ? "active" : ""}">${safeText(s.label)}</button>`)
+        .join("");
+      sectorEl.innerHTML = btns;
+      sectorEl.querySelectorAll("button").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.satSector || null;
+          if (id === activeSatelliteSector) return;
+          activeSatelliteSector = id;
+          renderSatelliteSubControls();
+          drawRadar(false);
+          fitSatelliteExtent(currentSatExtent(), id ? 60 : 30);
+        });
+      });
+    }
   }
 }
 
