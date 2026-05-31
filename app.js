@@ -3315,6 +3315,7 @@ function renderBasemapButtons() {
         radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
         radarMap.once("style.load", () => {
           mapLoaded = true;
+          radarMap.setProjection("mercator"); // keep flat projection across basemap swaps
           // Clear per-layer wiring flags so cursor handlers are re-added
           popupWiredLayers.delete("spc"); popupWiredLayers.delete("fire");
           popupWiredLayers.delete("wpc-rain"); popupWiredLayers.delete("all-alerts");
@@ -3334,6 +3335,10 @@ function initMap() {
     style: `mapbox://styles/mapbox/${activeBasemap}`,
     center: [selectedLocation.lon, selectedLocation.lat],
     zoom: 8,
+    // Mapbox GL v3 defaults to the globe projection, which mis-places lat/lon
+    // image overlays (satellite frames) and can't handle antimeridian-crossing
+    // extents. Flat Mercator matches the source repos' Leaflet viewers exactly.
+    projection: "mercator",
   });
   radarMap.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
   radarMap.addControl(new mapboxgl.ScaleControl({ unit: "imperial" }), "bottom-right");
@@ -3617,7 +3622,11 @@ async function addSatelliteLayer() {
   });
   radarMap.addLayer({
     id: "satellite-layer", type: "raster", source: "satellite-source",
-    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 300 },
+    paint: {
+      "raster-opacity": radarOpacity,
+      "raster-fade-duration": 300,
+      "raster-resampling": "nearest", // no bilinear smoothing of source frames
+    },
   }, lowestWeatherLayerId());
 
   // Reflect satellite frames on the shared timeline when it owns the controls.
