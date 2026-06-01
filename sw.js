@@ -45,22 +45,24 @@ self.addEventListener("push", event => {
 
   const alertId = payload.tag || payload.id;
   const title = payload.title || "Weather Alert";
+  const scope = self.registration.scope;
   const options = {
     body: payload.body || "A new weather alert has been issued.",
     tag: alertId || "weather-alert",
-    renotify: true,
-    badge: "./icon-192.png",
-    icon: "./icon-192.png",
-    data: { url: payload.url || "./index.html" }
+    badge: new URL("./icon-192.png", scope).href,
+    icon: new URL("./icon-192.png", scope).href,
+    data: { url: payload.url || scope }
   };
 
-  event.waitUntil(
-    Promise.all([
-      self.registration.showNotification(title, options),
-      alertId ? markAlertShown(alertId) : Promise.resolve(),
-      alertId ? broadcastToClients({ type: "push-alert-shown", id: alertId }) : Promise.resolve(),
-    ])
-  );
+  // Show the notification first, then handle secondary tasks independently so
+  // failures in caching or client broadcast don't prevent the notification on iOS.
+  event.waitUntil((async () => {
+    await self.registration.showNotification(title, options);
+    if (alertId) {
+      await markAlertShown(alertId).catch(() => {});
+      await broadcastToClients({ type: "push-alert-shown", id: alertId }).catch(() => {});
+    }
+  })());
 });
 
 async function markAlertShown(id) {
@@ -79,7 +81,7 @@ async function broadcastToClients(message) {
 
 self.addEventListener("notificationclick", event => {
   event.notification.close();
-  const fromNotifUrl = new URL("./index.html", self.location.origin);
+  const fromNotifUrl = new URL("./index.html", self.location.href);
   fromNotifUrl.searchParams.set("from", "notification");
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
