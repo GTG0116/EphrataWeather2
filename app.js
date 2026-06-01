@@ -1714,7 +1714,11 @@ function uiIcon(name) {
 }
 
 function iconForCondition(text = "") {
-  return text || "Partly Cloudy";
+  if (!text) return "Partly Cloudy";
+  // For "X then Y" patterns (e.g. "Areas of Fog then Sunny"), use the later condition for the icon
+  const thenMatch = text.match(/\bthen\s+(.+)/i);
+  if (thenMatch) return thenMatch[1].trim() || text;
+  return text;
 }
 
 function isNightPeriod(text = "") {
@@ -2419,8 +2423,7 @@ function renderDaily() {
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
       <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
-      <p class="daily-summary">${safeText(generateDailySummary(day, precip))}</p>
-      <p class="fwi-sentence" style="margin:2px 0 4px;font-size:0.72rem;color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</p>
+      <p class="daily-summary">${safeText(generateDailySummary(day, precip))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
       <div class="daily-chip-row">
         <span>${f(precip)}% precip</span>
         <span>Feels ${f(feelsHigh)}° / ${f(feelsLow)}°</span>
