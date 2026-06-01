@@ -7,6 +7,11 @@ const RADAR_FRAME_MS = 700;
 const PUSH_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0";
 const PUSH_SUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/subscribe";
 const WORKER_PROXY = "https://weather-alert-worker.gtg0116scratch.workers.dev/proxy?url=";
+// Tempest (WeatherFlow) personal weather station serving the Ephrata, PA area.
+// Current conditions for these towns are sourced from this station instead of NWS.
+const TEMPEST_STATION_ID = 168579;
+const TEMPEST_TOKEN = "7924050f-deed-4373-9755-fb0c8c8668b9";
+const TEMPEST_TOWNS = ["ephrata", "akron", "brownstown", "rothsville"];
 // SPC Categorical + probabilistic outlooks, Days 1-2
 const SPC_URLS = {
   cat:  ["https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
@@ -477,6 +482,29 @@ function propertyValue(feature, key) {
 
 function point() {
   return selectedLocation;
+}
+
+// True when the selected location is one of the towns served by the local Tempest station.
+function usesTempestStation(location = selectedLocation) {
+  const name = (location?.name || "").toLowerCase();
+  const town = name.split(",")[0].trim();
+  const inPennsylvania = /\b(pa|pennsylvania)\b/.test(name);
+  return inPennsylvania && TEMPEST_TOWNS.includes(town);
+}
+
+// Fetch latest current conditions from the local Tempest station (imperial units).
+async function tempestCurrent() {
+  const url = `https://swd.weatherflow.com/swd/rest/better_forecast?station_id=${TEMPEST_STATION_ID}` +
+    `&token=${TEMPEST_TOKEN}&units_temp=f&units_wind=mph&units_pressure=inhg&units_distance=mi&units_other=imperial`;
+  let data;
+  try {
+    data = await getJson(url);
+  } catch {
+    data = await getJson(`${WORKER_PROXY}${encodeURIComponent(url)}`);
+  }
+  const cc = data?.current_conditions;
+  if (!cc) throw new Error("Tempest station returned no current conditions");
+  return cc;
 }
 
 function townName(location = selectedLocation) {
@@ -1112,7 +1140,7 @@ async function weatherPayload() {
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
   const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
-  const [forecast, hourly, stations, alertsData, openMeteo, airQuality, pollen, astronomy] = await Promise.all([
+  const [forecast, hourly, stations, alertsData, openMeteo, airQuality, pollen, astronomy, tempest] = await Promise.all([
     getJson(props.forecast),
     getJson(props.forecastHourly),
     getJson(props.observationStations),
@@ -1121,6 +1149,7 @@ async function weatherPayload() {
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
     pollenPayload().catch(() => null),
     astronomyPayload().catch(() => null),
+    usesTempestStation(loc) ? tempestCurrent().catch(() => null) : Promise.resolve(null),
   ]);
   const station = stations.features?.[0];
   const stationId = station?.properties?.stationIdentifier;
@@ -1129,14 +1158,32 @@ async function weatherPayload() {
   const p = observation.properties || {};
   const firstHour = hourly.properties?.periods?.[0] || {};
   const firstDay = forecast.properties?.periods?.[0] || {};
-  const temp = fahrenheit(propertyValue(observation, "temperature")) ?? firstHour.temperature;
-  const dewPoint = fahrenheit(propertyValue(observation, "dewpoint"));
-  const wind = mph(propertyValue(observation, "windSpeed")) ?? parseInt(firstHour.windSpeed, 10);
-  const gust = mph(propertyValue(observation, "windGust")) ?? wind;
-  const pressure = paToInHg(propertyValue(observation, "barometricPressure"));
+  let temp = fahrenheit(propertyValue(observation, "temperature")) ?? firstHour.temperature;
+  let dewPoint = fahrenheit(propertyValue(observation, "dewpoint"));
+  let wind = mph(propertyValue(observation, "windSpeed")) ?? parseInt(firstHour.windSpeed, 10);
+  let gust = mph(propertyValue(observation, "windGust")) ?? wind;
+  let pressure = paToInHg(propertyValue(observation, "barometricPressure"));
   const visibility = metersToMiles(propertyValue(observation, "visibility"));
-  const humidity = propertyValue(observation, "relativeHumidity");
-  const condition = p.textDescription || firstHour.shortForecast || firstDay.shortForecast;
+  let humidity = propertyValue(observation, "relativeHumidity");
+  let condition = p.textDescription || firstHour.shortForecast || firstDay.shortForecast;
+  let uv = openMeteo?.current?.uv_index ?? null;
+  let updated = p.timestamp;
+  let currentSource = "NWS";
+
+  // For Ephrata-area towns, override current conditions with the local Tempest station readings.
+  if (tempest) {
+    if (Number.isFinite(tempest.air_temperature)) temp = Math.round(tempest.air_temperature);
+    if (Number.isFinite(tempest.dew_point)) dewPoint = Math.round(tempest.dew_point);
+    if (Number.isFinite(tempest.relative_humidity)) humidity = tempest.relative_humidity;
+    if (Number.isFinite(tempest.wind_avg)) wind = Math.round(tempest.wind_avg);
+    if (Number.isFinite(tempest.wind_gust)) gust = Math.round(tempest.wind_gust);
+    const tempestPressure = tempest.sea_level_pressure ?? tempest.station_pressure;
+    if (Number.isFinite(tempestPressure)) pressure = tempestPressure;
+    if (Number.isFinite(tempest.uv)) uv = tempest.uv;
+    if (tempest.conditions) condition = tempest.conditions;
+    if (Number.isFinite(tempest.time)) updated = new Date(tempest.time * 1000).toISOString();
+    currentSource = "Tempest station";
+  }
 
   return {
     current: {
@@ -1148,14 +1195,15 @@ async function weatherPayload() {
       dewPoint,
       wind,
       gust,
-      uv: openMeteo?.current?.uv_index ?? null,
+      uv,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
       airQualityDetail: airQuality?.detail || "Open-Meteo air quality unavailable",
       visibility: visibility == null ? null : Number(visibility.toFixed(1)),
       pressure,
-      updated: p.timestamp,
+      updated,
+      source: currentSource,
     },
     hourly: hourly.properties?.periods || [],
     daily: forecast.properties?.periods || [],
@@ -1164,7 +1212,9 @@ async function weatherPayload() {
     alertSource: alertsData.source || "NWS",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
     astronomy,
-    sources: ["api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"],
+    sources: tempest
+      ? ["Tempest station " + TEMPEST_STATION_ID, "api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"]
+      : ["api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"],
   };
 }
 
@@ -1810,7 +1860,7 @@ function renderCurrent() {
 
   const updated = current.updated ? new Date(current.updated) : new Date();
   const updatedEl = document.querySelector("#updatedAt");
-  if (updatedEl) updatedEl.textContent = `Updated ${updated.toLocaleTimeString([], { timeZone: selectedLocation.timezone || "America/New_York", hour: "numeric", minute: "2-digit" })} from NWS`;
+  if (updatedEl) updatedEl.textContent = `Updated ${updated.toLocaleTimeString([], { timeZone: selectedLocation.timezone || "America/New_York", hour: "numeric", minute: "2-digit" })} from ${current.source || "NWS"}`;
 
   hourlyStrip.innerHTML = (weatherState.hourly || []).slice(0, 24).map((hour, index) => {
     const time = new Date(hour.startTime);
