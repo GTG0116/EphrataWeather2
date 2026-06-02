@@ -12,7 +12,7 @@ const WORKER_PROXY = "https://weather-alert-worker.gtg0116scratch.workers.dev/pr
 const TEMPEST_STATION_ID = 168579;
 const TEMPEST_TOKEN = "7924050f-deed-4373-9755-fb0c8c8668b9";
 const TEMPEST_TOWNS = ["ephrata", "akron", "brownstown", "rothsville"];
-// SPC Categorical + probabilistic outlooks, Days 1-2
+// SPC Categorical + probabilistic outlooks, Days 1-2 (used by the point text forecast).
 const SPC_URLS = {
   cat:  ["https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
          "https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson"],
@@ -25,6 +25,43 @@ const SPC_URLS = {
 };
 
 const SPC_CAT_RANK = { TSTM: 1, MRGL: 2, SLGT: 3, ENH: 4, MDT: 5, HIGH: 6 };
+
+// SPC probability fill color scales. Tornado runs 2–60%, wind/hail run 5–90% (hail tops
+// out at 60%). Day 3 overall-severe probability reuses the hail scale; experimental
+// Days 4-8 carry only 15%/30% severe probabilities (yellow / orange).
+const SPC_PROB_COLORS = {
+  torn: [[2, "#008b00"], [5, "#8b4726"], [10, "#ffc800"], [15, "#ff0000"], [30, "#ff00ff"], [45, "#912cee"], [60, "#104e8b"]],
+  wind: [[5, "#8b4726"], [15, "#ffc800"], [30, "#ff0000"], [45, "#ff00ff"], [60, "#912cee"], [75, "#104e8b"], [90, "#00ffff"]],
+  hail: [[5, "#8b4726"], [15, "#ffc800"], [30, "#ff0000"], [45, "#ff00ff"], [60, "#912cee"]],
+  d48:  [[15, "#ffc800"], [30, "#ff8c00"]],
+};
+
+// SPC outlook GeoJSON URL for a given day (1-8) and type. Days 1-2 offer the full hazard
+// set; Day 3 offers categorical + overall-severe probability; Days 4-8 are probability only.
+function spcUrlFor(day, type) {
+  if (day <= 2) return `https://www.spc.noaa.gov/products/outlook/day${day}otlk_${type}.nolyr.geojson`;
+  if (day === 3) {
+    if (type === "cat")  return "https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson";
+    if (type === "prob") return "https://www.spc.noaa.gov/products/outlook/day3otlk_prob.nolyr.geojson";
+    return null;
+  }
+  if (type === "prob") return `https://www.spc.noaa.gov/products/exper/day4-8/day${day}prob.nolyr.geojson`;
+  return null;
+}
+
+// Outlook types available for a given SPC day.
+function spcTypesForDay(day) {
+  if (day <= 2) return ["cat", "torn", "wind", "hail"];
+  if (day === 3) return ["cat", "prob"];
+  return ["prob"];
+}
+
+// Probability color stops ([percent, color] pairs) for the active day/type.
+function spcProbStops(day, type) {
+  if (day >= 4) return SPC_PROB_COLORS.d48;
+  if (day === 3) return SPC_PROB_COLORS.hail; // overall severe = hail scale
+  return SPC_PROB_COLORS[type] || SPC_PROB_COLORS.hail;
+}
 
 // NWS vector MapServer for SPC fire weather outlook (Day 1 layer 0, Day 2 layer 1)
 const FIRE_WX_MAPSERVER_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/fire_weather/SPC_firewx/MapServer";
@@ -365,8 +402,8 @@ let radarActive = true;
 let activeOverlays = new Set();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
 let radarFrameTransitionTimer = null;
-let activeSpcType = "cat";   // cat | torn | wind | hail
-let activeSpcDay  = 1;       // 1 or 2
+let activeSpcType = "cat";   // cat | torn | wind | hail | prob
+let activeSpcDay  = 1;       // 1-8
 let activeWpcDay  = 1;       // 1-5
 let activeFireDay = 1;       // 1 or 2
 let activeBasemap = (() => {
@@ -1571,6 +1608,8 @@ function spcLabel(label = "") {
 
 function spcPopupLabel(properties = {}) {
   const label = String(properties.LABEL || "");
+  const cig = label.toUpperCase().match(/^CIG([123])$/);
+  if (cig) return `Significant severe — Conditional Intensity Group ${cig[1]}`;
   if (Number.isFinite(Number(properties.RISK_NUM))) return `${properties.RISK_NUM}% probability`;
   return spcLabel(label);
 }
@@ -3325,7 +3364,7 @@ function clearWeatherLayers() {
   clearTimeout(radarFrameTransitionTimer);
   ["mrms-layer",
    "radar-layer-a", "radar-layer-b",
-   "spc-fill", "spc-line",
+   "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
    "drought-fill", "drought-line",
    "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
    "fire-fill", "fire-line",
@@ -3455,19 +3494,24 @@ async function addRadarLayer() {
 
 async function addSpcLayer() {
   if (!radarMap || !mapLoaded) return;
-  const type = activeSpcType; // cat | torn | wind | hail
-  const day  = activeSpcDay;  // 1 | 2 | 3
+  const type = activeSpcType; // cat | torn | wind | hail | prob
+  const day  = activeSpcDay;  // 1-8
   const cacheKey = `${day}_${type}`;
-  const urlList  = SPC_URLS[type];
-  if (!urlList || !urlList[day - 1]) return;
+  const url = spcUrlFor(day, type);
+  if (!url) return;
 
   if (!spcLayerData[cacheKey]) {
-    spcLayerData[cacheKey] = normalizeSpcData(await fetchOutlookGeoJson(urlList[day - 1]));
+    spcLayerData[cacheKey] = normalizeSpcData(await fetchOutlookGeoJson(url));
   }
   const data = spcLayerData[cacheKey];
 
   radarMap.addSource("spc-source", { type: "geojson", data });
   const isCat = type === "cat";
+
+  // Build the probability fill/line step expressions from the active day/type color scale.
+  const probFill = ["step", ["coalesce", ["get", "RISK_NUM"], 0], "rgba(0,0,0,0)"];
+  const probLine = ["step", ["coalesce", ["get", "RISK_NUM"], 0], "rgba(0,0,0,0)"];
+  spcProbStops(day, type).forEach(([p, c]) => { probFill.push(p, c); probLine.push(p, c); });
 
   radarMap.addLayer({
     id: "spc-fill",
@@ -3477,8 +3521,7 @@ async function addSpcLayer() {
       "fill-color": isCat
         ? ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
           "TSTM", "#c0e8c0", "MRGL", "#66cc66", "SLGT", "#ffe066", "ENH", "#ffa040", "MDT", "#ff6060", "HIGH", "#ff40ff", "rgba(0,0,0,0)"]
-        : ["step", ["coalesce", ["get", "RISK_NUM"], 0],
-          "rgba(0,0,0,0)", 2, "#50b450", 5, "#64c83c", 10, "#ffdc00", 15, "#ff8c00", 30, "#dc1e1e", 45, "#a000c8", 60, "#6400b4"],
+        : probFill,
       "fill-opacity": 0.46,
     },
   });
@@ -3490,10 +3533,33 @@ async function addSpcLayer() {
       "line-color": isCat
         ? ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
           "TSTM", "#96d896", "MRGL", "#44bb44", "SLGT", "#ddbb00", "ENH", "#cc7700", "MDT", "#cc2222", "HIGH", "#cc00cc", "rgba(0,0,0,0)"]
-        : ["step", ["coalesce", ["get", "RISK_NUM"], 0],
-          "rgba(0,0,0,0)", 2, "#339933", 5, "#55aa00", 10, "#ccaa00", 15, "#cc7000", 30, "#bb1111", 45, "#8800aa", 60, "#6600bb"],
+        : probLine,
       "line-width": 1.4,
     },
+  });
+
+  // Conditional Intensity Group (CIG) significant-severe areas overlay the probability
+  // fill with a heavy black outline and a hatch pattern keyed to intensity:
+  //   CIG1 → dashed single lines, CIG2 → solid single lines, CIG3 → cross-hatch.
+  ensureCigHatchImages();
+  const cigFilter = ["in", ["upcase", ["coalesce", ["get", "LABEL"], ""]], ["literal", ["CIG1", "CIG2", "CIG3"]]];
+  radarMap.addLayer({
+    id: "spc-cig-fill",
+    type: "fill",
+    source: "spc-source",
+    filter: cigFilter,
+    paint: {
+      "fill-pattern": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
+        "CIG1", "cig-hatch-1", "CIG2", "cig-hatch-2", "CIG3", "cig-hatch-3", "cig-hatch-2"],
+      "fill-opacity": 0.95,
+    },
+  });
+  radarMap.addLayer({
+    id: "spc-cig-line",
+    type: "line",
+    source: "spc-source",
+    filter: cigFilter,
+    paint: { "line-color": "#000000", "line-width": 2.2 },
   });
 
   if (!popupWiredLayers.has("spc")) {
@@ -3503,6 +3569,36 @@ async function addSpcLayer() {
   }
 
   renderSpcLegend();
+}
+
+// Registers the three CIG hatch patterns as map images, once per map instance.
+function ensureCigHatchImages() {
+  for (const level of [1, 2, 3]) {
+    const id = `cig-hatch-${level}`;
+    if (!radarMap.hasImage(id)) radarMap.addImage(id, makeCigHatch(level));
+  }
+}
+
+// Builds a tileable black hatch pattern over a transparent background:
+//   level 1 → dashed "/" lines, level 2 → solid "/" lines, level 3 → "/" + "\" cross-hatch.
+function makeCigHatch(level) {
+  const size = 16, spacing = 8, thick = 2;
+  const data = new Uint8ClampedArray(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const d1 = (x + y) % spacing;                 // "/" diagonal family
+      const d2 = ((x - y) % spacing + spacing) % spacing; // "\" diagonal family
+      let draw;
+      if (level === 3)      draw = d1 < thick || d2 < thick;
+      else if (level === 2) draw = d1 < thick;
+      else                  draw = d1 < thick && (((x - y) % 8 + 8) % 8) < 5; // dashed
+      if (draw) {
+        const i = (y * size + x) * 4;
+        data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255;
+      }
+    }
+  }
+  return { width: size, height: size, data };
 }
 
 // MapServer layer IDs: Day1 Outlook=1, Day2 Outlook=4
@@ -4442,13 +4538,11 @@ function renderSpcSubControls() {
   const typeEl = document.querySelector("#spcTypeBtns");
   if (!dayEl || !typeEl) return;
 
-  const days  = [1, 2];
-  const types = [
-    { id: "cat",  label: "Categorical" },
-    { id: "torn", label: "Tornado"     },
-    { id: "wind", label: "Wind"        },
-    { id: "hail", label: "Hail"        },
-  ];
+  const days = [1, 2, 3, 4, 5, 6, 7, 8];
+  const typeLabels = { cat: "Categorical", torn: "Tornado", wind: "Wind", hail: "Hail", prob: "Probability" };
+  const types = spcTypesForDay(activeSpcDay);
+  // Keep the active type valid for the selected day (e.g. Days 4-8 only offer probability).
+  if (!types.includes(activeSpcType)) activeSpcType = types[0];
 
   dayEl.innerHTML = days.map(d =>
     `<button type="button" data-spc-day="${d}" class="${d === activeSpcDay ? "active" : ""}">Day ${d}</button>`
@@ -4456,12 +4550,14 @@ function renderSpcSubControls() {
 
   typeEl.hidden = false;
   typeEl.innerHTML = types.map(t =>
-    `<button type="button" data-spc-type="${t.id}" class="${t.id === activeSpcType ? "active" : ""}">${t.label}</button>`
+    `<button type="button" data-spc-type="${t}" class="${t === activeSpcType ? "active" : ""}">${typeLabels[t]}</button>`
   ).join("");
 
   dayEl.querySelectorAll("button").forEach(btn => {
     btn.addEventListener("click", () => {
       activeSpcDay = Number(btn.dataset.spcDay);
+      const valid = spcTypesForDay(activeSpcDay);
+      if (!valid.includes(activeSpcType)) activeSpcType = valid[0];
       renderSpcSubControls();
       drawRadar(false);
     });
@@ -4588,7 +4684,8 @@ function renderSpcLegend() {
   if (!activeOverlays.has("SPC")) { box.hidden = true; return; }
   box.hidden = false;
 
-  const isCat = activeSpcType === "cat";
+  const day = activeSpcDay, type = activeSpcType;
+  const isCat = type === "cat";
   const entries = isCat
     ? [
         { color: "#c0e8c0", label: "TSTM — General Thunderstorm" },
@@ -4598,24 +4695,30 @@ function renderSpcLegend() {
         { color: "#ff6060", label: "MDT — Moderate" },
         { color: "#ff40ff", label: "HIGH — High" },
       ]
-    : [
-        { color: "#50b450", label: "2%" },
-        { color: "#64c83c", label: "5%" },
-        { color: "#ffdc00", label: "10%" },
-        { color: "#ff8c00", label: "15%" },
-        { color: "#dc1e1e", label: "30%" },
-        { color: "#a000c8", label: "45%" },
-        { color: "#6400b4", label: "60%+" },
-      ];
+    : spcProbStops(day, type).map(([p, c]) => ({ color: c, label: `${p}%` }));
+
+  const titleType = { cat: "Categorical", torn: "Tornado", wind: "Wind", hail: "Hail",
+    prob: day === 3 ? "Severe Prob" : "Severe" }[type] || type;
+
+  // The CIG significant-severe hatch key only applies to Day 1-2 hazard outlooks.
+  const showCig = day <= 2 && (type === "torn" || type === "wind" || type === "hail");
+  const cigBase = "border:1px solid #000;background-color:#fff;background-image:";
+  const cigRows = showCig ? `
+    <div class="legend-subtitle" style="margin-top:6px;">Significant severe (CIG)</div>
+    <div class="legend-row"><span class="legend-swatch" style="${cigBase}repeating-linear-gradient(45deg,#000 0 1px,transparent 1px 5px);"></span>CIG1 · dashed</div>
+    <div class="legend-row"><span class="legend-swatch" style="${cigBase}repeating-linear-gradient(45deg,#000 0 2px,transparent 2px 6px);"></span>CIG2 · solid</div>
+    <div class="legend-row"><span class="legend-swatch" style="${cigBase}repeating-linear-gradient(45deg,#000 0 2px,transparent 2px 6px),repeating-linear-gradient(-45deg,#000 0 2px,transparent 2px 6px);"></span>CIG3 · cross-hatch</div>
+  ` : "";
 
   box.innerHTML = `
-    <div class="legend-title">SPC Day ${activeSpcDay} ${activeSpcType.toUpperCase()}</div>
+    <div class="legend-title">SPC Day ${day} ${safeText(titleType)}</div>
     ${entries.map(e => `
       <div class="legend-row">
         <span class="legend-swatch" style="background:${e.color}"></span>
         ${safeText(e.label)}
       </div>
     `).join("")}
+    ${cigRows}
   `;
 }
 
