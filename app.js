@@ -107,7 +107,7 @@ const SATELLITE_MAX_FRAMES = 10;
 const SATELLITE_SOURCES = [
   { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81], sectorScheme: "goes",     proj: "platecarree" },
   { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55], sectorScheme: "goes",     proj: "platecarree" },
-  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes",     proj: "mercator"    },
+  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes18",   proj: "mercator"    },
   { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60], sectorScheme: "himawari", proj: "mercator"    },
 ];
 const SATELLITE_BANDS = [
@@ -3914,7 +3914,26 @@ function parseSatSectors(source, json) {
       }];
     });
   }
-  // GOES cyclones.json: bounds in Leaflet [[south,west],[north,east]]; files
+  if (source.sectorScheme === "goes18") {
+    // GOES-18 cyclones.json: storms carry only id/name/lat/lon (no bounds); the
+    // crop is a ±sector_deg square (top-level "sector_deg", default 6°) and files
+    // are <band>_tc_<id>_NN.png. The id token matches the manifest verbatim, so
+    // it is used as-is (the repo already lowercases it upstream).
+    const deg = Number(json.sector_deg) || 6;
+    return (json.storms || []).flatMap(s => {
+      const lat = Number(s.lat), lon = Number(s.lon);
+      if (!s.id || !Number.isFinite(lat) || !Number.isFinite(lon)) return [];
+      const id = String(s.id);
+      return [{
+        id,
+        name: s.name || id,
+        label: s.name || id,
+        extent: [lon - deg, lon + deg, lat - deg, lat + deg], // [west,east,south,north]
+        fileFor: (bandFile, fr) => `${bandFile}_tc_${id}_${fr}.png`,
+      }];
+    });
+  }
+  // GOES-19 cyclones.json: bounds in Leaflet [[south,west],[north,east]]; files
   // cyclone_<id>_<band>_NN.png  (id is lowercased in the repo)
   return (json.storms || []).flatMap(s => {
     const b = s.bounds;
