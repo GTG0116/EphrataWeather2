@@ -89,13 +89,26 @@ const SURFACE_WMS  = "https://nowcoast.noaa.gov/arcgis/services/nowcoast/analysi
 // Files are named <band>_NN.png where NN = 00 (newest) … 09 (oldest).
 // extent is [west_lon, east_lon, south_lat, north_lat] and MUST match the
 // EXTENT used by that repo's process_data.py.
+//
+// `proj` is the projection the repo's PNGs are actually rendered in and decides
+// how each frame is placed on the (Mercator) Mapbox map:
+//   "platecarree" — repo renders ccrs.PlateCarree() (latitude-linear). A Mapbox
+//                   image source stretches the bitmap linearly in Mercator Y, so
+//                   these frames are pre-warped (see warpEquirectToMercator) to
+//                   compensate; placement uses the plain lon/lat corners.
+//   "mercator"    — repo renders ccrs.Mercator(central_longitude=nadir) directly,
+//                   i.e. the PNG is ALREADY Web Mercator. Re-warping it would
+//                   double-project and throw it badly off, so these frames are
+//                   used raw. The central-longitude offset is a pure translation
+//                   at the same scale as EPSG:3857, so mapping the bitmap edges to
+//                   the lon/lat corners reproduces the projection exactly.
 const SATELLITE_RAW = "https://raw.githubusercontent.com/GTG0116";
 const SATELLITE_MAX_FRAMES = 10;
 const SATELLITE_SOURCES = [
-  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81], sectorScheme: "goes" },
-  { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55], sectorScheme: "goes" },
-  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes" },
-  { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60], sectorScheme: "himawari" },
+  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81], sectorScheme: "goes",     proj: "platecarree" },
+  { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55], sectorScheme: "goes",     proj: "platecarree" },
+  { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes",     proj: "mercator"    },
+  { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60], sectorScheme: "himawari", proj: "mercator"    },
 ];
 const SATELLITE_BANDS = [
   { id: "geocolor",   label: "GeoColor",    file: "geocolor"    },
@@ -3747,11 +3760,12 @@ function satFrameKey(frame) {
 }
 
 // ─── Equirectangular → Web Mercator warp ──────────────────────────────────────
-// The source repos render PlateCarrée (latitude-linear) PNGs, but a Mapbox image
+// The PlateCarrée source repos render latitude-linear PNGs, but a Mapbox image
 // source stretches the bitmap linearly in Mercator space. Feeding the raw PNG
 // therefore shifts imagery toward the poles (~2° at CONUS latitudes — "Delaware
-// where PA should be"). We pre-warp each frame to a Mercator-spaced canvas so the
-// linear Mercator placement becomes geographically correct.
+// where PA should be"). We pre-warp each such frame to a Mercator-spaced canvas so
+// the linear Mercator placement becomes geographically correct. (Sources whose
+// repos already render in Mercator skip this — see warpedFrameUrl / `proj`.)
 function mercatorY(latDeg) {
   const lat = Math.max(-85, Math.min(85, latDeg));
   return Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
@@ -3784,6 +3798,9 @@ function warpEquirectToMercator(img, extent) {
   return canvas;
 }
 async function warpedFrameUrl(frame) {
+  // Mercator-rendered sources (e.g. GOES-18, Himawari) already ship Web Mercator
+  // PNGs — warping them again would double-project. Use the raw frame as-is.
+  if (satSource().proj === "mercator") return satFrameRawUrl(frame);
   const key = satFrameKey(frame);
   if (satWarpCache.has(key)) return satWarpCache.get(key);
   const img = await loadImgCors(satFrameRawUrl(frame));
