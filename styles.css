@@ -107,17 +107,27 @@ body[data-condition="winter"] {
 
 #atmosphereCanvas {
   position: fixed;
-  inset: 0;
+  /* Bleed 100px past the top and bottom of the screen. On iOS 26/27
+     standalone web apps the fixed-position viewport can start below the
+     status bar (and dvh/lvh can exclude the safe areas), which left an
+     uncovered band of flat body color across the status-bar buffer.
+     Overshooting the viewport keeps the canvas under the status bar and
+     home indicator no matter how the viewport is resolved; the extra
+     gradient just renders offscreen. */
+  top: -100px;
+  left: 0;
   width: 100vw;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh + 200px);
+  height: calc(100lvh + 200px);
   z-index: -2;
 }
 
 body::after {
   content: "";
   position: fixed;
-  inset: 0;
+  /* Overshoot the viewport top/bottom like #atmosphereCanvas so the glow
+     overlay also covers the iOS status-bar and home-indicator regions. */
+  inset: -100px 0;
   z-index: -1;
   background:
     radial-gradient(circle at 80% 12%, var(--glow), transparent 28rem),
