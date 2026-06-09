@@ -133,6 +133,75 @@ async function checkSubscriptions(env) {
 }
 
 async function activeAlerts(location, env) {
+  const [nwsResult, ecccResult] = await Promise.allSettled([
+    nwsActiveAlerts(location, env),
+    ecccActiveAlerts(location),
+  ]);
+  if (nwsResult.status === "rejected" && ecccResult.status === "rejected") {
+    throw nwsResult.reason;
+  }
+  return [
+    ...(nwsResult.status === "fulfilled" ? nwsResult.value : []),
+    ...(ecccResult.status === "fulfilled" ? ecccResult.value : []),
+  ];
+}
+
+// Rough Canada bounding box — overlap with northern US states is harmless
+// because the ECCC query simply returns nothing outside Canadian polygons.
+function isInCanada(lat, lon) {
+  return lat >= 41.5 && lat <= 84 && lon >= -141.1 && lon <= -52.5;
+}
+
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    const intersect = ((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / (yj - yi || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInGeometry(lon, lat, geometry) {
+  if (!geometry) return false;
+  if (geometry.type === "Polygon") return pointInRing(lon, lat, geometry.coordinates[0] || []);
+  if (geometry.type === "MultiPolygon") return geometry.coordinates.some(poly => pointInRing(lon, lat, poly[0] || []));
+  return false;
+}
+
+function titleCaseAlertName(name = "") {
+  return String(name).replace(/\w\S*/g, word => word.charAt(0).toUpperCase() + word.slice(1));
+}
+
+// ECCC (Environment and Climate Change Canada) alerts for Canadian locations.
+async function ecccActiveAlerts(location) {
+  if (!isInCanada(location.lat, location.lon)) return [];
+  const d = 0.05;
+  const bbox = `${location.lon - d},${location.lat - d},${location.lon + d},${location.lat + d}`;
+  const response = await fetch(
+    `https://api.weather.gc.ca/collections/weather-alerts/items?f=json&lang=en&bbox=${bbox}&limit=100`,
+    { headers: { "Accept": "application/geo+json, application/json", "User-Agent": "WeatherPortal/1.0 weather-alert-worker" } }
+  );
+  if (!response.ok) throw new Error(`ECCC alerts failed: ${response.status}`);
+  const data = await response.json();
+  return (data.features || [])
+    .filter(feature => pointInGeometry(location.lon, location.lat, feature.geometry))
+    .map(feature => {
+      const p = feature.properties || {};
+      const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
+      return {
+        id: p.id || p.feature_id,
+        event,
+        headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
+        expires: p.expiration_datetime || p.event_end_datetime || null,
+        parameters: {},
+      };
+    })
+    .filter(alert => alert.id);
+}
+
+async function nwsActiveAlerts(location, env) {
   const nwsHeaders = {
     "Accept": "application/geo+json, application/json",
     "User-Agent": env.NWS_USER_AGENT || "WeatherPortal/1.0 weather-alert-worker",
