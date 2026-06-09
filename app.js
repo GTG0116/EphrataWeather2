@@ -411,6 +411,17 @@ const canvas = document.querySelector("#atmosphereCanvas");
 const ctx = canvas.getContext("2d");
 
 let activeTheme = "sunny";
+
+// Keep the <meta name="theme-color"> in step with the top color of the active
+// animated gradient. On iOS standalone web apps the system can paint the
+// status-bar buffer itself from theme-color; matching the gradient keeps that
+// strip blended with the scene instead of reading as a flat dark band.
+function syncThemeColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  const palette = themePalettes[activeTheme] || themePalettes.sunny;
+  if (meta && palette.gradient?.length) meta.setAttribute("content", palette.gradient[0]);
+}
+syncThemeColor();
 let radarActive = true;
 let activeOverlays = new Set();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
@@ -1871,6 +1882,7 @@ function renderCurrent() {
   activeTheme = chooseTheme(current);
   setLocationBrand();
   document.body.dataset.theme = activeTheme;
+  syncThemeColor();
   document.body.dataset.condition = conditionClass(current);
   locationName.textContent = selectedLocation.name;
   document.querySelector("#current-title").textContent = current.headline;
