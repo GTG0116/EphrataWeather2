@@ -3128,13 +3128,17 @@ function initHistoricalCalendar() {
 function drawAtmosphere() {
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   const dpr = window.devicePixelRatio || 1;
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+  // Measure the canvas's actual rendered size (driven by CSS `position: fixed; inset: 0`)
+  // rather than window.innerHeight. On iOS standalone/Safari, innerHeight excludes the
+  // safe-area regions, which left the animated gradient short and exposed the flat body
+  // color as a solid band at the top and bottom of the screen.
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  const bufferW = Math.round(width * dpr);
+  const bufferH = Math.round(height * dpr);
+  if (canvas.width !== bufferW || canvas.height !== bufferH) {
+    canvas.width = bufferW;
+    canvas.height = bufferH;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
