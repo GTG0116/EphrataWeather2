@@ -47,20 +47,17 @@ body::-webkit-scrollbar {
   display: none;
 }
 
-html {
-  background: #06101f;
-}
-
 body {
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0;
   color: var(--text);
   font-family: var(--font-sans);
-  /* Soft gradient fallback so any sliver behind the animated canvas (e.g. iOS
-     safe-area regions) blends with the scene instead of reading as a flat band. */
-  background: radial-gradient(circle at 50% 0%, #0a1a2e, #06101f 70%);
-  background-attachment: fixed;
+  /* Plain base color only. The animated canvas (z-index: -2) covers the full
+     screen including safe areas, so this just sits behind it. Avoid
+     background-attachment: fixed here — on iOS it composites over negative
+     z-index children and hides the animated canvas. */
+  background: #06101f;
   overflow-x: hidden;
   transition: color 220ms ease, background-color 420ms ease;
 }
