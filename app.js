@@ -694,11 +694,15 @@ function hourFwi(hour) {
 }
 
 async function searchLocations(query) {
-  const data = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json&countryCode=US`);
+  const data = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json`);
   return (data.results || []).map(item => ({
     lat: item.latitude,
     lon: item.longitude,
-    name: [item.name, item.admin1].filter(Boolean).join(", "),
+    name: [
+      item.name,
+      item.admin1,
+      item.country_code && item.country_code !== "US" ? item.country_code : null,
+    ].filter(Boolean).join(", "),
     timezone: item.timezone || "America/New_York",
   }));
 }
@@ -1061,10 +1065,71 @@ function normalizeIemFeature(feature) {
   };
 }
 
+// ─── ECCC (Environment and Climate Change Canada) weather alerts ──────────────
+const ECCC_ALERTS_URL = "https://api.weather.gc.ca/collections/weather-alerts/items";
+
+// Rough Canada bounding box — used only to decide when ECCC is worth querying,
+// so overlap with northern US states is harmless (the bbox query simply returns
+// nothing for points outside Canadian alert polygons).
+function isInCanada(lat, lon) {
+  return lat >= 41.5 && lat <= 84 && lon >= -141.1 && lon <= -52.5;
+}
+
+function alertAgencyLabel(location = selectedLocation) {
+  return isInCanada(location?.lat, location?.lon) ? "ECCC" : "NWS";
+}
+
+function titleCaseAlertName(name = "") {
+  return String(name).replace(/\w\S*/g, word => word.charAt(0).toUpperCase() + word.slice(1));
+}
+
+function ecccSeverity(p) {
+  const colour = String(p.risk_colour_en || "").toLowerCase();
+  if (colour === "red") return "Extreme";
+  if (colour === "orange") return "Severe";
+  const type = String(p.alert_type || "").toLowerCase();
+  if (type === "warning") return "Severe";
+  if (type === "watch" || colour === "yellow") return "Moderate";
+  return "Minor";
+}
+
+// Canadian alert text shares one free-form format across event types, so no
+// hazard tags are derived for ECCC alerts (unlike NWS/IEM parameters).
+function normalizeEcccAlert(feature) {
+  const p = feature.properties || {};
+  const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
+  return {
+    id: p.id || p.feature_id,
+    event,
+    headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
+    severity: ecccSeverity(p),
+    urgency: String(p.alert_type || "").toLowerCase() === "warning" ? "Immediate" : "Expected",
+    effective: p.validity_datetime || p.publication_datetime,
+    expires: p.expiration_datetime || p.event_end_datetime,
+    description: p.alert_text_en || "",
+    instruction: "",
+    parameters: {},
+    areaDesc: [p.feature_name_en, p.province].filter(Boolean).join(", "),
+    source: "ECCC",
+    affectedZones: [],
+  };
+}
+
+async function ecccAlertsPayload(lat, lon) {
+  if (!isInCanada(lat, lon)) return [];
+  const d = 0.05;
+  const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
+  const data = await getJson(`${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=100`);
+  return (data.features || [])
+    .filter(feature => pointInGeometry(lon, lat, feature.geometry))
+    .map(normalizeEcccAlert);
+}
+
 async function alertsPayload(lat, lon) {
-  const [iemResult, nwsResult] = await Promise.allSettled([
+  const [iemResult, nwsResult, ecccResult] = await Promise.allSettled([
     getJson("https://mesonet.agron.iastate.edu/geojson/sbw.geojson"),
     getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
+    ecccAlertsPayload(lat, lon),
   ]);
   const allNwsFeatures = nwsResult.status === "fulfilled" ? (nwsResult.value.features || []) : [];
   const nwsAlerts = allNwsFeatures
@@ -1091,10 +1156,15 @@ async function alertsPayload(lat, lon) {
         return alert;
       })
     : [];
-  const alerts = mergeAlerts(iemAlerts, nwsAlerts);
+  const ecccAlerts = ecccResult.status === "fulfilled" ? ecccResult.value : [];
+  const alerts = mergeAlerts(iemAlerts, nwsAlerts, ecccAlerts).map(alert => ({
+    ...alert,
+    tags: alert.source === "ECCC" ? [] : tagsForAlert(alert),
+  }));
   const sources = [
     iemResult.status === "fulfilled" && "IEM storm-based warnings",
     nwsResult.status === "fulfilled" && "NWS watches/advisories",
+    isInCanada(lat, lon) && ecccResult.status === "fulfilled" && "ECCC alerts",
   ].filter(Boolean);
   return {
     alerts,
@@ -1269,13 +1339,115 @@ async function weatherPayload() {
     hourly: hourly.properties?.periods || [],
     daily: forecast.properties?.periods || [],
     dailyExtras: openMeteo?.daily || {},
-    alerts: (alertsData.alerts || []).map(alert => ({ ...alert, tags: tagsForAlert(alert) })),
+    alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "NWS",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
     astronomy,
     sources: tempest
       ? ["Tempest station " + TEMPEST_STATION_ID, "api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"]
       : ["api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com"],
+  };
+}
+
+// Full forecast payload from Open-Meteo, shaped like the NWS payload so every
+// renderer works unchanged. Used for international locations and whenever the
+// NWS pipeline fails.
+async function openMeteoWeatherPayload() {
+  const loc = point();
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index` +
+    `&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility` +
+    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min` +
+    `&temperature_unit=fahrenheit&wind_speed_unit=mph&forecast_days=8&timeformat=unixtime&timezone=auto`;
+  const data = await getJson(url);
+  selectedLocation.timezone = data.timezone || loc.timezone || "America/New_York";
+  const tz = selectedLocation.timezone;
+
+  const [alertsData, airQuality, pollen, astronomy] = await Promise.all([
+    alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
+    airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
+    pollenPayload().catch(() => null),
+    astronomyPayload().catch(() => null),
+  ]);
+
+  const hi = data.hourly || {};
+  const nowSec = Date.now() / 1000;
+  let startIdx = (hi.time || []).findIndex(t => t >= nowSec - 3600);
+  if (startIdx < 0) startIdx = 0;
+  const hourly = (hi.time || []).slice(startIdx, startIdx + 48).map((t, k) => {
+    const i = startIdx + k;
+    return {
+      startTime: new Date(t * 1000).toISOString(),
+      temperature: hi.temperature_2m?.[i] != null ? Math.round(hi.temperature_2m[i]) : null,
+      shortForecast: wmoDescription(hi.weather_code?.[i]),
+      windSpeed: hi.wind_speed_10m?.[i] != null ? `${Math.round(hi.wind_speed_10m[i])} mph` : null,
+      windGust: hi.wind_gusts_10m?.[i] != null ? `${Math.round(hi.wind_gusts_10m[i])} mph` : null,
+      windDirection: windDirLabel(hi.wind_direction_10m?.[i]),
+      probabilityOfPrecipitation: { value: hi.precipitation_probability?.[i] ?? null },
+      relativeHumidity: { value: hi.relative_humidity_2m?.[i] ?? null },
+      // Renderers expect NWS-style dewpoint in Celsius
+      dewpoint: { value: hi.dew_point_2m?.[i] != null ? (hi.dew_point_2m[i] - 32) * 5 / 9 : null },
+      isDaytime: true,
+    };
+  });
+
+  const di = data.daily || {};
+  const daily = [];
+  (di.time || []).slice(0, 7).forEach((t, i) => {
+    const startTime = new Date(t * 1000).toISOString();
+    const weekday = new Date(t * 1000).toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
+    const base = {
+      startTime,
+      windSpeed: di.wind_speed_10m_max?.[i] != null ? `${Math.round(di.wind_speed_10m_max[i])} mph` : null,
+      windDirection: windDirLabel(di.wind_direction_10m_dominant?.[i]),
+      shortForecast: wmoDescription(di.weather_code?.[i]),
+      detailedForecast: "",
+      probabilityOfPrecipitation: { value: di.precipitation_probability_max?.[i] ?? null },
+    };
+    daily.push({ ...base, name: i === 0 ? "Today" : weekday, isDaytime: true,
+      temperature: di.temperature_2m_max?.[i] != null ? Math.round(di.temperature_2m_max[i]) : null });
+    daily.push({ ...base, name: i === 0 ? "Tonight" : `${weekday} Night`, isDaytime: false,
+      temperature: di.temperature_2m_min?.[i] != null ? Math.round(di.temperature_2m_min[i]) : null });
+  });
+
+  const cur = data.current || {};
+  const condition = wmoDescription(cur.weather_code);
+  const firstDay = daily[0] || {};
+  const visibilityMeters = hi.visibility?.[startIdx];
+  const visibility = metersToMiles(visibilityMeters);
+
+  return {
+    current: {
+      temp: cur.temperature_2m != null ? Math.round(cur.temperature_2m) : null,
+      condition,
+      headline: headlineFor(condition, firstDay),
+      summary: firstDay.shortForecast || condition,
+      humidity: cur.relative_humidity_2m == null ? null : Math.round(cur.relative_humidity_2m),
+      dewPoint: cur.dew_point_2m != null ? Math.round(cur.dew_point_2m) : null,
+      wind: cur.wind_speed_10m != null ? Math.round(cur.wind_speed_10m) : null,
+      gust: cur.wind_gusts_10m != null ? Math.round(cur.wind_gusts_10m) : null,
+      uv: cur.uv_index ?? null,
+      pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
+      pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
+      airQuality: airQuality?.label || "Unavailable",
+      airQualityDetail: airQuality?.detail || "Open-Meteo air quality unavailable",
+      visibility: visibility == null ? null : Number(visibility.toFixed(1)),
+      pressure: cur.pressure_msl != null ? cur.pressure_msl * 0.02953 : null,
+      updated: cur.time != null ? new Date(cur.time * 1000).toISOString() : new Date().toISOString(),
+      source: "Open-Meteo",
+    },
+    hourly,
+    daily,
+    dailyExtras: {
+      apparent_temperature_max: di.apparent_temperature_max || [],
+      apparent_temperature_min: di.apparent_temperature_min || [],
+      uv_index_max: di.uv_index_max || [],
+    },
+    alerts: alertsData.alerts || [],
+    alertSource: alertsData.source || "Unavailable",
+    pollenForecast: Array.isArray(pollen) ? pollen : [],
+    astronomy,
+    sources: ["api.open-meteo.com", "pollen.googleapis.com"],
   };
 }
 
@@ -1890,7 +2062,7 @@ function renderCurrent() {
   document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight");
   document.querySelector("#currentTemp").textContent = f(current.temp);
   document.querySelector("#currentCondition").textContent = current.condition || "Observed conditions";
-  document.querySelector("#statusBadge").textContent = alertCount ? `${alertCount} active NWS alert${alertCount > 1 ? "s" : ""}` : themePalettes[activeTheme].status;
+  document.querySelector("#statusBadge").textContent = alertCount ? `${alertCount} active ${alertAgencyLabel()} alert${alertCount > 1 ? "s" : ""}` : themePalettes[activeTheme].status;
   document.querySelector("#comfortScore").textContent = fwi.score100;
   document.querySelector(".comfort-ring").style.setProperty("--score", fwi.score100);
   document.querySelector(".comfort-ring").style.setProperty("--ring-color", fwi.color);
@@ -1906,7 +2078,7 @@ function renderCurrent() {
     ["air", "Air Quality", current.airQuality || "Not reported", current.airQualityDetail || "Open-Meteo air quality"],
     current.pollen ? ["pollen", "Pollen", current.pollen, current.pollenDetail || "Google Pollen API"] : null,
     ["uv", "UV Index", f(current.uv), current.uv >= 6 ? "High exposure" : "Estimated daylight exposure"],
-    ["dew", "Dew Point", `${f(current.dewPoint)}°`, "NWS observation"],
+    ["dew", "Dew Point", `${f(current.dewPoint)}°`, `${current.source || "NWS"} observation`],
     ["humidity", "Relative Humidity", `${f(current.humidity)}%`, "Relative humidity"],
     ["wind", "Wind", `${f(current.wind)} mph`, `Gusts ${f(current.gust)} mph`],
   ].filter(Boolean);
@@ -2878,7 +3050,9 @@ function showAlertDetails(indexOrAlert) {
     </div>`;
   }
 
-  const srcLabel = alert.source === "IEM" ? "IEM storm-based warning" : `NWS API (${alert.source || "NWS"})`;
+  const srcLabel = alert.source === "IEM" ? "IEM storm-based warning"
+    : alert.source === "ECCC" ? "ECCC weather.gc.ca"
+    : `NWS API (${alert.source || "NWS"})`;
   const srcHtml = `<p class="alert-modal-source">Source: ${safeText(srcLabel)}</p>`;
 
   modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + rawDescHtml + categoriesHtml + tipsHtml + srcHtml;
@@ -4257,10 +4431,51 @@ async function addLsrLayer() {
   });
 }
 
+const ECCC_RISK_COLORS = {
+  red:    { fill: "#dc2626", line: "#ef4444" },
+  orange: { fill: "#f97316", line: "#fb923c" },
+  yellow: { fill: "#f59e0b", line: "#fbbf24" },
+};
+
+// ECCC alert polygons around the selected location, shaped like the NWS zone
+// alert features so the shared map layer and popups can render them.
+async function ecccAlertMapFeatures(lat, lon) {
+  if (!isInCanada(lat, lon)) return [];
+  const d = 3;
+  const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
+  const data = await getJson(`${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=200`, { cache: "no-store" });
+  return (data.features || []).map(feature => {
+    if (!feature.geometry) return null;
+    const alert = normalizeEcccAlert(feature);
+    const colour = String(feature.properties?.risk_colour_en || "").toLowerCase();
+    const color = ECCC_RISK_COLORS[colour] || { fill: "#38bdf8", line: "#7dd3fc" };
+    return {
+      type: "Feature",
+      geometry: feature.geometry,
+      properties: {
+        event: alert.event,
+        headline: alert.headline,
+        severity: alert.severity,
+        expires: alert.expires,
+        description: alert.description,
+        areaDesc: alert.areaDesc,
+        zoneName: feature.properties?.feature_name_en || "",
+        fillColor: color.fill,
+        lineColor: color.line,
+        ecccAlert: true,
+      },
+    };
+  }).filter(Boolean);
+}
+
 async function nwsAlertFeatureCollection() {
   const loc = selectedLocation;
-  const data = await getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" });
-  const features = [];
+  const [nwsResult, ecccResult] = await Promise.allSettled([
+    getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" }),
+    ecccAlertMapFeatures(loc.lat, loc.lon),
+  ]);
+  const data = nwsResult.status === "fulfilled" ? nwsResult.value : { features: [] };
+  const features = ecccResult.status === "fulfilled" ? [...ecccResult.value] : [];
   for (const feature of data.features || []) {
     const p = feature.properties || {};
     if (isWarningEvent(p.event || "")) continue;
@@ -4331,7 +4546,7 @@ function buildAlertBodyHtml(feature, alertIdx, popupId) {
     const evtLower = (p.event || "").toLowerCase();
     const matchedAlert = (weatherState.alerts || []).find(a => a.event?.toLowerCase() === evtLower);
     title = safeText(matchedAlert ? alertDisplayEvent(matchedAlert) : (p.event || "Weather Alert"));
-    subtitle = "NWS County/Zone Alert";
+    subtitle = p.ecccAlert ? "ECCC Alert" : "NWS County/Zone Alert";
     iconStyle = `background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;`;
     detailHtml = `
       <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
@@ -5099,7 +5314,12 @@ async function refreshLiveData() {
   nwsAlertPolygonData = null;
 
   const [weather, aviation, space, maps, spcForecast, wpcForecast] = await Promise.allSettled([
-    weatherPayload(),
+    // NWS only covers the US — fall back to Open-Meteo for international
+    // locations or whenever the NWS pipeline fails.
+    weatherPayload().catch(error => {
+      console.warn("NWS forecast unavailable, falling back to Open-Meteo", error);
+      return openMeteoWeatherPayload();
+    }),
     aviationPayload(),
     spacePayload(),
     mapsPayload(),
@@ -5111,7 +5331,7 @@ async function refreshLiveData() {
     weatherState = weather.value;
   } else {
     weatherState = fallbackWeather;
-    document.querySelector("#statusBadge").textContent = "NWS unavailable";
+    document.querySelector("#statusBadge").textContent = "Weather sources unavailable";
   }
   mapState = maps.status === "fulfilled" ? maps.value : {};
   if (spcForecast.status === "fulfilled") {
@@ -5155,7 +5375,7 @@ locationForm.addEventListener("submit", async event => {
   try {
     const exactSuggestion = locationSuggestionResults.find(item => item.name.toLowerCase() === query.toLowerCase());
     const results = exactSuggestion ? [exactSuggestion] : await searchLocations(query);
-    if (!results.length) throw new Error("No US town found");
+    if (!results.length) throw new Error("No matching town found");
     await chooseLocation(results[0]);
   } catch (error) {
     document.querySelector("#statusBadge").textContent = error.message;
@@ -5354,7 +5574,7 @@ window._viewAlertFromMapFeature = function(popupId, featureIdx) {
       showAlertDetails({ ...normalizedFeature, tags: tagsForAlert(normalizedFeature) });
     }
   } else {
-    // NWS zone/county alert — try matching by event type first
+    // NWS zone/county or ECCC alert — try matching by event type first
     const evtLower = (p.event || "").toLowerCase();
     const alertIdx = alerts.findIndex(a => a.event?.toLowerCase() === evtLower);
     if (alertIdx !== -1) {
@@ -5369,7 +5589,7 @@ window._viewAlertFromMapFeature = function(popupId, featureIdx) {
         instruction: p.instruction || "",
         expires: p.expires,
         areaDesc: p.zoneName || p.areaDesc || "",
-        source: "NWS",
+        source: p.ecccAlert ? "ECCC" : "NWS",
         headline: p.headline || p.event || "Weather Alert",
       });
     }
