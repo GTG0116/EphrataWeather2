@@ -423,7 +423,7 @@ function syncThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   if (meta && palette.gradient?.length) meta.setAttribute("content", palette.gradient[0]);
-  palette.gradient?.forEach((color, i) =>
+  palette.gradient.forEach((color, i) =>
     document.documentElement.style.setProperty(`--sky-${i}`, color));
 }
 syncThemeColor();
@@ -3319,11 +3319,9 @@ function initHistoricalCalendar() {
 function drawAtmosphere() {
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   const dpr = window.devicePixelRatio || 1;
-  // Measure the canvas's actual rendered size (driven by its fixed-position CSS,
-  // which overshoots the viewport) rather than window.innerHeight. On iOS
-  // standalone/Safari, innerHeight excludes the safe-area regions, which left the
-  // animated gradient short and exposed the root background as a band at the top
-  // and bottom of the screen.
+  // Measure the canvas's actual rendered size so its buffer matches the CSS
+  // overshoot. iOS standalone can still clip fixed elements out of safe-area
+  // bands, so the root html gradient mirrors this palette as the reliable fallback.
   const width = canvas.clientWidth || window.innerWidth;
   const height = canvas.clientHeight || window.innerHeight;
   const bufferW = Math.round(width * dpr);
