@@ -498,6 +498,38 @@ dd {
   font-weight: 800;
 }
 
+/* Inline °F / °C switch sitting beside the big temperature */
+.unit-switch {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: top;
+  margin: 6px 0 0 6px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 42%, transparent);
+  background: color-mix(in srgb, var(--accent-2) 12%, rgba(15, 23, 42, 0.42));
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.unit-switch:hover {
+  border-color: color-mix(in srgb, var(--accent-2) 72%, transparent);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--accent-2) 16%, transparent);
+}
+.unit-switch .unit-opt {
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1;
+  padding: 5px 11px;
+  border-radius: 999px;
+  color: var(--muted);
+  transition: background 160ms ease, color 160ms ease;
+}
+.unit-switch .unit-opt.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 30%, rgba(15, 23, 42, 0.55));
+}
+
 .temp-lockup small {
   display: block;
   margin-top: 10px;
@@ -1592,8 +1624,7 @@ dd {
 
   /* Icon buttons and refresh stay compact in a row */
   .locate-me-btn,
-  .notify-btn,
-  .unit-toggle {
+  .notify-btn {
     min-height: 38px;
     padding: 0 10px;
   }
@@ -1653,8 +1684,7 @@ dd {
 
 /* ── Locate Me button ─────────────────────────────── */
 .locate-me-btn,
-.notify-btn,
-.unit-toggle {
+.notify-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1671,14 +1701,9 @@ dd {
   transition: transform 160ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
 }
 .locate-me-btn:hover,
-.notify-btn:hover,
-.unit-toggle:hover {
+.notify-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px color-mix(in srgb, var(--accent-2) 18%, transparent);
-}
-.unit-toggle[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  background: color-mix(in srgb, var(--accent) 20%, rgba(15, 23, 42, 0.4));
 }
 .locate-me-btn:disabled,
 .notify-btn:disabled {

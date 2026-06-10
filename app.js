@@ -552,13 +552,27 @@ let unitSystem = (() => {
   return saved === "metric" || saved === "imperial" ? saved : null;
 })();
 
+// Canadian IANA timezones — a reliable signal when a saved location predates
+// country-code capture.
+const CANADIAN_TIMEZONES = new Set([
+  "America/Toronto", "America/Montreal", "America/Vancouver", "America/Edmonton",
+  "America/Winnipeg", "America/Halifax", "America/St_Johns", "America/Regina",
+  "America/Whitehorse", "America/Moncton", "America/Glace_Bay", "America/Goose_Bay",
+  "America/Iqaluit", "America/Yellowknife", "America/Dawson", "America/Dawson_Creek",
+  "America/Rankin_Inlet", "America/Resolute", "America/Swift_Current", "America/Inuvik",
+  "America/Cambridge_Bay", "America/Atikokan", "America/Thunder_Bay", "America/Rainy_River",
+  "America/Fort_Nelson", "America/Blanc-Sablon", "America/Pangnirtung", "America/Nipigon",
+]);
+
 function autoMetric() {
   const cc = (selectedLocation?.countryCode || "").toUpperCase();
   if (cc) return cc !== "US";
-  // No stored country code: only Canadian/international results carry a country
-  // suffix; bare US "City, State" stays imperial.
+  // No stored country code: Canadian/international results carry a country
+  // suffix, and Canadian points sit in a Canadian timezone; bare US
+  // "City, State" stays imperial.
   const name = selectedLocation?.name || "";
-  return /\bcanada\b/i.test(name) || /,\s*CA$/i.test(name);
+  if (/\bcanada\b/i.test(name) || /,\s*CA$/i.test(name)) return true;
+  return CANADIAN_TIMEZONES.has(selectedLocation?.timezone || "");
 }
 
 function isMetric() {
@@ -600,17 +614,17 @@ function fmtSnow(valueIn, digits = 1) {
 }
 
 function updateUnitToggleLabel() {
-  const el = document.querySelector("#unitToggleText");
-  if (el) el.textContent = isMetric() ? "Metric" : "Imperial";
+  const metric = isMetric();
+  document.querySelectorAll("#unitToggle .unit-opt").forEach(el => {
+    el.classList.toggle("active", (el.dataset.system === "metric") === metric);
+  });
   const btn = document.querySelector("#unitToggle");
-  if (btn) btn.setAttribute("aria-pressed", String(isMetric()));
+  if (btn) btn.setAttribute("aria-label", `Units: ${metric ? "metric (°C)" : "imperial (°F)"}. Tap to switch.`);
 }
 
 // Re-skin every units-bearing view in place (no network refetch).
 function rerenderUnits() {
   updateUnitToggleLabel();
-  const unitEl = document.querySelector("#currentTempUnit");
-  if (unitEl) unitEl.textContent = tempUnit();
   if (weatherState) {
     renderCurrent();
     renderDaily();
@@ -2314,8 +2328,6 @@ function renderCurrent() {
   document.querySelector("#weatherSummary").textContent = current.summary;
   document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight");
   document.querySelector("#currentTemp").textContent = uTempNum(current.temp);
-  const currentTempUnit = document.querySelector("#currentTempUnit");
-  if (currentTempUnit) currentTempUnit.textContent = tempUnit();
   updateUnitToggleLabel();
   document.querySelector("#currentCondition").textContent = current.condition || "Observed conditions";
   document.querySelector("#statusBadge").textContent = alertCount ? `${alertCount} active ${alertAgencyLabel()} alert${alertCount > 1 ? "s" : ""}` : themePalettes[activeTheme].status;
@@ -5633,9 +5645,10 @@ tabs.forEach(tab => {
 
 refreshButton.addEventListener("click", refreshLiveData);
 notifyButton?.addEventListener("click", enableNotifications);
-document.querySelector("#unitToggle")?.addEventListener("click", () => {
-  // Flip from whatever's currently in effect (auto or explicit) and persist.
-  unitSystem = isMetric() ? "imperial" : "metric";
+document.querySelector("#unitToggle")?.addEventListener("click", event => {
+  // Clicking a specific side picks that system; clicking elsewhere just flips.
+  const opt = event.target.closest(".unit-opt");
+  unitSystem = opt ? opt.dataset.system : (isMetric() ? "imperial" : "metric");
   localStorage.setItem("unitSystem", unitSystem);
   rerenderUnits();
 });
@@ -5802,8 +5815,6 @@ tabs.forEach(tab => {
 });
 // Reflect the saved location's default unit system before data arrives.
 updateUnitToggleLabel();
-const initialTempUnit = document.querySelector("#currentTempUnit");
-if (initialTempUnit) initialTempUnit.textContent = tempUnit();
 refreshLiveData().then(() => {
   if (new URLSearchParams(location.search).get("from") === "notification") {
     history.replaceState(null, "", location.pathname);
