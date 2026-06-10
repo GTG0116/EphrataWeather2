@@ -1592,7 +1592,8 @@ dd {
 
   /* Icon buttons and refresh stay compact in a row */
   .locate-me-btn,
-  .notify-btn {
+  .notify-btn,
+  .unit-toggle {
     min-height: 38px;
     padding: 0 10px;
   }
@@ -1652,7 +1653,8 @@ dd {
 
 /* ── Locate Me button ─────────────────────────────── */
 .locate-me-btn,
-.notify-btn {
+.notify-btn,
+.unit-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1669,9 +1671,14 @@ dd {
   transition: transform 160ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
 }
 .locate-me-btn:hover,
-.notify-btn:hover {
+.notify-btn:hover,
+.unit-toggle:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px color-mix(in srgb, var(--accent-2) 18%, transparent);
+}
+.unit-toggle[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 20%, rgba(15, 23, 42, 0.4));
 }
 .locate-me-btn:disabled,
 .notify-btn:disabled {

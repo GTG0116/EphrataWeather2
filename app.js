@@ -1,4 +1,4 @@
-const EPHRATA = { lat: 40.1798, lon: -76.1788, name: "Ephrata, PA", timezone: "America/New_York" };
+const EPHRATA = { lat: 40.1798, lon: -76.1788, name: "Ephrata, PA", timezone: "America/New_York", countryCode: "US" };
 const GOOGLE_POLLEN_KEY = "AIzaSyBAjoVkrRrLPzv9MSrlWaWTFELT8KpJ41E";
 const MAPBOX_TOKEN = "pk.eyJ1IjoiZ3RnMDExNiIsImEiOiJjbWxsODV6NXAwNThmM2ZwdWlkYm0xNjFlIn0.vI186twXYzY45nnuV5FucQ";
 const NOAA_RADAR_WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows";
@@ -542,6 +542,84 @@ function metersToMiles(value) {
   return value == null ? null : value / 1609.344;
 }
 
+// ─── Unit system (imperial / metric) ─────────────────────────────────────────
+// Payloads normalise everything to imperial; these helpers convert at display
+// time so a single toggle re-skins the whole UI without refetching. unitSystem
+// is null until the user picks one — then units follow the location's country
+// (imperial for the US, metric for Canada and everywhere else).
+let unitSystem = (() => {
+  const saved = localStorage.getItem("unitSystem");
+  return saved === "metric" || saved === "imperial" ? saved : null;
+})();
+
+function autoMetric() {
+  const cc = (selectedLocation?.countryCode || "").toUpperCase();
+  if (cc) return cc !== "US";
+  // No stored country code: only Canadian/international results carry a country
+  // suffix; bare US "City, State" stays imperial.
+  const name = selectedLocation?.name || "";
+  return /\bcanada\b/i.test(name) || /,\s*CA$/i.test(name);
+}
+
+function isMetric() {
+  return unitSystem ? unitSystem === "metric" : autoMetric();
+}
+
+// Convert a stored imperial value into the active display system.
+function uTemp(valueF)      { return valueF == null ? null : (isMetric() ? (valueF - 32) * 5 / 9 : valueF); }
+function uWind(valueMph)    { return valueMph == null ? null : (isMetric() ? valueMph * 1.609344 : valueMph); }
+function uVis(valueMi)      { return valueMi == null ? null : (isMetric() ? valueMi * 1.609344 : valueMi); }
+function uPrecip(valueIn)   { return valueIn == null ? null : (isMetric() ? valueIn * 25.4 : valueIn); }
+function uPressure(valInHg) { return valInHg == null ? null : (isMetric() ? valInHg * 33.8639 : valInHg); }
+
+function tempUnit()   { return isMetric() ? "°C" : "°F"; }
+function windUnit()   { return isMetric() ? "km/h" : "mph"; }
+function visUnit()    { return isMetric() ? "km" : "mi"; }
+function precipUnit() { return isMetric() ? "mm" : "in"; }
+function pressUnit()  { return isMetric() ? "hPa" : "inHg"; }
+
+// Display formatters: converted, rounded, with optional unit suffix.
+function uTempNum(valueF) { const v = uTemp(valueF); return v == null ? "--" : String(Math.round(v)); }
+function fmtTemp(valueF)  { const v = uTemp(valueF); return v == null ? `--${tempUnit()}` : `${Math.round(v)}${tempUnit()}`; }
+function fmtWind(valueMph){ const v = uWind(valueMph); return v == null ? "--" : `${Math.round(v)} ${windUnit()}`; }
+function fmtVis(valueMi)  { const v = uVis(valueMi); return v == null ? "--" : `${v.toFixed(1)} ${visUnit()}`; }
+function fmtPressure(valInHg) {
+  const v = uPressure(valInHg);
+  if (v == null) return "--";
+  return isMetric() ? `${Math.round(v)} ${pressUnit()}` : `${v.toFixed(2)} ${pressUnit()}`;
+}
+function fmtPrecip(valueIn, digits) {
+  const v = uPrecip(valueIn);
+  if (v == null) return "--";
+  const d = digits != null ? digits : (isMetric() ? 1 : 2);
+  return `${v.toFixed(d)} ${precipUnit()}`;
+}
+function fmtSnow(valueIn, digits = 1) {
+  if (valueIn == null) return "--";
+  return isMetric() ? `${(valueIn * 2.54).toFixed(digits)} cm` : `${valueIn.toFixed(digits)} in`;
+}
+
+function updateUnitToggleLabel() {
+  const el = document.querySelector("#unitToggleText");
+  if (el) el.textContent = isMetric() ? "Metric" : "Imperial";
+  const btn = document.querySelector("#unitToggle");
+  if (btn) btn.setAttribute("aria-pressed", String(isMetric()));
+}
+
+// Re-skin every units-bearing view in place (no network refetch).
+function rerenderUnits() {
+  updateUnitToggleLabel();
+  const unitEl = document.querySelector("#currentTempUnit");
+  if (unitEl) unitEl.textContent = tempUnit();
+  if (weatherState) {
+    renderCurrent();
+    renderDaily();
+    renderMapSidebar();
+    renderMetar(weatherState.aviation || null);
+  }
+  if (histSelectedDate) renderClimate(histSelectedDate);
+}
+
 function propertyValue(feature, key) {
   return feature?.properties?.[key]?.value ?? null;
 }
@@ -752,7 +830,7 @@ async function locateMe() {
 
 function buildLocationPopup(name, extra = "") {
   const cur = weatherState.current || fallbackWeather.current;
-  const temp = cur.temp != null ? `${f(cur.temp)}°F` : "--";
+  const temp = cur.temp != null ? fmtTemp(cur.temp) : "--";
   const cond = cur.condition || "Weather conditions";
   return `
     <div class="popup-header">
@@ -2235,7 +2313,10 @@ function renderCurrent() {
   document.querySelector("#current-title").textContent = current.headline;
   document.querySelector("#weatherSummary").textContent = current.summary;
   document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight");
-  document.querySelector("#currentTemp").textContent = f(current.temp);
+  document.querySelector("#currentTemp").textContent = uTempNum(current.temp);
+  const currentTempUnit = document.querySelector("#currentTempUnit");
+  if (currentTempUnit) currentTempUnit.textContent = tempUnit();
+  updateUnitToggleLabel();
   document.querySelector("#currentCondition").textContent = current.condition || "Observed conditions";
   document.querySelector("#statusBadge").textContent = alertCount ? `${alertCount} active ${alertAgencyLabel()} alert${alertCount > 1 ? "s" : ""}` : themePalettes[activeTheme].status;
   document.querySelector("#comfortScore").textContent = fwi.score100;
@@ -2253,9 +2334,9 @@ function renderCurrent() {
     ["air", "Air Quality", current.airQuality || "Not reported", current.airQualityDetail || "Open-Meteo air quality"],
     current.pollen ? ["pollen", "Pollen", current.pollen, current.pollenDetail || "Google Pollen API"] : null,
     ["uv", "UV Index", f(current.uv), current.uv >= 6 ? "High exposure" : "Estimated daylight exposure"],
-    ["dew", "Dew Point", `${f(current.dewPoint)}°`, `${current.source || "NWS"} observation`],
+    ["dew", "Dew Point", `${uTempNum(current.dewPoint)}°`, `${current.source || "NWS"} observation`],
     ["humidity", "Relative Humidity", `${f(current.humidity)}%`, "Relative humidity"],
-    ["wind", "Wind", `${f(current.wind)} mph`, `Gusts ${f(current.gust)} mph`],
+    ["wind", "Wind", fmtWind(current.wind), `Gusts ${fmtWind(current.gust)}`],
   ].filter(Boolean);
 
   metricGrid.innerHTML = metrics.map(([icon, name, value, detail]) => `
@@ -2283,7 +2364,7 @@ function renderCurrent() {
       <button class="hour-card compact" type="button" data-hour-index="${index}">
         <strong>${index === 0 ? "Now" : time.toLocaleTimeString([], { hour: "numeric" })}</strong>
         ${iconHtml}
-        <div class="hour-temp">${f(hour.temperature)}°</div>
+        <div class="hour-temp">${uTempNum(hour.temperature)}°</div>
         <small>${f(precip)}%</small>
       </button>
     `;
@@ -2309,8 +2390,8 @@ function renderHourlyChart() {
   }
 
   const METRICS = {
-    temperature: { unit: "°",   color: "#f97316", getValue: h => h.temperature ?? null,                      label: "°F" },
-    wind:        { unit: " mph",color: "#38bdf8", getValue: h => parseInt(h.windSpeed, 10) || 0,              label: "mph" },
+    temperature: { unit: "°",          color: "#f97316", getValue: h => h.temperature == null ? null : Math.round(uTemp(h.temperature)), label: tempUnit() },
+    wind:        { unit: ` ${windUnit()}`, color: "#38bdf8", getValue: h => { const n = numericWind(h.windSpeed); return n == null ? 0 : Math.round(uWind(n)); }, label: windUnit() },
     humidity:    { unit: "%",   color: "#a78bfa", getValue: h => h.relativeHumidity?.value ?? null,           label: "%" },
     precip:      { unit: "%",   color: "#60a5fa", getValue: h => h.probabilityOfPrecipitation?.value ?? null, label: "%" },
     fwi:         { unit: "",    color: "#facc15", getValue: h => hourFwi(h).score100, label: "score",
@@ -2883,11 +2964,11 @@ function renderDaily() {
       <div class="daily-badge-row">
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
-      <div class="daily-range">${f(day.temperature)}° / ${night ? f(night.temperature) : "--"}°</div>
+      <div class="daily-range">${uTempNum(day.temperature)}° / ${night ? uTempNum(night.temperature) : "--"}°</div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
       <div class="daily-chip-row">
         <span>${f(precip)}% precip</span>
-        <span>Feels ${f(feelsHigh)}° / ${f(feelsLow)}°</span>
+        <span>Feels ${uTempNum(feelsHigh)}° / ${uTempNum(feelsLow)}°</span>
         <span>UV ${f(uv, 1)}</span>
         ${pollenForecast[index] ? `<span class="pollen-chip" title="${safeText(pollenForecast[index].detail || '')}"><svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3m-2.6-7.4-2.1 2.1M9.7 14.3l-2.1 2.1m9.8 0-2.1-2.1M9.7 9.7 7.6 7.6"/></svg> ${safeText(pollenForecast[index].label)}</span>` : ""}
       </div>
@@ -2902,15 +2983,17 @@ function showHourDetails(index) {
   const time = new Date(hour.startTime);
   const dewPoint = fahrenheit(nwsValue(hour, "dewpoint"));
   const humidity = nwsValue(hour, "relativeHumidity");
-  const wind = hour.windSpeed || "Not reported";
-  const gust = hour.windGust || "Not reported";
+  const windNum = numericWind(hour.windSpeed);
+  const wind = windNum != null ? fmtWind(windNum) : "Not reported";
+  const gustNum = numericWind(hour.windGust);
+  const gust = gustNum != null ? fmtWind(gustNum) : "Not reported";
   const feels = apparentTemperature(hour.temperature, humidity, numericWind(hour.windSpeed));
   const fwi = hourFwi(hour);
   openDetails("Hourly Forecast", time.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }), [
     ["Condition", hour.shortForecast || "Not reported", "cloud"],
     ["Fair Weather Index", `${fwi.score100} (${fwi.label})`, "fwi"],
-    ["Temperature", `${f(hour.temperature)}°F, feels like ${f(feels)}°F`, "temp"],
-    ["Dew Point", `${f(dewPoint)}°F`, "dew"],
+    ["Temperature", `${fmtTemp(hour.temperature)}, feels like ${fmtTemp(feels)}`, "temp"],
+    ["Dew Point", fmtTemp(dewPoint), "dew"],
     ["Humidity", `${f(humidity)}%`, "humidity"],
     ["Wind", `${hour.windDirection || ""} ${wind}`.trim(), "wind"],
     ["Gusts", gust, "wind"],
@@ -2929,12 +3012,12 @@ function showDailyDetails(index) {
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
   const rows = [
-    ["High / Low", `${f(day.temperature)}°F / ${night ? f(night.temperature) : "--"}°F`, "temp"],
-    ["Feels Like", `${f(feelsHigh)}°F / ${f(feelsLow)}°F`, "temp"],
+    ["High / Low", `${fmtTemp(day.temperature)} / ${night ? fmtTemp(night.temperature) : "--"}`, "temp"],
+    ["Feels Like", `${fmtTemp(feelsHigh)} / ${fmtTemp(feelsLow)}`, "temp"],
     ["Precipitation Chance", `${f(precip)}%`, "precip"],
     ["UV Index", f(uv, 1), "uv"],
-    ["Day Wind", `${day.windDirection || ""} ${day.windSpeed || "not reported"}`.trim(), "wind"],
-    ["Night Wind", night ? `${night.windDirection || ""} ${night.windSpeed || "not reported"}`.trim() : "Not reported", "wind"],
+    ["Day Wind", `${day.windDirection || ""} ${numericWind(day.windSpeed) != null ? fmtWind(numericWind(day.windSpeed)) : "not reported"}`.trim(), "wind"],
+    ["Night Wind", night && numericWind(night.windSpeed) != null ? `${night.windDirection || ""} ${fmtWind(numericWind(night.windSpeed))}`.trim() : "Not reported", "wind"],
     ["Night", night?.shortForecast || "Not reported", "cloud"],
     ["Sunrise", weatherState.astronomy?.sunrise || "--", "sunrise"],
     ["Sunset", weatherState.astronomy?.sunset || "--", "sunset"],
@@ -3246,12 +3329,12 @@ function renderMetar(aviation) {
   const decoded = [
     ["Station", aviation?.station || "Nearest NWS aviation station"],
     ["Observation", aviation?.reportTime || current.updated || "--"],
-    ["Wind", `${f(aviation?.windDirection)}° at ${f(aviation?.windKt)} kt / ${f(aviation?.windMph)} mph${aviation?.gustKt ? `, gusting ${aviation.gustKt} kt` : ""}`],
-    ["Visibility", aviation?.visibility == null ? "--" : `${f(aviation.visibility, 1)} statute miles`],
+    ["Wind", `${f(aviation?.windDirection)}° at ${f(aviation?.windKt)} kt / ${fmtWind(aviation?.windMph)}${aviation?.gustKt ? `, gusting ${aviation.gustKt} kt` : ""}`],
+    ["Visibility", aviation?.visibility == null ? "--" : fmtVis(aviation.visibility)],
     ["Ceiling", aviation?.ceiling == null ? "No ceiling reported" : `${f(aviation.ceiling)} ft`],
-    ["Temperature", `${f(aviation?.temp)}° / dew point ${f(aviation?.dewPoint)}°`],
+    ["Temperature", `${fmtTemp(aviation?.temp)} / dew point ${fmtTemp(aviation?.dewPoint)}`],
     ["Sky", aviation?.sky?.join(", ") || "Not reported"],
-    ["Altimeter", `${f(aviation?.pressure ?? current.pressure, 2)} inHg`],
+    ["Altimeter", fmtPressure(aviation?.pressure ?? current.pressure)],
     ["Source", "NWS api.weather.gov station observation"],
   ];
   document.querySelector("#metarDecoded").innerHTML = decoded.map(([term, desc]) => `<div><dt>${term}</dt><dd>${desc}</dd></div>`).join("");
@@ -3312,8 +3395,8 @@ async function renderClimate(date) {
     };
     const precipDetail = (() => {
       const parts = [];
-      if (rain != null && rain > 0) parts.push(`Rain: ${rain.toFixed(2)}"`);
-      if (snow != null && snow > 0) parts.push(`Snow: ${snow.toFixed(1)}"`);
+      if (rain != null && rain > 0) parts.push(`Rain: ${fmtPrecip(rain)}`);
+      if (snow != null && snow > 0) parts.push(`Snow: ${fmtSnow(snow)}`);
       return parts.length ? parts.join(" · ") : "No precipitation";
     })();
     // Compute mean humidity and dew point from hourly data (not available as daily archive fields)
@@ -3339,9 +3422,9 @@ async function renderClimate(date) {
           <div class="hist-hourly-item">
             <div class="hist-hourly-time">${label}</div>
             <div class="hist-hourly-icon"><span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(cond, isNight)}</span></div>
-            <div class="hist-hourly-temp">${temp != null ? Math.round(temp) + "°" : "--"}</div>
-            <div class="hist-hourly-wind">${ws != null ? Math.round(ws) + " mph" : "--"}</div>
-            ${pr != null && pr > 0 ? `<div class="hist-hourly-precip">${pr.toFixed(2)}"</div>` : ""}
+            <div class="hist-hourly-temp">${temp != null ? uTempNum(temp) + "°" : "--"}</div>
+            <div class="hist-hourly-wind">${ws != null ? fmtWind(ws) : "--"}</div>
+            ${pr != null && pr > 0 ? `<div class="hist-hourly-precip">${fmtPrecip(pr)}</div>` : ""}
           </div>`;
       });
     }
@@ -3351,12 +3434,12 @@ async function renderClimate(date) {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     const stats = [
-      ["Peak Wind", windMax != null ? `${Math.round(windMax)} mph` : "--", windGust != null ? `${Math.round(windGust)} mph gusts · ${windDirLabel(windDir)}` : "--", "wind"],
-      ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? Math.round(dew) + "°F" : "--"}`, "humidity"],
-      ["Avg Pressure", pressure != null ? (pressure * 0.02953).toFixed(2) + " inHg" : "--", pressure != null ? Math.round(pressure) + " hPa" : "--", "pressure"],
+      ["Peak Wind", windMax != null ? fmtWind(windMax) : "--", windGust != null ? `${fmtWind(windGust)} gusts · ${windDirLabel(windDir)}` : "--", "wind"],
+      ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? fmtTemp(dew) : "--"}`, "humidity"],
+      ["Avg Pressure", pressure == null ? "--" : (isMetric() ? `${Math.round(pressure)} hPa` : (pressure * 0.02953).toFixed(2) + " inHg"), pressure == null ? "--" : (isMetric() ? (pressure * 0.02953).toFixed(2) + " inHg" : Math.round(pressure) + " hPa"), "pressure"],
       ["Cloud Cover", cloud != null ? `${Math.round(cloud)}%` : "--", cloudCoverLabel(cloud), "cloud"],
-      ["Precipitation", precip != null ? precip.toFixed(2) + '"' : '0.00"', precipDetail, "precip"],
-      ...(snow != null && snow > 0 ? [["Snowfall", snow.toFixed(1) + '"', "Snow total", "snow"]] : []),
+      ["Precipitation", precip != null ? fmtPrecip(precip) : fmtPrecip(0), precipDetail, "precip"],
+      ...(snow != null && snow > 0 ? [["Snowfall", fmtSnow(snow), "Snow total", "snow"]] : []),
       ["Sunshine", sunshineHours(sunshine), "Duration of sunshine", "sunshine"],
       ["Sun Times", fmtTime(sunriseStr), `Sunrise · Sunset ${fmtTime(sunsetStr)}`, "sunrise"],
     ];
@@ -3365,13 +3448,13 @@ async function renderClimate(date) {
         <div class="hist-hero-left">
           <p class="eyebrow">${safeText(dateLabel)}</p>
           <div class="hist-temp-range">
-            <span class="hist-temp-hi">${highTemp != null ? Math.round(highTemp) + "°" : "--"}</span>
+            <span class="hist-temp-hi">${highTemp != null ? uTempNum(highTemp) + "°" : "--"}</span>
             <span class="hist-temp-sep"> / </span>
-            <span class="hist-temp-lo">${lowTemp != null ? Math.round(lowTemp) + "°" : "--"}</span>
-            <sup>°F</sup>
+            <span class="hist-temp-lo">${lowTemp != null ? uTempNum(lowTemp) + "°" : "--"}</span>
+            <sup>${tempUnit()}</sup>
           </div>
           <p>${safeText(condition)}</p>
-          <p class="hist-feels">Feels like ${feelsHigh != null ? Math.round(feelsHigh) + "°" : "--"} high / ${feelsLow != null ? Math.round(feelsLow) + "°" : "--"} low</p>
+          <p class="hist-feels">Feels like ${feelsHigh != null ? uTempNum(feelsHigh) + "°" : "--"} high / ${feelsLow != null ? uTempNum(feelsLow) + "°" : "--"} low</p>
         </div>
         <div class="hist-hero-icon"><span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(condition, false)}</span></div>
       </div>
@@ -3597,15 +3680,15 @@ function renderMapSidebar() {
   sidebar.innerHTML = `
     <div class="sidebar-tile">
       <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg></span> ${safeText(selectedLocation.name)}</p>
-      <h3>${f(current.temp)}°F — ${safeText(current.condition || "Conditions")}</h3>
+      <h3>${fmtTemp(current.temp)} — ${safeText(current.condition || "Conditions")}</h3>
       <div class="sidebar-chip-row">
         <div class="sidebar-chip">
           <span class="sidebar-chip-label">Feels</span>
-          <span class="sidebar-chip-val">${f(current.temp)}°</span>
+          <span class="sidebar-chip-val">${uTempNum(current.temp)}°</span>
         </div>
         <div class="sidebar-chip">
           <span class="sidebar-chip-label">Wind</span>
-          <span class="sidebar-chip-val">${f(current.wind)} mph</span>
+          <span class="sidebar-chip-val">${fmtWind(current.wind)}</span>
         </div>
         <div class="sidebar-chip">
           <span class="sidebar-chip-label">Humidity</span>
@@ -3648,7 +3731,7 @@ function renderMapSidebar() {
 
     <div class="sidebar-tile">
       <p class="eyebrow"><span class="sidebar-icon"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg></span> Observation</p>
-      <h3>${f(current.temp)}° / Dew ${f(current.dewPoint)}°</h3>
+      <h3>${uTempNum(current.temp)}° / Dew ${uTempNum(current.dewPoint)}°</h3>
       <p style="font-size:0.8rem;color:var(--muted)">
         ${astronomy ? `<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="display:inline;vertical-align:middle;margin-right:2px"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2"/></svg>${astronomy.sunrise} — <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="display:inline;vertical-align:middle;margin-right:2px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>${astronomy.sunset}` : "Sun times loading…"}
       </p>
@@ -4505,7 +4588,7 @@ function buildCyclonePopup(p) {
       <table style="font-size:0.78rem;width:100%;border-collapse:collapse">
         <tr><td style="color:var(--muted);padding:1px 0">Time</td><td style="text-align:right">${safeText(when)}</td></tr>
         <tr><td style="color:var(--muted);padding:1px 0">Position</td><td style="text-align:right">${pos}</td></tr>
-        <tr><td style="color:var(--muted);padding:1px 0">Max Wind</td><td style="text-align:right"><strong style="color:${color}">${safeText(p.wind_kt)} kt</strong> <span style="color:var(--muted)">${safeText(p.wind_mph)} mph</span></td></tr>
+        <tr><td style="color:var(--muted);padding:1px 0">Max Wind</td><td style="text-align:right"><strong style="color:${color}">${safeText(p.wind_kt)} kt</strong> <span style="color:var(--muted)">${numericWind(p.wind_mph) != null ? safeText(fmtWind(numericWind(p.wind_mph))) : safeText(p.wind_mph) + " mph"}</span></td></tr>
         <tr><td style="color:var(--muted);padding:1px 0">Pressure</td><td style="text-align:right">${press}</td></tr>
       </table>
     </div>`;
@@ -4714,8 +4797,8 @@ function buildAlertBodyHtml(feature, alertIdx, popupId) {
     detailHtml = `
       <div class="popup-stat"><span class="popup-key">WFO</span><span class="popup-val">${safeText(p.wfo || "--")}</span></div>
       <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
-      ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${safeText(p.windtag)} mph</span></div>` : ""}
-      ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${safeText(p.hailtag)}"</span></div>` : ""}
+      ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${numericWind(p.windtag) != null ? safeText(fmtWind(numericWind(p.windtag))) : safeText(p.windtag) + " mph"}</span></div>` : ""}
+      ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${isMetric() && Number.isFinite(Number(p.hailtag)) ? (Number(p.hailtag) * 2.54).toFixed(1) + " cm" : safeText(p.hailtag) + "\""}</span></div>` : ""}
       ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}`;
   } else {
     const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
@@ -5530,7 +5613,8 @@ async function refreshLiveData() {
   notifyNewWeatherAlerts();
   checkMorningOutlookNotification();
   renderDaily();
-  renderMetar(aviation.status === "fulfilled" ? aviation.value : null);
+  weatherState.aviation = aviation.status === "fulfilled" ? aviation.value : null;
+  renderMetar(weatherState.aviation);
   renderSpace(space.status === "fulfilled" ? space.value : null);
   renderMapSidebar();
   drawRadar();
@@ -5549,6 +5633,12 @@ tabs.forEach(tab => {
 
 refreshButton.addEventListener("click", refreshLiveData);
 notifyButton?.addEventListener("click", enableNotifications);
+document.querySelector("#unitToggle")?.addEventListener("click", () => {
+  // Flip from whatever's currently in effect (auto or explicit) and persist.
+  unitSystem = isMetric() ? "imperial" : "metric";
+  localStorage.setItem("unitSystem", unitSystem);
+  rerenderUnits();
+});
 locationForm.addEventListener("submit", async event => {
   event.preventDefault();
   const query = locationInput.value.trim();
@@ -5643,6 +5733,7 @@ document.querySelector("#metarSearchForm")?.addEventListener("submit", async eve
   document.querySelector("#metarDecoded").innerHTML = "";
   try {
     const aviation = await aviationPayload();
+    weatherState.aviation = aviation;
     renderMetar(aviation);
   } catch (err) {
     document.querySelector(".metar-card .eyebrow").textContent = val;
@@ -5659,8 +5750,10 @@ document.querySelector("#metarClearBtn")?.addEventListener("click", async () => 
   document.querySelector(".metar-card .eyebrow").textContent = "Loading…";
   try {
     const aviation = await aviationPayload();
+    weatherState.aviation = aviation;
     renderMetar(aviation);
   } catch (err) {
+    weatherState.aviation = null;
     renderMetar(null);
   }
 });
@@ -5707,6 +5800,10 @@ tabs.forEach(tab => {
     }, { capture: true });
   }
 });
+// Reflect the saved location's default unit system before data arrives.
+updateUnitToggleLabel();
+const initialTempUnit = document.querySelector("#currentTempUnit");
+if (initialTempUnit) initialTempUnit.textContent = tempUnit();
 refreshLiveData().then(() => {
   if (new URLSearchParams(location.search).get("from") === "notification") {
     history.replaceState(null, "", location.pathname);
