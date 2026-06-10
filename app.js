@@ -416,6 +416,9 @@ let activeTheme = "sunny";
 // animated gradient. On iOS standalone web apps the system can paint the
 // status-bar buffer itself from theme-color; matching the gradient keeps that
 // strip blended with the scene instead of reading as a flat dark band.
+// Also mirror the palette onto the root element's --sky-* custom properties:
+// the html background gradient (see styles.css) is what iOS paints in the
+// safe-area bands where fixed-position elements get clipped.
 function syncThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
