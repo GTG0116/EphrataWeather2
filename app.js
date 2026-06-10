@@ -1269,13 +1269,22 @@ function ecccSeverity(p) {
   return "Minor";
 }
 
+// The feed's id field embeds the publication batch, so the same alert gets a
+// brand-new id every time ECCC republishes the collection — which re-fired
+// foreground notifications for unchanged alerts. Build an id from fields that
+// only change when the alert itself is reissued.
+function ecccStableAlertId(p = {}) {
+  return ["eccc", p.alert_code || p.alert_name_en || "alert",
+    p.feature_name_en || "", p.validity_datetime || p.publication_datetime || ""].join("|");
+}
+
 // Canadian alert text shares one free-form format across event types, so no
 // hazard tags are derived for ECCC alerts (unlike NWS/IEM parameters).
 function normalizeEcccAlert(feature) {
   const p = feature.properties || {};
   const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
   return {
-    id: p.id || p.feature_id,
+    id: ecccStableAlertId(p),
     event,
     headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
     severity: ecccSeverity(p),
@@ -2747,6 +2756,21 @@ async function registerPushSubscription() {
       .filter(Boolean);
   } catch {}
 
+  // Skip the round-trip when this device already registered the identical
+  // subscription + location recently — every stored subscribe costs the
+  // worker a Workers KV write (only 1,000/day on the free plan), and the app
+  // re-subscribes on every launch.
+  const fingerprint = JSON.stringify({
+    endpoint: subscription.endpoint,
+    lat: selectedLocation.lat,
+    lon: selectedLocation.lon,
+    zones: nwsZones,
+  });
+  try {
+    const last = JSON.parse(localStorage.getItem("pushSubscribeState") || "null");
+    if (last?.fingerprint === fingerprint && Date.now() - last.at < 24 * 3600 * 1000) return true;
+  } catch {}
+
   const response = await fetch(PUSH_SUBSCRIBE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2756,6 +2780,7 @@ async function registerPushSubscription() {
     }),
   });
   if (!response.ok) throw new Error(`Push subscribe failed: ${response.status}`);
+  try { localStorage.setItem("pushSubscribeState", JSON.stringify({ fingerprint, at: Date.now() })); } catch {}
   return true;
 }
 
@@ -2914,9 +2939,12 @@ async function enableNotifications() {
       console.warn("Push subscription unavailable", error);
       return false;
     });
+    // Be honest when the background-push registration failed: "enabled"
+    // previously masked /subscribe errors, so users believed closed-app
+    // notifications were active when the server never stored the subscription.
     document.querySelector("#statusBadge").textContent = pushReady
       ? "Alert push notifications enabled"
-      : "Alert notifications enabled";
+      : "Alerts on while the app is open — background push setup failed, will retry on next launch";
   } else {
     document.querySelector("#statusBadge").textContent = "Alert notifications not enabled";
   }
@@ -4803,7 +4831,7 @@ function ecccAlertMapColor(p = {}) {
 // box reaches Canada (not just for Canadian locations) so US users panning
 // north of the border still see Canadian alerts.
 const ECCC_MAP_PROPERTIES = [
-  "id", "feature_id", "alert_type", "alert_name_en", "status_en",
+  "id", "feature_id", "alert_code", "alert_type", "alert_name_en", "status_en",
   "publication_datetime", "validity_datetime", "expiration_datetime",
   "event_end_datetime", "feature_name_en", "province", "risk_colour_en",
   "alert_text_en",

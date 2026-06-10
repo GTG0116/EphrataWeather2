@@ -14,26 +14,47 @@ export default {
     }
 
     if (url.pathname === "/subscribe" && request.method === "POST") {
-      const body = await request.json();
-      const subscription = body.subscription;
-      const location = normalizeLocation(body.location);
-      if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
-        return json({ ok: false, error: "Missing Web Push subscription" }, 400);
-      }
-      if (!Number.isFinite(location.lat) || !Number.isFinite(location.lon)) {
-        return json({ ok: false, error: "Missing location" }, 400);
-      }
+      try {
+        const body = await request.json();
+        const subscription = body.subscription;
+        const location = normalizeLocation(body.location);
+        if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+          return json({ ok: false, error: "Missing Web Push subscription" }, 400);
+        }
+        if (!Number.isFinite(location.lat) || !Number.isFinite(location.lon)) {
+          return json({ ok: false, error: "Missing location" }, 400);
+        }
 
-      const key = await subscriptionKey(subscription.endpoint);
-      const alerts = await activeAlerts(location, env);
-      await env.SUBSCRIPTIONS.put(key, JSON.stringify({
-        subscription,
-        location,
-        seenAlertIds: alerts.map(alert => alert.id),
-        updatedAt: new Date().toISOString(),
-      }));
+        const key = await subscriptionKey(subscription.endpoint);
 
-      return json({ ok: true, key, seen: alerts.length });
+        // Skip the KV write when nothing changed. The app re-subscribes on
+        // every launch and location change, and Workers KV's free plan allows
+        // only 1,000 writes/day — unconditional puts help exhaust that quota,
+        // after which every put() throws for the rest of the UTC day.
+        // Keeping the existing record also preserves its seenAlertIds.
+        const existing = await env.SUBSCRIPTIONS.get(key, "json").catch(() => null);
+        if (existing?.subscription?.keys?.p256dh === subscription.keys.p256dh &&
+            existing?.subscription?.keys?.auth === subscription.keys.auth &&
+            roundCoord(existing?.location?.lat) === roundCoord(location.lat) &&
+            roundCoord(existing?.location?.lon) === roundCoord(location.lon) &&
+            JSON.stringify(existing?.location?.nwsZones || []) === JSON.stringify(location.nwsZones)) {
+          return json({ ok: true, key, unchanged: true });
+        }
+
+        const alerts = await activeAlerts(location, env);
+        await env.SUBSCRIPTIONS.put(key, JSON.stringify({
+          subscription,
+          location,
+          seenAlertIds: alerts.map(alert => alert.id),
+          updatedAt: new Date().toISOString(),
+        }));
+
+        return json({ ok: true, key, seen: alerts.length });
+      } catch (e) {
+        // KV quota exhaustion lands here — answer with a real JSON error the
+        // app can react to instead of Cloudflare's opaque 1101 error page.
+        return json({ ok: false, error: `Subscribe failed: ${e.message}` }, 503);
+      }
     }
 
     if (url.pathname === "/check-now") {
@@ -137,17 +158,20 @@ async function checkSubscriptions(env) {
             stats.sent += 1;
           }
 
-          // Prune stale IDs (expired alerts) and mark all successfully delivered
-          // alert IDs as seen so each new alert generates one notification.
-          // Only write KV when the set actually changed: Workers KV allows just
-          // 1,000 writes/day on the free plan, and an unconditional put per
-          // subscriber per 2-minute cron exhausts that within hours.
+          // Mark delivered alert IDs as seen so each new alert generates one
+          // notification. Workers KV allows just 1,000 writes/day on the free
+          // plan, so write only after a delivery — never for pruning alone.
+          // (Prune-only writes on every alert expiry burned through the quota
+          // during active weather, which then made every put() throw and broke
+          // /subscribe for the rest of the UTC day.) Stale IDs left in the set
+          // are harmless — CAP/ECCC IDs are never reused — and get pruned the
+          // next time a delivery forces a write anyway.
           const currentIdSet = new Set(currentIds);
           const updatedSeen = [...new Set([
             ...[...seen].filter(id => currentIdSet.has(id)),
             ...deliveredIds,
           ])];
-          const changed = updatedSeen.length !== seen.size || updatedSeen.some(id => !seen.has(id));
+          const changed = deliveredIds.length > 0;
           if (changed) {
             await env.SUBSCRIPTIONS.put(key, JSON.stringify({
               ...record,
@@ -225,12 +249,13 @@ async function ecccActiveAlerts(location) {
   if (!response.ok) throw new Error(`ECCC alerts failed: ${response.status}`);
   const data = await response.json();
   return (data.features || [])
-    .filter(feature => pointInGeometry(location.lon, location.lat, feature.geometry))
+    .filter(feature => feature.properties?.status_en?.toLowerCase() !== "ended" &&
+      pointInGeometry(location.lon, location.lat, feature.geometry))
     .map(feature => {
       const p = feature.properties || {};
       const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
       return {
-        id: p.id || p.feature_id,
+        id: ecccStableAlertId(p),
         event,
         headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
         expires: p.expiration_datetime || p.event_end_datetime || null,
@@ -238,6 +263,17 @@ async function ecccActiveAlerts(location) {
       };
     })
     .filter(alert => alert.id);
+}
+
+// The feed's id field embeds the publication batch, so the same alert gets a
+// brand-new id every time ECCC republishes the collection. Treating those as
+// new alerts re-notified subscribers for the same watch over and over and
+// burned a KV write per 2-minute cron cycle. Build an id from fields that only
+// change when the alert itself is reissued (validity_datetime moves on a true
+// update, which should re-notify).
+function ecccStableAlertId(p = {}) {
+  return ["eccc", p.alert_code || p.alert_name_en || "alert",
+    p.feature_name_en || "", p.validity_datetime || p.publication_datetime || ""].join("|");
 }
 
 async function nwsActiveAlerts(location, env) {
