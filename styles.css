@@ -47,19 +47,38 @@ body::-webkit-scrollbar {
   display: none;
 }
 
+html {
+  /* The root background propagates to the canvas behind everything — it is the
+     only paint iOS standalone web apps reliably show in the status-bar and
+     home-indicator safe areas, where fixed-position elements (like
+     #atmosphereCanvas, despite its overshoot) get clipped to the layout
+     viewport. Mirror the active theme's gradient here (--sky-* is set from
+     themePalettes by syncThemeColor() in app.js) so those bands blend with the
+     animated scene. no-repeat + 100% sizing stop the gradient tiling across
+     the infinite canvas; background-color covers any area beyond the image.
+     Avoid background-attachment: fixed — on iOS it composites over negative
+     z-index children and hides the animated canvas. */
+  min-height: 100%;
+  background-color: var(--sky-2, #0f172a);
+  background-image: linear-gradient(160deg,
+    var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
 body {
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0;
   color: var(--text);
   font-family: var(--font-sans);
-  /* Plain base color only. The animated canvas (z-index: -2) covers the full
-     screen including safe areas, so this just sits behind it. Avoid
-     background-attachment: fixed here — on iOS it composites over negative
-     z-index children and hides the animated canvas. */
-  background: #06101f;
+  /* Must stay transparent: once html has its own background, a body background
+     would no longer propagate to the root canvas and would instead paint above
+     the negative z-index layers (#atmosphereCanvas at -2, body::after at -1),
+     hiding the animated background entirely. */
+  background: transparent;
   overflow-x: hidden;
-  transition: color 220ms ease, background-color 420ms ease;
+  transition: color 220ms ease;
 }
 
 body[data-theme="sunny"] {
