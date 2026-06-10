@@ -37,8 +37,8 @@ export default {
     }
 
     if (url.pathname === "/check-now") {
-      await checkSubscriptions(env);
-      return json({ ok: true });
+      const stats = await checkSubscriptions(env);
+      return json({ ok: !stats.errors.length, ...stats });
     }
 
     if (url.pathname === "/proxy" && request.method === "GET") {
@@ -74,62 +74,101 @@ export default {
   },
 };
 
+// Every failure here is contained: one corrupt KV record, one upstream alert
+// feed outage, or one push rejection must never abort the whole run (the cron
+// shares this function, so an uncaught exception silences notifications for
+// every subscriber until it is fixed).
 async function checkSubscriptions(env) {
-  let cursor;
+  const stats = { subscriptions: 0, groups: 0, sent: 0, errors: [] };
   const grouped = new Map();
 
-  do {
-    const page = await env.SUBSCRIPTIONS.list({ prefix: "sub:", cursor });
-    cursor = page.cursor;
-    for (const item of page.keys) {
-      const record = await env.SUBSCRIPTIONS.get(item.name, "json");
-      if (!record?.subscription?.endpoint || !record.location) continue;
-      const groupKey = `${roundCoord(record.location.lat)},${roundCoord(record.location.lon)}`;
-      if (!grouped.has(groupKey)) grouped.set(groupKey, []);
-      grouped.get(groupKey).push({ key: item.name, record });
-    }
-  } while (cursor);
-
-  for (const subscribers of grouped.values()) {
-    const location = subscribers[0].record.location;
-    const alerts = await activeAlerts(location, env).catch(() => []);
-    const currentIds = alerts.map(alert => alert.id);
-
-    for (const { key, record } of subscribers) {
-      try {
-        const seen = new Set(record.seenAlertIds || []);
-        const unseenAlerts = alerts.filter(alert => !seen.has(alert.id));
-        const deliveredIds = [];
-
-        for (const alert of unseenAlerts) {
-          const result = await sendPush(record.subscription, alert, record.location, env);
-          if (result === "gone") {
-            await env.SUBSCRIPTIONS.delete(key);
-            deliveredIds.length = 0;
-            break;
-          }
-          deliveredIds.push(alert.id);
-        }
-
-        if (!deliveredIds.length && unseenAlerts.length && !currentIds.length) {
+  try {
+    let cursor;
+    do {
+      const page = await env.SUBSCRIPTIONS.list({ prefix: "sub:", cursor });
+      cursor = page.list_complete ? undefined : page.cursor;
+      for (const item of page.keys) {
+        let record;
+        try {
+          record = await env.SUBSCRIPTIONS.get(item.name, "json");
+        } catch (e) {
+          // Unreadable/corrupt record — drop it so it can't poison future runs.
+          stats.errors.push(`read ${item.name}: ${e.message}`);
+          await env.SUBSCRIPTIONS.delete(item.name).catch(() => {});
           continue;
         }
+        if (!record?.subscription?.endpoint || !record.location) continue;
+        stats.subscriptions += 1;
+        const groupKey = `${roundCoord(record.location.lat)},${roundCoord(record.location.lon)}`;
+        if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+        grouped.get(groupKey).push({ key: item.name, record });
+      }
+    } while (cursor);
 
-        // Prune stale IDs (expired alerts) and mark all successfully delivered
-        // alert IDs as seen so each new alert generates one notification.
-        const currentIdSet = new Set(currentIds);
-        const updatedSeen = [...seen].filter(id => currentIdSet.has(id));
-        deliveredIds.forEach(id => updatedSeen.push(id));
-        await env.SUBSCRIPTIONS.put(key, JSON.stringify({
-          ...record,
-          seenAlertIds: [...new Set(updatedSeen)],
-          updatedAt: new Date().toISOString(),
-        }));
+    stats.groups = grouped.size;
+    for (const subscribers of grouped.values()) {
+      const location = subscribers[0].record.location;
+      let alerts;
+      try {
+        alerts = await activeAlerts(location, env);
       } catch (e) {
-        console.warn("Push processing failed for subscriber", key, e);
+        // Alert feeds down — leave seenAlertIds untouched and retry next run.
+        // (Treating this as "no alerts" would wipe seen IDs and re-notify
+        // every active alert once the feed recovers.)
+        stats.errors.push(`alerts ${roundCoord(location.lat)},${roundCoord(location.lon)}: ${e.message}`);
+        continue;
+      }
+      const currentIds = alerts.map(alert => alert.id);
+
+      for (const { key, record } of subscribers) {
+        try {
+          const seen = new Set(record.seenAlertIds || []);
+          const unseenAlerts = alerts.filter(alert => !seen.has(alert.id));
+          const deliveredIds = [];
+
+          for (const alert of unseenAlerts) {
+            const result = await sendPush(record.subscription, alert, record.location, env);
+            if (result === "gone") {
+              await env.SUBSCRIPTIONS.delete(key);
+              deliveredIds.length = 0;
+              break;
+            }
+            deliveredIds.push(alert.id);
+            stats.sent += 1;
+          }
+
+          // Prune stale IDs (expired alerts) and mark all successfully delivered
+          // alert IDs as seen so each new alert generates one notification.
+          // Only write KV when the set actually changed: Workers KV allows just
+          // 1,000 writes/day on the free plan, and an unconditional put per
+          // subscriber per 2-minute cron exhausts that within hours.
+          const currentIdSet = new Set(currentIds);
+          const updatedSeen = [...new Set([
+            ...[...seen].filter(id => currentIdSet.has(id)),
+            ...deliveredIds,
+          ])];
+          const changed = updatedSeen.length !== seen.size || updatedSeen.some(id => !seen.has(id));
+          if (changed) {
+            await env.SUBSCRIPTIONS.put(key, JSON.stringify({
+              ...record,
+              seenAlertIds: updatedSeen,
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+        } catch (e) {
+          stats.errors.push(`push ${key}: ${e.message}`);
+          console.warn("Push processing failed for subscriber", key, e);
+        }
       }
     }
+  } catch (e) {
+    // Catch-all (e.g. subrequest limits) so pushes already sent still count
+    // and the next scheduled run starts fresh.
+    stats.errors.push(`run aborted: ${e.message}`);
+    console.warn("checkSubscriptions aborted", e);
   }
+
+  return stats;
 }
 
 async function activeAlerts(location, env) {
@@ -270,10 +309,18 @@ async function sendPush(subscription, alert, location, env) {
   };
   const encryptedBody = await encryptPushPayload(subscription, payload);
 
+  // Keep the push queued at the push service until the alert expires (1h–6h
+  // bounds) so a device that is briefly offline still receives it, instead of
+  // the old 5-minute TTL silently dropping deliveries.
+  const expiresMs = alert.expires ? new Date(alert.expires).getTime() - Date.now() : NaN;
+  const ttlSeconds = Number.isFinite(expiresMs)
+    ? Math.min(Math.max(Math.ceil(expiresMs / 1000), 3600), 6 * 3600)
+    : 3600;
+
   const response = await fetch(subscription.endpoint, {
     method: "POST",
     headers: {
-      "TTL": "300",
+      "TTL": String(ttlSeconds),
       "Urgency": "high",
       "Content-Encoding": "aes128gcm",
       "Content-Type": "application/octet-stream",

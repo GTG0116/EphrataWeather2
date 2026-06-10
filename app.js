@@ -998,17 +998,48 @@ const ALERT_PHENOMENA_COLORS = {
 const NWS_ALERT_EVENT_COLORS = [
   [/tornado watch/i, { fill: "#a855f7", line: "#c084fc" }],
   [/severe thunderstorm watch/i, { fill: "#f59e0b", line: "#fbbf24" }],
-  [/flood watch/i, { fill: "#14b8a6", line: "#2dd4bf" }],
+  [/winter storm warning|ice storm warning|blizzard warning|lake effect snow warning/i, { fill: "#ec4899", line: "#f472b6" }],
+  [/winter storm watch/i, { fill: "#3b82f6", line: "#60a5fa" }],
   [/winter weather advisory/i, { fill: "#38bdf8", line: "#7dd3fc" }],
+  [/flood watch/i, { fill: "#14b8a6", line: "#2dd4bf" }],
+  [/flood warning/i, { fill: "#22c55e", line: "#4ade80" }],
+  [/flood advisory/i, { fill: "#10b981", line: "#34d399" }],
+  [/(excessive|extreme) heat/i, { fill: "#c026d3", line: "#d946ef" }],
   [/heat advisory/i, { fill: "#f97316", line: "#fb923c" }],
+  [/high wind warning/i, { fill: "#eab308", line: "#facc15" }],
+  [/wind advisory/i, { fill: "#d97706", line: "#f59e0b" }],
+  [/extreme cold|wind chill|cold weather advisory/i, { fill: "#06b6d4", line: "#22d3ee" }],
+  [/frost advisory|freeze warning|freeze watch/i, { fill: "#67e8f9", line: "#a5f3fc" }],
+  [/dense fog advisory/i, { fill: "#94a3b8", line: "#cbd5e1" }],
+  [/red flag warning|fire weather watch/i, { fill: "#db2777", line: "#f472b6" }],
+  [/air quality/i, { fill: "#9ca3af", line: "#d1d5db" }],
 ];
 
-function nwsAlertColor(event = "") {
-  return NWS_ALERT_EVENT_COLORS.find(([pattern]) => pattern.test(event))?.[1] || null;
+// Severity fallback so county/zone alerts without a dedicated event color
+// still render on the alert overlay instead of being dropped.
+const NWS_ALERT_SEVERITY_COLORS = {
+  extreme: { fill: "#dc2626", line: "#ef4444" },
+  severe: { fill: "#f97316", line: "#fb923c" },
+  moderate: { fill: "#f59e0b", line: "#fbbf24" },
+  minor: { fill: "#64748b", line: "#94a3b8" },
+};
+
+function nwsAlertColor(event = "", severity = "") {
+  return NWS_ALERT_EVENT_COLORS.find(([pattern]) => pattern.test(event))?.[1]
+    || NWS_ALERT_SEVERITY_COLORS[String(severity).toLowerCase()]
+    || NWS_ALERT_SEVERITY_COLORS.minor;
 }
 
 function isWarningEvent(event = "") {
   return /\bwarning\b/i.test(event);
+}
+
+// Warning types the IEM storm-based-warning feed carries (and that the map's
+// IEM layer already draws). Other warnings — winter storm, high wind, flood,
+// heat, etc. — are county/zone based and only exist in the NWS feed, so they
+// must not be filtered out with a blanket "warning" test.
+function isStormBasedWarning(event = "") {
+  return /\b(tornado|severe thunderstorm|flash flood|snow squall|special marine)\s+warning\b/i.test(event);
 }
 
 function warningHasMapColor(feature) {
@@ -1258,9 +1289,6 @@ async function alertsPayload(lat, lon) {
     ecccAlertsPayload(lat, lon),
   ]);
   const allNwsFeatures = nwsResult.status === "fulfilled" ? (nwsResult.value.features || []) : [];
-  const nwsAlerts = allNwsFeatures
-    .map(normalizeNwsAlert)
-    .filter(alert => !isWarningEvent(alert.event));
   const nwsWarningsByEvent = new Map();
   allNwsFeatures
     .map(normalizeNwsAlert)
@@ -1282,6 +1310,13 @@ async function alertsPayload(lat, lon) {
         return alert;
       })
     : [];
+  // Keep county/zone warnings (winter storm, high wind, flood...) that the
+  // storm-based feed doesn't carry; drop only warnings IEM already supplies.
+  const iemEvents = new Set(iemAlerts.map(alert => String(alert.event || "").toLowerCase()));
+  const nwsAlerts = allNwsFeatures
+    .map(normalizeNwsAlert)
+    .filter(alert => !isStormBasedWarning(alert.event) &&
+      !(isWarningEvent(alert.event) && iemEvents.has(String(alert.event).toLowerCase())));
   const ecccAlerts = ecccResult.status === "fulfilled" ? ecccResult.value : [];
   const alerts = mergeAlerts(iemAlerts, nwsAlerts, ecccAlerts).map(alert => ({
     ...alert,
@@ -4708,6 +4743,34 @@ const ECCC_RISK_COLORS = {
   yellow: { fill: "#f59e0b", line: "#fbbf24" },
 };
 
+// Event-specific hues so simultaneous Canadian alerts are distinguishable on
+// the map. The weather-alerts collection stopped returning risk_colour_en, so
+// derive color from the alert name first, then risk colour when present, then
+// the ECCC convention of red warnings / yellow watches / grey statements.
+const ECCC_EVENT_COLORS = [
+  [/tornado/i, { fill: "#dc2626", line: "#ef4444" }],
+  [/severe thunderstorm warning/i, { fill: "#f97316", line: "#fb923c" }],
+  [/severe thunderstorm watch/i, { fill: "#f59e0b", line: "#fbbf24" }],
+  [/rainfall|flood/i, { fill: "#14b8a6", line: "#2dd4bf" }],
+  [/snow|winter storm|blizzard/i, { fill: "#38bdf8", line: "#7dd3fc" }],
+  [/freezing (rain|drizzle)|frost|ice/i, { fill: "#a78bfa", line: "#c4b5fd" }],
+  [/heat/i, { fill: "#e11d48", line: "#fb7185" }],
+  [/hurricane|tropical storm|wind/i, { fill: "#6366f1", line: "#818cf8" }],
+  [/fog|smog|air quality/i, { fill: "#94a3b8", line: "#cbd5e1" }],
+  [/cold|arctic/i, { fill: "#06b6d4", line: "#22d3ee" }],
+];
+
+function ecccAlertMapColor(p = {}) {
+  const eventColor = ECCC_EVENT_COLORS.find(([pattern]) => pattern.test(String(p.alert_name_en || "")))?.[1];
+  if (eventColor) return eventColor;
+  const riskColor = ECCC_RISK_COLORS[String(p.risk_colour_en || "").toLowerCase()];
+  if (riskColor) return riskColor;
+  const type = String(p.alert_type || "").toLowerCase();
+  if (type === "warning") return { fill: "#dc2626", line: "#ef4444" };
+  if (type === "watch") return { fill: "#f59e0b", line: "#fbbf24" };
+  return { fill: "#64748b", line: "#94a3b8" }; // statements & advisories
+}
+
 // ECCC alert polygons around the selected location, shaped like the NWS zone
 // alert features so the shared map layer and popups can render them.
 async function ecccAlertMapFeatures(lat, lon) {
@@ -4718,8 +4781,7 @@ async function ecccAlertMapFeatures(lat, lon) {
   return (data.features || []).map(feature => {
     if (!feature.geometry) return null;
     const alert = normalizeEcccAlert(feature);
-    const colour = String(feature.properties?.risk_colour_en || "").toLowerCase();
-    const color = ECCC_RISK_COLORS[colour] || { fill: "#38bdf8", line: "#7dd3fc" };
+    const color = ecccAlertMapColor(feature.properties);
     return {
       type: "Feature",
       geometry: feature.geometry,
@@ -4749,9 +4811,10 @@ async function nwsAlertFeatureCollection() {
   const features = ecccResult.status === "fulfilled" ? [...ecccResult.value] : [];
   for (const feature of data.features || []) {
     const p = feature.properties || {};
-    if (isWarningEvent(p.event || "")) continue;
-    const color = nwsAlertColor(p.event || "");
-    if (!color) continue;
+    // Skip only the storm-based warnings the IEM layer already draws; other
+    // county/zone warnings, watches, and advisories all render here.
+    if (isStormBasedWarning(p.event || "")) continue;
+    const color = nwsAlertColor(p.event || "", p.severity || "");
     if (feature.geometry) {
       features.push({
         type: "Feature",
