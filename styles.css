@@ -134,6 +134,13 @@ body[data-condition="winter"] {
   height: calc(100vh + 200px);
   height: calc(100lvh + 200px);
   z-index: -2;
+  /* Safari with the bottom address bar tints the exposed status-bar strip by
+     sampling the background-color of fixed elements near the viewport edges —
+     it ignores theme-color there and never samples canvas pixels, so without
+     an explicit background-color the strip fell back to a flat default
+     instead of blending with the animated gradient. The canvas paints opaque
+     pixels over this color, so nothing changes inside the page. */
+  background-color: var(--sky-0, #075985);
 }
 
 body::after {

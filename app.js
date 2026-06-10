@@ -474,6 +474,8 @@ let wpcRainDataCache = {};      // keyed by day (1-5)
 let lsrData = null;
 let alertPolygonData = null;
 let nwsAlertPolygonData = null;
+let alertFetchCenter = null;        // {lat, lon} the alert overlay bboxes were last fetched around
+let alertPanRefreshInFlight = false;
 let spcPopupWired = false;
 let droughtPopupWired = false;
 let radarAnimationTimer;
@@ -1030,6 +1032,23 @@ function nwsAlertColor(event = "", severity = "") {
     || NWS_ALERT_SEVERITY_COLORS.minor;
 }
 
+// Color lookup shared by US and Canadian alerts. The storm-based warning types
+// keep their IEM layer colors (ALERT_PHENOMENA_COLORS); everything else goes
+// through the NWS event/severity tables. Routing every alert through one
+// function keeps ECCC polygons on the same palette as their US counterparts.
+const STORM_BASED_EVENT_CODES = [
+  [/tornado warning/i, "TO"],
+  [/severe thunderstorm warning/i, "SV"],
+  [/flash flood warning/i, "FF"],
+  [/snow squall warning/i, "SQ"],
+  [/special marine warning/i, "MA"],
+];
+
+function alertEventColor(event = "", severity = "") {
+  const code = STORM_BASED_EVENT_CODES.find(([pattern]) => pattern.test(event))?.[1];
+  return (code && ALERT_PHENOMENA_COLORS[code]) || nwsAlertColor(event, severity);
+}
+
 function isWarningEvent(event = "") {
   return /\bwarning\b/i.test(event);
 }
@@ -1272,13 +1291,22 @@ function normalizeEcccAlert(feature) {
   };
 }
 
+// The weather-alerts collection keeps alerts around after they end (status_en
+// "ended", or an expiration already in the past), so filter to the ones ECCC
+// still shows as in effect.
+function isActiveEcccAlert(p = {}) {
+  if (String(p.status_en || "").toLowerCase() === "ended") return false;
+  const expires = p.expiration_datetime || p.event_end_datetime;
+  return !expires || new Date(expires).getTime() > Date.now();
+}
+
 async function ecccAlertsPayload(lat, lon) {
   if (!isInCanada(lat, lon)) return [];
   const d = 0.05;
   const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
   const data = await getJson(`${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=100`);
   return (data.features || [])
-    .filter(feature => pointInGeometry(lon, lat, feature.geometry))
+    .filter(feature => isActiveEcccAlert(feature.properties) && pointInGeometry(lon, lat, feature.geometry))
     .map(normalizeEcccAlert);
 }
 
@@ -4737,49 +4765,61 @@ async function addLsrLayer() {
   });
 }
 
-const ECCC_RISK_COLORS = {
-  red:    { fill: "#dc2626", line: "#ef4444" },
-  orange: { fill: "#f97316", line: "#fb923c" },
-  yellow: { fill: "#f59e0b", line: "#fbbf24" },
-};
-
-// Event-specific hues so simultaneous Canadian alerts are distinguishable on
-// the map. The weather-alerts collection stopped returning risk_colour_en, so
-// derive color from the alert name first, then risk colour when present, then
-// the ECCC convention of red warnings / yellow watches / grey statements.
-const ECCC_EVENT_COLORS = [
-  [/tornado/i, { fill: "#dc2626", line: "#ef4444" }],
-  [/severe thunderstorm warning/i, { fill: "#f97316", line: "#fb923c" }],
-  [/severe thunderstorm watch/i, { fill: "#f59e0b", line: "#fbbf24" }],
-  [/rainfall|flood/i, { fill: "#14b8a6", line: "#2dd4bf" }],
-  [/snow|winter storm|blizzard/i, { fill: "#38bdf8", line: "#7dd3fc" }],
-  [/freezing (rain|drizzle)|frost|ice/i, { fill: "#a78bfa", line: "#c4b5fd" }],
-  [/heat/i, { fill: "#e11d48", line: "#fb7185" }],
-  [/hurricane|tropical storm|wind/i, { fill: "#6366f1", line: "#818cf8" }],
-  [/fog|smog|air quality/i, { fill: "#94a3b8", line: "#cbd5e1" }],
-  [/cold|arctic/i, { fill: "#06b6d4", line: "#22d3ee" }],
+// Translate ECCC alert names to their nearest NWS event so Canadian polygons
+// pick up the exact same colors as their US counterparts via alertEventColor.
+const ECCC_TO_NWS_EVENT = [
+  [/tornado warning/i, "Tornado Warning"],
+  [/tornado watch/i, "Tornado Watch"],
+  [/severe thunderstorm warning/i, "Severe Thunderstorm Warning"],
+  [/severe thunderstorm watch/i, "Severe Thunderstorm Watch"],
+  [/snow squall/i, "Snow Squall Warning"],
+  [/waterspout/i, "Special Marine Warning"],
+  [/(rainfall|flood) warning/i, "Flood Warning"],
+  [/(rainfall|flood) watch/i, "Flood Watch"],
+  [/(coastal flood|storm surge)/i, "Coastal Flood Warning"],
+  [/(blizzard|winter storm|ice storm|freezing rain) warning/i, "Winter Storm Warning"],
+  [/winter storm watch/i, "Winter Storm Watch"],
+  [/(snowfall|blowing snow|winter weather|freezing drizzle|freezing fog)/i, "Winter Weather Advisory"],
+  [/(extreme cold|arctic outflow|flash freeze)/i, "Extreme Cold Warning"],
+  [/frost/i, "Frost Advisory"],
+  [/heat warning/i, "Extreme Heat Warning"],
+  [/heat/i, "Heat Advisory"],
+  [/wind warning/i, "High Wind Warning"],
+  [/(fog|smog)/i, "Dense Fog Advisory"],
+  [/air quality/i, "Air Quality Alert"],
+  [/red flag|fire/i, "Red Flag Warning"],
 ];
 
 function ecccAlertMapColor(p = {}) {
-  const eventColor = ECCC_EVENT_COLORS.find(([pattern]) => pattern.test(String(p.alert_name_en || "")))?.[1];
-  if (eventColor) return eventColor;
-  const riskColor = ECCC_RISK_COLORS[String(p.risk_colour_en || "").toLowerCase()];
-  if (riskColor) return riskColor;
-  const type = String(p.alert_type || "").toLowerCase();
-  if (type === "warning") return { fill: "#dc2626", line: "#ef4444" };
-  if (type === "watch") return { fill: "#f59e0b", line: "#fbbf24" };
-  return { fill: "#64748b", line: "#94a3b8" }; // statements & advisories
+  const name = String(p.alert_name_en || "");
+  const equivalent = ECCC_TO_NWS_EVENT.find(([pattern]) => pattern.test(name))?.[1] || name;
+  // ecccSeverity maps warnings/watches/statements onto the same severity rungs
+  // the US fallback colors use, so untranslated events also match US styling.
+  return alertEventColor(equivalent, ecccSeverity(p));
 }
 
-// ECCC alert polygons around the selected location, shaped like the NWS zone
-// alert features so the shared map layer and popups can render them.
+// ECCC alert polygons for the map, shaped like the NWS zone alert features so
+// the shared map layer and popups can render them. Fetched whenever the query
+// box reaches Canada (not just for Canadian locations) so US users panning
+// north of the border still see Canadian alerts.
+const ECCC_MAP_PROPERTIES = [
+  "id", "feature_id", "alert_type", "alert_name_en", "status_en",
+  "publication_datetime", "validity_datetime", "expiration_datetime",
+  "event_end_datetime", "feature_name_en", "province", "risk_colour_en",
+  "alert_text_en",
+].join(",");
+
 async function ecccAlertMapFeatures(lat, lon) {
-  if (!isInCanada(lat, lon)) return [];
-  const d = 3;
+  const d = 6;
+  const reachesCanada = lat + d >= 41.5 && lat - d <= 84 && lon + d >= -141.1 && lon - d <= -52.0;
+  if (!reachesCanada) return [];
   const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
-  const data = await getJson(`${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=200`, { cache: "no-store" });
+  const data = await getJson(
+    `${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=500&properties=${ECCC_MAP_PROPERTIES}`,
+    { cache: "no-store" },
+  );
   return (data.features || []).map(feature => {
-    if (!feature.geometry) return null;
+    if (!feature.geometry || !isActiveEcccAlert(feature.properties)) return null;
     const alert = normalizeEcccAlert(feature);
     const color = ecccAlertMapColor(feature.properties);
     return {
@@ -4801,14 +4841,73 @@ async function ecccAlertMapFeatures(lat, lon) {
   }).filter(Boolean);
 }
 
+// Regional NWS watch/warning/advisory polygons from the NOAA WWA map service.
+// The api.weather.gov point query only returns alerts at the selected location,
+// so zone-based alerts elsewhere in view (flood watches especially) never drew
+// on the Alerts overlay. This service returns ready-made polygons for every
+// active alert in one bbox request, matching the official NWS alert map.
+const NWS_WWA_QUERY_URL = "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer/1/query";
+const WWA_SIG_SEVERITY = { W: "Severe", A: "Moderate", Y: "Minor", S: "Minor" };
+
+async function nwsRegionalAlertFeatures(lat, lon) {
+  const d = 6;
+  const params = new URLSearchParams({
+    where: "1=1",
+    geometry: `${lon - d},${lat - d},${lon + d},${lat + d}`,
+    geometryType: "esriGeometryEnvelope",
+    inSR: "4326",
+    outSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    outFields: "prod_type,sig,expiration,url",
+    geometryPrecision: "3",
+    f: "geojson",
+  });
+  const data = await getJson(`${NWS_WWA_QUERY_URL}?${params}`, { cache: "no-store" });
+  return (data.features || []).map(feature => {
+    const p = feature.properties || {};
+    const event = p.prod_type || "";
+    // Storm-based warnings stay with the IEM layer; everything else renders here.
+    if (!feature.geometry || !event || isStormBasedWarning(event)) return null;
+    const severity = WWA_SIG_SEVERITY[String(p.sig || "").toUpperCase()] || "Moderate";
+    const color = alertEventColor(event, severity);
+    return {
+      type: "Feature",
+      geometry: feature.geometry,
+      properties: {
+        event,
+        severity,
+        expires: p.expiration || null,
+        headline: event,
+        // CAP id (urn:oid:…) parsed from the alert URL, for deduping against
+        // the richer point-query features covering the selected location.
+        capId: String(p.url || "").split("/alerts/")[1] || "",
+        fillColor: color.fill,
+        lineColor: color.line,
+      },
+    };
+  }).filter(Boolean);
+}
+
 async function nwsAlertFeatureCollection() {
   const loc = selectedLocation;
-  const [nwsResult, ecccResult] = await Promise.allSettled([
+  // Center the regional bbox queries on what the map is actually showing so
+  // panning away from the selected location still surfaces alerts; the
+  // moveend handler in addAlertsLayer refetches once the view leaves the box.
+  const center = radarMap && mapLoaded ? radarMap.getCenter() : { lat: loc.lat, lng: loc.lon };
+  alertFetchCenter = { lat: center.lat, lon: center.lng };
+  const [nwsResult, ecccResult, wwaResult] = await Promise.allSettled([
     getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" }),
-    ecccAlertMapFeatures(loc.lat, loc.lon),
+    ecccAlertMapFeatures(center.lat, center.lng),
+    nwsRegionalAlertFeatures(center.lat, center.lng),
   ]);
   const data = nwsResult.status === "fulfilled" ? nwsResult.value : { features: [] };
   const features = ecccResult.status === "fulfilled" ? [...ecccResult.value] : [];
+  const localAlertIds = new Set((data.features || []).map(feature => feature.properties?.id).filter(Boolean));
+  if (wwaResult.status === "fulfilled") {
+    // Skip regional copies of alerts the point query already supplies with
+    // fuller properties (zone names, descriptions) for the selected location.
+    features.push(...wwaResult.value.filter(feature => !localAlertIds.has(feature.properties.capId)));
+  }
   for (const feature of data.features || []) {
     const p = feature.properties || {};
     // Skip only the storm-based warnings the IEM layer already draws; other
@@ -4923,6 +5022,9 @@ async function addAlertsLayer() {
   if (iemResult.status === "fulfilled") alertPolygonData = iemResult.value;
   if (nwsResult.status === "fulfilled") nwsAlertPolygonData = nwsResult.value;
   if (!radarMap || !mapLoaded) return; // map may have been torn down mid-fetch
+  // A concurrent call (pan refresh racing a redraw) may have added the layers
+  // while this one awaited the fetches — adding the same source twice throws.
+  if (radarMap.getSource("alerts-source") || radarMap.getSource("nws-alerts-source")) return;
   const data = alertPolygonData;
   const hasIemAlerts = !!data?.features?.length;
   const hasNwsAlerts = !!nwsAlertPolygonData?.features?.length;
@@ -4990,6 +5092,31 @@ async function addAlertsLayer() {
       radarMap.on("mouseleave", layer, () => { radarMap.getCanvas().style.cursor = ""; });
     });
     popupWiredLayers.add("all-alerts");
+  }
+
+  // Refetch the zone/ECCC alert polygons once the camera leaves the ±6° box
+  // they were fetched for, so panning across the continent (or over the
+  // Canadian border) keeps the overlay populated.
+  if (!popupWiredLayers.has("alerts-pan-refresh")) {
+    radarMap.on("moveend", async () => {
+      if (!activeOverlays.has("Alerts") || !alertFetchCenter || alertPanRefreshInFlight) return;
+      if (!radarMap || !mapLoaded) return;
+      const c = radarMap.getCenter();
+      const moved = Math.max(Math.abs(c.lat - alertFetchCenter.lat), Math.abs(c.lng - alertFetchCenter.lon));
+      if (moved < 3) return; // still well inside the fetched box
+      alertPanRefreshInFlight = true;
+      try {
+        nwsAlertPolygonData = null;
+        ["alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line"].forEach(removeMapLayer);
+        ["alerts-source", "nws-alerts-source"].forEach(removeMapSource);
+        await addAlertsLayer();
+      } catch (e) {
+        console.warn("Alert overlay refresh failed", e);
+      } finally {
+        alertPanRefreshInFlight = false;
+      }
+    });
+    popupWiredLayers.add("alerts-pan-refresh");
   }
 }
 
