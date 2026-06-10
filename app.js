@@ -420,6 +420,8 @@ function syncThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   if (meta && palette.gradient?.length) meta.setAttribute("content", palette.gradient[0]);
+  palette.gradient.forEach((color, i) =>
+    document.documentElement.style.setProperty(`--sky-${i}`, color));
 }
 syncThemeColor();
 let radarActive = true;
@@ -2668,14 +2670,14 @@ function renderDaily() {
   const pollenForecast = weatherState.pollenForecast || [];
   dailyGrid.innerHTML = days.map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
-    const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, parseInt(day.windSpeed, 10));
-    const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, parseInt(night.windSpeed, 10)) : null);
+    const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, numericWind(day.windSpeed));
+    const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, numericWind(night.windSpeed)) : null);
     const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
     // Derive the month from the period name or fall back to current month
     const periodDate = day.startTime ? new Date(day.startTime) : new Date();
     const dayMonth   = periodDate.getMonth();
-    const windSpeed  = parseInt(day.windSpeed, 10) || null;
+    const windSpeed  = numericWind(day.windSpeed) || null;
     const fwi = FWI.calculate({
       temp:        day.temperature,
       humidity:    weatherState.current?.humidity,
@@ -2729,7 +2731,7 @@ function showHourDetails(index) {
   const humidity = nwsValue(hour, "relativeHumidity");
   const wind = hour.windSpeed || "Not reported";
   const gust = hour.windGust || "Not reported";
-  const feels = apparentTemperature(hour.temperature, humidity, parseInt(hour.windSpeed, 10));
+  const feels = apparentTemperature(hour.temperature, humidity, numericWind(hour.windSpeed));
   const fwi = hourFwi(hour);
   openDetails("Hourly Forecast", time.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }), [
     ["Condition", hour.shortForecast || "Not reported", "cloud"],
@@ -2749,8 +2751,8 @@ function showDailyDetails(index) {
   if (!day) return;
   const extras = weatherState.dailyExtras || {};
   const precip = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
-  const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, parseInt(day.windSpeed, 10));
-  const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, parseInt(night.windSpeed, 10)) : null);
+  const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, numericWind(day.windSpeed));
+  const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, numericWind(night.windSpeed)) : null);
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
   const rows = [
@@ -3314,10 +3316,9 @@ function initHistoricalCalendar() {
 function drawAtmosphere() {
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   const dpr = window.devicePixelRatio || 1;
-  // Measure the canvas's actual rendered size (driven by CSS `position: fixed; inset: 0`)
-  // rather than window.innerHeight. On iOS standalone/Safari, innerHeight excludes the
-  // safe-area regions, which left the animated gradient short and exposed the flat body
-  // color as a solid band at the top and bottom of the screen.
+  // Measure the canvas's actual rendered size so its buffer matches the CSS
+  // overshoot. iOS standalone can still clip fixed elements out of safe-area
+  // bands, so the root html gradient mirrors this palette as the reliable fallback.
   const width = canvas.clientWidth || window.innerWidth;
   const height = canvas.clientHeight || window.innerHeight;
   const bufferW = Math.round(width * dpr);
@@ -3404,8 +3405,8 @@ function mrmsFrameArray() {
 function stopRadarAnimation() {
   if (radarAnimationTimer) clearInterval(radarAnimationTimer);
   radarAnimationTimer = null;
-  const btn = document.querySelector("#radarPlayButton");
-  if (btn) { document.querySelector("#playLabel").textContent = "Play"; }
+  const lbl = document.querySelector("#playLabel");
+  if (lbl) lbl.textContent = "Play";
 }
 
 function renderMapSidebar() {
