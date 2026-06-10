@@ -4577,12 +4577,22 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
 
 async function addAlertsLayer() {
   if (!radarMap || !mapLoaded) return;
-  if (!alertPolygonData) {
-    alertPolygonData = filterMapColoredWarnings(await fetchOutlookGeoJson(IEM_SBW_URL));
-  }
-  if (!nwsAlertPolygonData) {
-    nwsAlertPolygonData = await nwsAlertFeatureCollection();
-  }
+  // Fetch the IEM storm-based warnings (US only) and the NWS/ECCC alert
+  // polygons independently. The IEM endpoint is US-only and often slow, so
+  // awaiting it first would block — or, on failure, skip entirely — the ECCC
+  // alerts that are the sole map source over Canada. Settling each on its own
+  // keeps one source's hiccup from hiding the other.
+  const [iemResult, nwsResult] = await Promise.allSettled([
+    alertPolygonData
+      ? Promise.resolve(alertPolygonData)
+      : fetchOutlookGeoJson(IEM_SBW_URL).then(filterMapColoredWarnings),
+    nwsAlertPolygonData
+      ? Promise.resolve(nwsAlertPolygonData)
+      : nwsAlertFeatureCollection(),
+  ]);
+  if (iemResult.status === "fulfilled") alertPolygonData = iemResult.value;
+  if (nwsResult.status === "fulfilled") nwsAlertPolygonData = nwsResult.value;
+  if (!radarMap || !mapLoaded) return; // map may have been torn down mid-fetch
   const data = alertPolygonData;
   const hasIemAlerts = !!data?.features?.length;
   const hasNwsAlerts = !!nwsAlertPolygonData?.features?.length;
