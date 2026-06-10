@@ -709,6 +709,7 @@ async function searchLocations(query) {
       item.country_code && item.country_code !== "US" ? item.country_code : null,
     ].filter(Boolean).join(", "),
     timezone: item.timezone || "America/New_York",
+    countryCode: item.country_code || null,
   }));
 }
 
@@ -719,13 +720,16 @@ async function reverseGeocode(lat, lon) {
       headers: { "User-Agent": "WeatherPortal/1.0" },
     });
     const addr = data.address || {};
+    const countryCode = (addr.country_code || "").toUpperCase() || null;
     const city = addr.city || addr.town || addr.village || addr.hamlet || "";
     const state = addr.state || "";
-    if (city && state) return `${city}, ${state}`;
-    if (city) return city;
-    return data.display_name?.split(",").slice(0, 2).join(",").trim() || null;
+    let name;
+    if (city && state) name = `${city}, ${state}`;
+    else if (city) name = city;
+    else name = data.display_name?.split(",").slice(0, 2).join(",").trim() || null;
+    return { name, countryCode };
   } catch {
-    return null;
+    return { name: null, countryCode: null };
   }
 }
 
@@ -736,8 +740,9 @@ async function locateMe() {
       async pos => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
-        const name = await reverseGeocode(lat, lon) || `${lat.toFixed(3)}°, ${lon.toFixed(3)}°`;
-        resolve({ lat, lon, name, timezone: "auto" });
+        const geo = await reverseGeocode(lat, lon);
+        const name = geo.name || `${lat.toFixed(3)}°, ${lon.toFixed(3)}°`;
+        resolve({ lat, lon, name, timezone: "auto", countryCode: geo.countryCode });
       },
       () => resolve(null),
       { timeout: 8000, maximumAge: 60000 }
@@ -1077,7 +1082,31 @@ const ECCC_ALERTS_URL = "https://api.weather.gc.ca/collections/weather-alerts/it
 // so overlap with northern US states is harmless (the bbox query simply returns
 // nothing for points outside Canadian alert polygons).
 function isInCanada(lat, lon) {
-  return lat >= 41.5 && lat <= 84 && lon >= -141.1 && lon <= -52.5;
+  return lat >= 41.5 && lat <= 84 && lon >= -141.1 && lon <= -52.0;
+}
+
+// Accurate Canada check used to route forecasts/current conditions to
+// Environment Canada. isInCanada()'s bbox deliberately overlaps the northern US
+// (harmless for alert queries) so it must NOT pick a forecast provider. Prefer
+// the country code captured during geocoding/reverse-geocoding, falling back to
+// the ", CA" suffix the location search appends to Canadian results.
+function isCanadianLocation(location = selectedLocation) {
+  const cc = (location?.countryCode || "").toUpperCase();
+  if (cc) return cc === "CA";
+  const name = location?.name || "";
+  return /,\s*CA$/i.test(name) || /\bcanada\b/i.test(name);
+}
+
+// Longitude-based IANA timezone fallback for Canadian points whose stored
+// timezone is missing or "auto" (e.g. GPS-located points).
+function canadianTimezone(lon) {
+  if (lon == null) return "America/Toronto";
+  if (lon >= -60) return "America/St_Johns";
+  if (lon >= -68) return "America/Halifax";
+  if (lon >= -90) return "America/Toronto";
+  if (lon >= -102) return "America/Winnipeg";
+  if (lon >= -114) return "America/Edmonton";
+  return "America/Vancouver";
 }
 
 function alertAgencyLabel(location = selectedLocation) {
@@ -1454,6 +1483,147 @@ async function openMeteoWeatherPayload() {
     astronomy,
     sources: ["api.open-meteo.com", "pollen.googleapis.com"],
   };
+}
+
+// ─── Environment Canada (api.weather.gc.ca) forecasts & current conditions ────
+// The citypageweather feed holds one feature per Canadian city. We pick the city
+// nearest the selected point and reshape it into the NWS-style payload so every
+// renderer works unchanged. Used for Canadian locations, where Open-Meteo has
+// proven unreliable.
+const CITYPAGE_URL = "https://api.weather.gc.ca/collections/citypageweather-realtime/items";
+
+// ECCC wraps measurements as { value: { en, fr } } and text as { en, fr }.
+function gcVal(node) { return node?.value?.en ?? null; }
+function gcEn(node)  { return node?.en ?? null; }
+
+function nearestCityFeature(features, lat, lon) {
+  let best = null, bestDist = Infinity;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  for (const feature of features) {
+    const c = feature.geometry?.coordinates;
+    if (!Array.isArray(c) || c.length < 2) continue;
+    const dLat = c[1] - lat;
+    const dLon = (c[0] - lon) * cosLat;
+    const dist = dLat * dLat + dLon * dLon;
+    if (dist < bestDist) { bestDist = dist; best = feature; }
+  }
+  return best;
+}
+
+async function canadaWeatherPayload() {
+  const loc = point();
+  const d = 2.5;
+  const bbox = `${loc.lon - d},${loc.lat - d},${loc.lon + d},${loc.lat + d}`;
+  const data = await getJson(`${CITYPAGE_URL}?lang=en&f=json&bbox=${bbox}&limit=200`);
+  const feature = nearestCityFeature(data.features || [], loc.lat, loc.lon);
+  if (!feature) throw new Error("No Environment Canada city forecast found nearby");
+  const props = feature.properties || {};
+  const cc = props.currentConditions || {};
+
+  selectedLocation.timezone = (loc.timezone && loc.timezone !== "auto")
+    ? loc.timezone : canadianTimezone(loc.lon);
+
+  const [alertsData, airQuality, pollen, astronomy] = await Promise.all([
+    alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
+    airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
+    pollenPayload().catch(() => null),
+    astronomyPayload().catch(() => null),
+  ]);
+
+  // Daily forecast — ECCC already alternates day/night periods, matching the NWS
+  // period layout the renderers expect.
+  const daily = (props.forecastGroup?.forecasts || []).map(fc => {
+    const tempObj = fc.temperatures?.temperature?.[0];
+    const name = gcEn(fc.period?.textForecastName) || "";
+    const isDaytime = tempObj?.class?.en
+      ? tempObj.class.en === "high"
+      : !/night/i.test(name);
+    const windPeriod = fc.winds?.periods?.[0];
+    return {
+      startTime: null,
+      name,
+      isDaytime,
+      temperature: fahrenheit(gcVal(tempObj)),
+      windSpeed: gcVal(windPeriod?.speed) != null ? `${mph(gcVal(windPeriod.speed))} mph` : null,
+      windDirection: windPeriod?.direction?.en || "--",
+      shortForecast: gcEn(fc.abbreviatedForecast?.textSummary) || "",
+      detailedForecast: gcEn(fc.textSummary) || "",
+      probabilityOfPrecipitation: { value: null },
+    };
+  });
+
+  // Hourly forecast (~24 hours). ECCC omits hourly humidity/dewpoint.
+  const hourly = (props.hourlyForecastGroup?.hourlyForecasts || []).map(h => ({
+    startTime: h.timestamp || null,
+    temperature: fahrenheit(gcVal(h.temperature)),
+    shortForecast: gcEn(h.condition) || "",
+    windSpeed: gcVal(h.wind?.speed) != null ? `${mph(gcVal(h.wind.speed))} mph` : null,
+    windGust: gcVal(h.wind?.gust) != null ? `${mph(gcVal(h.wind.gust))} mph` : null,
+    windDirection: gcEn(h.wind?.direction) || "--",
+    probabilityOfPrecipitation: { value: gcVal(h.lop) },
+    relativeHumidity: { value: null },
+    dewpoint: { value: null },
+    isDaytime: true,
+  }));
+
+  const condition = gcEn(cc.condition) || daily[0]?.shortForecast || "Live weather";
+  const firstDay = daily[0] || {};
+  const pressureKpa = gcVal(cc.pressure);
+  // Current conditions carry no UV; borrow it from the nearest forecast hour,
+  // then today's daily forecast (where the index is a plain text node).
+  const hourlyUv = gcVal(props.hourlyForecastGroup?.hourlyForecasts?.[0]?.uv?.index);
+  const dailyUvRaw = gcEn(props.forecastGroup?.forecasts?.[0]?.uv?.index);
+  const dailyUv = dailyUvRaw != null && Number.isFinite(Number(dailyUvRaw)) ? Number(dailyUvRaw) : null;
+  const uv = hourlyUv ?? dailyUv;
+
+  return {
+    current: {
+      temp: fahrenheit(gcVal(cc.temperature)),
+      condition,
+      headline: headlineFor(condition, firstDay),
+      summary: firstDay.detailedForecast || firstDay.shortForecast || condition,
+      humidity: gcVal(cc.relativeHumidity) == null ? null : Math.round(gcVal(cc.relativeHumidity)),
+      dewPoint: fahrenheit(gcVal(cc.dewpoint)),
+      wind: mph(gcVal(cc.wind?.speed)),
+      gust: mph(gcVal(cc.wind?.gust)),
+      uv,
+      pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
+      pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
+      airQuality: airQuality?.label || "Unavailable",
+      airQualityDetail: airQuality?.detail || "Open-Meteo air quality unavailable",
+      visibility: null,
+      pressure: pressureKpa == null ? null : pressureKpa * 0.2953,
+      updated: gcEn(cc.timestamp) || new Date().toISOString(),
+      source: "Environment Canada",
+    },
+    hourly,
+    daily,
+    dailyExtras: {},
+    alerts: alertsData.alerts || [],
+    alertSource: alertsData.source || "ECCC",
+    pollenForecast: Array.isArray(pollen) ? pollen : [],
+    astronomy,
+    sources: ["api.weather.gc.ca", "pollen.googleapis.com"],
+  };
+}
+
+// Choose the best forecast provider for the selected location: Environment
+// Canada for Canada, NWS for the US, with Open-Meteo as the universal fallback.
+async function primaryWeatherPayload() {
+  if (isCanadianLocation()) {
+    try {
+      return await canadaWeatherPayload();
+    } catch (error) {
+      console.warn("Environment Canada forecast unavailable, falling back to Open-Meteo", error);
+      return openMeteoWeatherPayload();
+    }
+  }
+  try {
+    return await weatherPayload();
+  } catch (error) {
+    console.warn("NWS forecast unavailable, falling back to Open-Meteo", error);
+    return openMeteoWeatherPayload();
+  }
 }
 
 async function aviationPayload() {
@@ -3668,7 +3838,9 @@ async function addRadarLayer() {
         mrmsImageBounds = { south, west, north, east };
       }
     } catch {}
-    if (!mrmsImageBounds) mrmsImageBounds = { south: 24, west: -130, north: 50, east: -60 };
+    // Fallback matches the live MRMS source extent, which now reaches 55°N to
+    // cover populated Canada (only used if the metadata fetch above fails).
+    if (!mrmsImageBounds) mrmsImageBounds = { south: 20, west: -130, north: 55, east: -60 };
   }
 
   radarFrames = mrmsFrameArray();
@@ -5328,12 +5500,9 @@ async function refreshLiveData() {
   nwsAlertPolygonData = null;
 
   const [weather, aviation, space, maps, spcForecast, wpcForecast] = await Promise.allSettled([
-    // NWS only covers the US — fall back to Open-Meteo for international
-    // locations or whenever the NWS pipeline fails.
-    weatherPayload().catch(error => {
-      console.warn("NWS forecast unavailable, falling back to Open-Meteo", error);
-      return openMeteoWeatherPayload();
-    }),
+    // NWS for the US, Environment Canada for Canada, Open-Meteo everywhere else
+    // (and as a fallback whenever the primary provider fails).
+    primaryWeatherPayload(),
     aviationPayload(),
     spacePayload(),
     mapsPayload(),
