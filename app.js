@@ -474,8 +474,12 @@ let wpcRainDataCache = {};      // keyed by day (1-5)
 let lsrData = null;
 let alertPolygonData = null;
 let nwsAlertPolygonData = null;
-let alertFetchCenter = null;        // {lat, lon} the alert overlay bboxes were last fetched around
+let alertFetchBox = null;           // {west,south,east,north} the alert overlay was last fetched for
 let alertPanRefreshInFlight = false;
+let activeAlertFilter = (() => {
+  const saved = localStorage.getItem("alertKindFilter");
+  return ["all", "warning", "watch", "advisory"].includes(saved) ? saved : "all";
+})();
 let spcPopupWired = false;
 let droughtPopupWired = false;
 let radarAnimationTimer;
@@ -1049,6 +1053,19 @@ function alertEventColor(event = "", severity = "") {
   return (code && ALERT_PHENOMENA_COLORS[code]) || nwsAlertColor(event, severity);
 }
 
+// Coarse alert class used by the map overlay filter. ECCC supplies an explicit
+// alert_type; NWS events classify by name (statements, outlooks, and
+// advisories all land in the "advisory" bucket).
+function alertKindFor(event = "", alertType = "") {
+  const type = String(alertType).toLowerCase();
+  if (type === "warning") return "warning";
+  if (type === "watch") return "watch";
+  if (type) return "advisory";
+  if (/\bwarning\b/i.test(event)) return "warning";
+  if (/\bwatch\b/i.test(event)) return "watch";
+  return "advisory";
+}
+
 function isWarningEvent(event = "") {
   return /\bwarning\b/i.test(event);
 }
@@ -1269,13 +1286,22 @@ function ecccSeverity(p) {
   return "Minor";
 }
 
+// The feed's id field embeds the publication batch, so the same alert gets a
+// brand-new id every time ECCC republishes the collection — which re-fired
+// foreground notifications for unchanged alerts. Build an id from fields that
+// only change when the alert itself is reissued.
+function ecccStableAlertId(p = {}) {
+  return ["eccc", p.alert_code || p.alert_name_en || "alert",
+    p.feature_name_en || "", p.validity_datetime || p.publication_datetime || ""].join("|");
+}
+
 // Canadian alert text shares one free-form format across event types, so no
 // hazard tags are derived for ECCC alerts (unlike NWS/IEM parameters).
 function normalizeEcccAlert(feature) {
   const p = feature.properties || {};
   const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
   return {
-    id: p.id || p.feature_id,
+    id: ecccStableAlertId(p),
     event,
     headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
     severity: ecccSeverity(p),
@@ -2747,6 +2773,21 @@ async function registerPushSubscription() {
       .filter(Boolean);
   } catch {}
 
+  // Skip the round-trip when this device already registered the identical
+  // subscription + location recently — every stored subscribe costs the
+  // worker a Workers KV write (only 1,000/day on the free plan), and the app
+  // re-subscribes on every launch.
+  const fingerprint = JSON.stringify({
+    endpoint: subscription.endpoint,
+    lat: selectedLocation.lat,
+    lon: selectedLocation.lon,
+    zones: nwsZones,
+  });
+  try {
+    const last = JSON.parse(localStorage.getItem("pushSubscribeState") || "null");
+    if (last?.fingerprint === fingerprint && Date.now() - last.at < 24 * 3600 * 1000) return true;
+  } catch {}
+
   const response = await fetch(PUSH_SUBSCRIBE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2756,6 +2797,7 @@ async function registerPushSubscription() {
     }),
   });
   if (!response.ok) throw new Error(`Push subscribe failed: ${response.status}`);
+  try { localStorage.setItem("pushSubscribeState", JSON.stringify({ fingerprint, at: Date.now() })); } catch {}
   return true;
 }
 
@@ -2914,9 +2956,12 @@ async function enableNotifications() {
       console.warn("Push subscription unavailable", error);
       return false;
     });
+    // Be honest when the background-push registration failed: "enabled"
+    // previously masked /subscribe errors, so users believed closed-app
+    // notifications were active when the server never stored the subscription.
     document.querySelector("#statusBadge").textContent = pushReady
       ? "Alert push notifications enabled"
-      : "Alert notifications enabled";
+      : "Alerts on while the app is open — background push setup failed, will retry on next launch";
   } else {
     document.querySelector("#statusBadge").textContent = "Alert notifications not enabled";
   }
@@ -4803,17 +4848,16 @@ function ecccAlertMapColor(p = {}) {
 // box reaches Canada (not just for Canadian locations) so US users panning
 // north of the border still see Canadian alerts.
 const ECCC_MAP_PROPERTIES = [
-  "id", "feature_id", "alert_type", "alert_name_en", "status_en",
+  "id", "feature_id", "alert_code", "alert_type", "alert_name_en", "status_en",
   "publication_datetime", "validity_datetime", "expiration_datetime",
   "event_end_datetime", "feature_name_en", "province", "risk_colour_en",
   "alert_text_en",
 ].join(",");
 
-async function ecccAlertMapFeatures(lat, lon) {
-  const d = 6;
-  const reachesCanada = lat + d >= 41.5 && lat - d <= 84 && lon + d >= -141.1 && lon - d <= -52.0;
+async function ecccAlertMapFeatures(box) {
+  const reachesCanada = box.north >= 41.5 && box.south <= 84 && box.east >= -141.1 && box.west <= -52.0;
   if (!reachesCanada) return [];
-  const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
+  const bbox = `${box.west},${box.south},${box.east},${box.north}`;
   const data = await getJson(
     `${ECCC_ALERTS_URL}?f=json&lang=en&bbox=${bbox}&limit=500&properties=${ECCC_MAP_PROPERTIES}`,
     { cache: "no-store" },
@@ -4833,6 +4877,7 @@ async function ecccAlertMapFeatures(lat, lon) {
         description: alert.description,
         areaDesc: alert.areaDesc,
         zoneName: feature.properties?.feature_name_en || "",
+        kind: alertKindFor(alert.event, feature.properties?.alert_type),
         fillColor: color.fill,
         lineColor: color.line,
         ecccAlert: true,
@@ -4849,11 +4894,10 @@ async function ecccAlertMapFeatures(lat, lon) {
 const NWS_WWA_QUERY_URL = "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer/1/query";
 const WWA_SIG_SEVERITY = { W: "Severe", A: "Moderate", Y: "Minor", S: "Minor" };
 
-async function nwsRegionalAlertFeatures(lat, lon) {
-  const d = 6;
+async function nwsRegionalAlertFeatures(box) {
   const params = new URLSearchParams({
     where: "1=1",
-    geometry: `${lon - d},${lat - d},${lon + d},${lat + d}`,
+    geometry: `${box.west},${box.south},${box.east},${box.north}`,
     geometryType: "esriGeometryEnvelope",
     inSR: "4326",
     outSR: "4326",
@@ -4878,6 +4922,7 @@ async function nwsRegionalAlertFeatures(lat, lon) {
         severity,
         expires: p.expiration || null,
         headline: event,
+        kind: alertKindFor(event),
         // CAP id (urn:oid:…) parsed from the alert URL, for deduping against
         // the richer point-query features covering the selected location.
         capId: String(p.url || "").split("/alerts/")[1] || "",
@@ -4888,17 +4933,50 @@ async function nwsRegionalAlertFeatures(lat, lon) {
   }).filter(Boolean);
 }
 
+// Box covering the current viewport (plus margin) for the regional alert
+// queries. Spans are clamped so continent-wide zooms don't request
+// multi-megabyte payloads; the moveend handler refetches once the view
+// leaves the fetched box.
+function desiredAlertFetchBox() {
+  if (!radarMap || !mapLoaded) {
+    return {
+      west: selectedLocation.lon - 6, south: selectedLocation.lat - 6,
+      east: selectedLocation.lon + 6, north: selectedLocation.lat + 6,
+    };
+  }
+  const bounds = radarMap.getBounds();
+  const margin = 2, maxSpan = 24;
+  let west = bounds.getWest() - margin, east = bounds.getEast() + margin;
+  let south = bounds.getSouth() - margin, north = bounds.getNorth() + margin;
+  if (east - west > maxSpan) {
+    const center = (west + east) / 2;
+    west = center - maxSpan / 2;
+    east = center + maxSpan / 2;
+  }
+  if (north - south > maxSpan) {
+    const center = (south + north) / 2;
+    south = center - maxSpan / 2;
+    north = center + maxSpan / 2;
+  }
+  return { west, south: Math.max(south, -85), east, north: Math.min(north, 85) };
+}
+
+function boxContains(outer, inner) {
+  return !!outer && inner.west >= outer.west && inner.east <= outer.east &&
+    inner.south >= outer.south && inner.north <= outer.north;
+}
+
 async function nwsAlertFeatureCollection() {
   const loc = selectedLocation;
-  // Center the regional bbox queries on what the map is actually showing so
-  // panning away from the selected location still surfaces alerts; the
+  // Fetch the regional queries for what the map is actually showing (plus
+  // margin) so panning anywhere on the continent surfaces alerts; the
   // moveend handler in addAlertsLayer refetches once the view leaves the box.
-  const center = radarMap && mapLoaded ? radarMap.getCenter() : { lat: loc.lat, lng: loc.lon };
-  alertFetchCenter = { lat: center.lat, lon: center.lng };
+  const box = desiredAlertFetchBox();
+  alertFetchBox = box;
   const [nwsResult, ecccResult, wwaResult] = await Promise.allSettled([
     getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" }),
-    ecccAlertMapFeatures(center.lat, center.lng),
-    nwsRegionalAlertFeatures(center.lat, center.lng),
+    ecccAlertMapFeatures(box),
+    nwsRegionalAlertFeatures(box),
   ]);
   const data = nwsResult.status === "fulfilled" ? nwsResult.value : { features: [] };
   const features = ecccResult.status === "fulfilled" ? [...ecccResult.value] : [];
@@ -4914,11 +4992,12 @@ async function nwsAlertFeatureCollection() {
     // county/zone warnings, watches, and advisories all render here.
     if (isStormBasedWarning(p.event || "")) continue;
     const color = nwsAlertColor(p.event || "", p.severity || "");
+    const kind = alertKindFor(p.event || "");
     if (feature.geometry) {
       features.push({
         type: "Feature",
         geometry: feature.geometry,
-        properties: { ...p, fillColor: color.fill, lineColor: color.line },
+        properties: { ...p, kind, fillColor: color.fill, lineColor: color.line },
       });
       continue;
     }
@@ -4933,6 +5012,7 @@ async function nwsAlertFeatureCollection() {
         geometry,
         properties: {
           ...p,
+          kind,
           fillColor: color.fill,
           lineColor: color.line,
           zoneName: result.value?.properties?.name || "",
@@ -5022,17 +5102,20 @@ async function addAlertsLayer() {
   if (iemResult.status === "fulfilled") alertPolygonData = iemResult.value;
   if (nwsResult.status === "fulfilled") nwsAlertPolygonData = nwsResult.value;
   if (!radarMap || !mapLoaded) return; // map may have been torn down mid-fetch
-  // A concurrent call (pan refresh racing a redraw) may have added the layers
-  // while this one awaited the fetches — adding the same source twice throws.
-  if (radarMap.getSource("alerts-source") || radarMap.getSource("nws-alerts-source")) return;
-  const data = alertPolygonData;
-  const hasIemAlerts = !!data?.features?.length;
-  const hasNwsAlerts = !!nwsAlertPolygonData?.features?.length;
-  if (!hasIemAlerts && !hasNwsAlerts) return;
 
-  // Color by phenomena type
-  if (hasIemAlerts) {
-    radarMap.addSource("alerts-source", { type: "geojson", data });
+  // Update sources in place when they already exist: setData swaps the
+  // features without unmounting the layer, so pan refetches never blink.
+  // Always feed existing sources — even an empty set — so stale polygons
+  // clear when panning into a quiet region. Sources are only created once
+  // there is something to draw.
+  const emptyCollection = { type: "FeatureCollection", features: [] };
+
+  const iemData = alertPolygonData || emptyCollection;
+  const iemSource = radarMap.getSource("alerts-source");
+  if (iemSource) {
+    iemSource.setData(iemData);
+  } else if (iemData.features?.length) {
+    radarMap.addSource("alerts-source", { type: "geojson", data: iemData });
     radarMap.addLayer({
       id: "alerts-fill",
       type: "fill",
@@ -5059,8 +5142,12 @@ async function addAlertsLayer() {
     });
   }
 
-  if (hasNwsAlerts) {
-    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsAlertPolygonData });
+  const nwsData = nwsAlertPolygonData || emptyCollection;
+  const nwsSource = radarMap.getSource("nws-alerts-source");
+  if (nwsSource) {
+    nwsSource.setData(nwsData);
+  } else if (nwsData.features?.length) {
+    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData });
     radarMap.addLayer({
       id: "nws-alerts-fill",
       type: "fill",
@@ -5081,34 +5168,31 @@ async function addAlertsLayer() {
     });
   }
 
-  // Cursor changes only — clicks handled by wireUnifiedClickHandler()
-  if ((hasIemAlerts || hasNwsAlerts) && !popupWiredLayers.has("all-alerts")) {
-    const alertCursorLayers = [
-      ...(hasIemAlerts ? ["alerts-fill"] : []),
-      ...(hasNwsAlerts ? ["nws-alerts-fill"] : []),
-    ];
-    alertCursorLayers.forEach(layer => {
+  applyAlertKindFilter();
+
+  // Cursor changes only — clicks handled by wireUnifiedClickHandler().
+  // Mapbox delegates layer events by id, so wiring before a layer exists is
+  // safe and survives layer re-creation across redraws.
+  if (!popupWiredLayers.has("all-alerts")) {
+    ["alerts-fill", "nws-alerts-fill"].forEach(layer => {
       radarMap.on("mouseenter", layer, () => { radarMap.getCanvas().style.cursor = "pointer"; });
       radarMap.on("mouseleave", layer, () => { radarMap.getCanvas().style.cursor = ""; });
     });
     popupWiredLayers.add("all-alerts");
   }
 
-  // Refetch the zone/ECCC alert polygons once the camera leaves the ±6° box
-  // they were fetched for, so panning across the continent (or over the
-  // Canadian border) keeps the overlay populated.
+  // Refetch the zone/ECCC alert polygons once the camera leaves the box they
+  // were fetched for, so panning across the continent (or over the Canadian
+  // border) keeps the overlay populated. The layers stay mounted while the
+  // new data loads — setData above swaps it in without a visible gap.
   if (!popupWiredLayers.has("alerts-pan-refresh")) {
     radarMap.on("moveend", async () => {
-      if (!activeOverlays.has("Alerts") || !alertFetchCenter || alertPanRefreshInFlight) return;
-      if (!radarMap || !mapLoaded) return;
-      const c = radarMap.getCenter();
-      const moved = Math.max(Math.abs(c.lat - alertFetchCenter.lat), Math.abs(c.lng - alertFetchCenter.lon));
-      if (moved < 3) return; // still well inside the fetched box
+      if (!activeOverlays.has("Alerts") || alertPanRefreshInFlight) return;
+      if (!radarMap || !mapLoaded || !alertFetchBox) return;
+      if (boxContains(alertFetchBox, desiredAlertFetchBox())) return;
       alertPanRefreshInFlight = true;
       try {
         nwsAlertPolygonData = null;
-        ["alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line"].forEach(removeMapLayer);
-        ["alerts-source", "nws-alerts-source"].forEach(removeMapSource);
         await addAlertsLayer();
       } catch (e) {
         console.warn("Alert overlay refresh failed", e);
@@ -5118,6 +5202,21 @@ async function addAlertsLayer() {
     });
     popupWiredLayers.add("alerts-pan-refresh");
   }
+}
+
+// Apply the active warning/watch/advisory filter to the alert layers without
+// refetching. The IEM storm-based polygons are warnings by definition, so
+// they simply hide unless warnings are visible.
+function applyAlertKindFilter() {
+  if (!radarMap || !mapLoaded) return;
+  const kindFilter = activeAlertFilter === "all" ? null : ["==", ["get", "kind"], activeAlertFilter];
+  ["nws-alerts-fill", "nws-alerts-line"].forEach(id => {
+    if (radarMap.getLayer(id)) radarMap.setFilter(id, kindFilter);
+  });
+  const iemVisible = activeAlertFilter === "all" || activeAlertFilter === "warning";
+  ["alerts-fill", "alerts-line"].forEach(id => {
+    if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", iemVisible ? "visible" : "none");
+  });
 }
 
 async function addDroughtLayer() {
@@ -5254,6 +5353,12 @@ function renderLayers() {
     if (activeOverlays.has("Fire Wx")) renderFireWxSubControls();
   }
 
+  const alertCtrl = document.querySelector("#alertSubControls");
+  if (alertCtrl) {
+    alertCtrl.hidden = !activeOverlays.has("Alerts");
+    if (activeOverlays.has("Alerts")) renderAlertSubControls();
+  }
+
   const satCtrl = document.querySelector("#satelliteSubControls");
   if (satCtrl) {
     satCtrl.hidden = !satelliteActive;
@@ -5311,6 +5416,24 @@ function renderSpcSubControls() {
 
   // Update SPC legend
   renderSpcLegend();
+}
+
+function renderAlertSubControls() {
+  const el = document.querySelector("#alertFilterBtns");
+  if (!el) return;
+  const kinds = [["all", "All"], ["warning", "Warnings"], ["watch", "Watches"], ["advisory", "Advisories"]];
+  el.innerHTML = kinds.map(([id, label]) =>
+    `<button type="button" data-alert-kind="${id}" class="${id === activeAlertFilter ? "active" : ""}">${label}</button>`
+  ).join("");
+  el.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeAlertFilter = btn.dataset.alertKind;
+      localStorage.setItem("alertKindFilter", activeAlertFilter);
+      renderAlertSubControls();
+      // Layer filter only — no refetch or redraw needed.
+      applyAlertKindFilter();
+    });
+  });
 }
 
 function renderWpcSubControls() {
