@@ -36,4 +36,6 @@ const PUSH_SUBSCRIBE_ENDPOINT = "https://your-service.example.com/subscribe";
 
 The subscribe endpoint should accept JSON containing `subscription` and `location`, store it, and use that subscription when your scheduled alert checker sends Web Push messages.
 
+The matching `/unsubscribe` endpoint accepts JSON containing the subscription `endpoint` and deletes the stored record. The Alerts button in the top bar toggles: while notifications are enabled it shows "Alerts On" with a green indicator, and clicking it again unsubscribes the device and stops both push and in-app notifications.
+
 For iPhone/iPad, the user must install the site to the Home Screen first, open it from that icon, then tap the Alerts button and allow notifications. Normal Safari tabs cannot receive Web Push the same way an installed web app can.

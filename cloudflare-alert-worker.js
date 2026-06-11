@@ -57,6 +57,19 @@ export default {
       }
     }
 
+    if (url.pathname === "/unsubscribe" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const endpoint = body?.endpoint || body?.subscription?.endpoint;
+        if (!endpoint) return json({ ok: false, error: "Missing endpoint" }, 400);
+        const key = await subscriptionKey(endpoint);
+        await env.SUBSCRIPTIONS.delete(key);
+        return json({ ok: true });
+      } catch (e) {
+        return json({ ok: false, error: `Unsubscribe failed: ${e.message}` }, 503);
+      }
+    }
+
     if (url.pathname === "/check-now") {
       const stats = await checkSubscriptions(env);
       return json({ ok: !stats.errors.length, ...stats });
