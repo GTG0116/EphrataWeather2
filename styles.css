@@ -55,10 +55,22 @@ html {
      out of it, and using the bottom color left a visibly darker flat strip
      across the very top of the app. */
   background-color: var(--sky-0, #075985);
-  background-image: linear-gradient(160deg,
+  background-image: linear-gradient(to bottom right,
     var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
   background-repeat: no-repeat;
+  /* Pin the fallback gradient to the viewport rather than stretching it over
+     the full (very tall) scroll height. Without this, background-size:100% 100%
+     spread the three color stops across thousands of pixels, so any spot the
+     fixed canvas momentarily failed to cover — the status-bar band up top, the
+     home-indicator band at the bottom, or an iOS rubber-band overscroll —
+     exposed a locally flat, single-color slice of that stretched gradient
+     instead of the vibrant animated scene. Sizing it to the viewport and
+     fixing the attachment makes the exposed fallback mirror the canvas's full
+     diagonal gradient (matching createLinearGradient(0,0,w,h) → to bottom
+     right), so the background reads as continuous in those spots. */
+  background-attachment: fixed;
   background-size: 100% 100%;
+  background-position: center;
 }
 
 body {
@@ -121,18 +133,20 @@ body[data-condition="winter"] {
 
 #atmosphereCanvas {
   position: fixed;
-  /* Bleed 100px past the top and bottom of the screen. On iOS 26/27
+  /* Bleed 220px past the top and bottom of the screen. On iOS 26/27
      standalone web apps the fixed-position viewport can start below the
-     status bar (and dvh/lvh can exclude the safe areas), which left an
-     uncovered band of flat body color across the status-bar buffer.
-     Overshooting the viewport keeps the canvas under the status bar and
-     home indicator no matter how the viewport is resolved; the extra
-     gradient just renders offscreen. */
-  top: -100px;
+     status bar (and dvh/lvh can exclude the safe areas), and momentum /
+     rubber-band overscroll can briefly pull the page well past either edge —
+     which left an uncovered band of flat fallback color across the status-bar
+     buffer and home indicator. A generous overshoot keeps the canvas under
+     the status bar and home indicator no matter how the viewport is resolved
+     or how far an overscroll bounces; the extra gradient just renders
+     offscreen. */
+  top: -220px;
   left: 0;
   width: 100vw;
-  height: calc(100vh + 200px);
-  height: calc(100lvh + 200px);
+  height: calc(100vh + 440px);
+  height: calc(100lvh + 440px);
   /* Never use a negative z-index here: iOS Safari (and standalone web apps)
      intermittently composite negative z-index fixed elements behind the
      document background, which made the animated gradient vanish — leaving
@@ -155,7 +169,7 @@ body::after {
   /* Overshoot the viewport top/bottom like #atmosphereCanvas so the glow
      overlay also covers the iOS status-bar and home-indicator regions.
      Sits above the canvas (z-index 0) but below the content shell (2). */
-  inset: -100px 0;
+  inset: -220px 0;
   z-index: 1;
   background:
     radial-gradient(circle at 80% 12%, var(--glow), transparent 28rem),

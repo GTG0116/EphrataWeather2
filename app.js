@@ -797,6 +797,24 @@ function hourFwi(hour) {
   });
 }
 
+// Forecast-day humidity for a given daily index. NWS forecast periods don't
+// carry per-day relative humidity, so we pull the Open-Meteo daily mean for
+// that day (stored in dailyExtras). The current observation is only used as a
+// last resort — it describes right now, not a forecast 3–4 days out, so it must
+// never be the primary source for future days.
+function dailyHumidity(extras, index) {
+  const forecast = extras?.relative_humidity_2m_mean?.[index];
+  if (forecast != null) return Math.round(forecast);
+  return weatherState.current?.humidity ?? null;
+}
+
+// Forecast-day peak wind gust, again preferring Open-Meteo's daily forecast
+// over anything tied to the current observation.
+function dailyGust(extras, index) {
+  const forecast = extras?.wind_gusts_10m_max?.[index];
+  return forecast != null ? Math.round(forecast) : null;
+}
+
 async function searchLocations(query) {
   const data = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json`);
   return (data.results || []).map(item => ({
@@ -1506,7 +1524,7 @@ async function weatherPayload() {
   const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
-  const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
+  const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,wind_gusts_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
   const [forecast, hourly, stations, alertsData, openMeteo, airQuality, pollen, astronomy, tempest] = await Promise.all([
     getJson(props.forecast),
     getJson(props.forecastHourly),
@@ -1593,7 +1611,7 @@ async function openMeteoWeatherPayload() {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index` +
     `&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility` +
-    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min` +
+    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean` +
     `&temperature_unit=fahrenheit&wind_speed_unit=mph&forecast_days=8&timeformat=unixtime&timezone=auto`;
   const data = await getJson(url);
   selectedLocation.timezone = data.timezone || loc.timezone || "America/New_York";
@@ -1678,6 +1696,8 @@ async function openMeteoWeatherPayload() {
       apparent_temperature_max: di.apparent_temperature_max || [],
       apparent_temperature_min: di.apparent_temperature_min || [],
       uv_index_max: di.uv_index_max || [],
+      relative_humidity_2m_mean: di.relative_humidity_2m_mean || [],
+      wind_gusts_10m_max: di.wind_gusts_10m_max || [],
     },
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "Unavailable",
@@ -3206,8 +3226,9 @@ function renderDaily() {
   const pollenForecast = weatherState.pollenForecast || [];
   dailyGrid.innerHTML = days.map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
-    const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, numericWind(day.windSpeed));
-    const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, numericWind(night.windSpeed)) : null);
+    const dayHumidity = dailyHumidity(extras, index);
+    const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, dayHumidity, numericWind(day.windSpeed));
+    const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, dayHumidity, numericWind(night.windSpeed)) : null);
     const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
     // Derive the month from the period name or fall back to current month
@@ -3216,9 +3237,9 @@ function renderDaily() {
     const windSpeed  = numericWind(day.windSpeed) || null;
     const fwi = FWI.calculate({
       temp:        day.temperature,
-      humidity:    weatherState.current?.humidity,
+      humidity:    dayHumidity,
       wind:        windSpeed,
-      gust:        null,
+      gust:        dailyGust(extras, index),
       precipChance: precip,
       month:       dayMonth,
     });
@@ -3350,8 +3371,10 @@ function showDailyDetails(index) {
   const precipDay = day.probabilityOfPrecipitation?.value;
   const precipNight = night?.probabilityOfPrecipitation?.value;
   const precip = precipDay ?? precipNight;
-  const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, numericWind(day.windSpeed));
-  const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, numericWind(night.windSpeed)) : null);
+  const dayHumidity = dailyHumidity(extras, index);
+  const dayGust = dailyGust(extras, index);
+  const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, dayHumidity, numericWind(day.windSpeed));
+  const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, dayHumidity, numericWind(night.windSpeed)) : null);
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
   const windDay = numericWind(day.windSpeed);
   const windNight = night ? numericWind(night.windSpeed) : null;
@@ -3359,9 +3382,9 @@ function showDailyDetails(index) {
   const periodDate = day.startTime ? new Date(day.startTime) : new Date();
   const fwi = FWI.calculate({
     temp: day.temperature,
-    humidity: weatherState.current?.humidity,
+    humidity: dayHumidity,
     wind: windDay,
-    gust: null,
+    gust: dayGust,
     precipChance: precip,
     month: periodDate.getMonth(),
   });
@@ -3445,8 +3468,10 @@ function showDailyDetails(index) {
         ${fwiBreakdownHtml(fwi, {
           temp: day.temperature != null ? `high near ${uTempNum(day.temperature)}°` : null,
           precip: precip != null ? `${f(precip)}% chance` : null,
-          wind: windDay != null ? fmtWind(windDay) : null,
-          humidity: weatherState.current?.humidity != null ? `~${f(weatherState.current.humidity)}% (current)` : null,
+          wind: windDay != null ? `${fmtWind(windDay)}${dayGust != null ? `, gusts ${fmtWind(dayGust)}` : ""}` : null,
+          humidity: dayHumidity != null
+            ? `~${f(dayHumidity)}%${extras.relative_humidity_2m_mean?.[index] != null ? " forecast" : " (current)"}`
+            : null,
           cloud: null,
         })}
       </div>
