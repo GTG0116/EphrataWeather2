@@ -6,6 +6,7 @@ const RADAR_FRAME_MS = 700;
 // Fill these after deploying the alert worker described in NOTIFICATIONS.md.
 const PUSH_PUBLIC_KEY = "BAHwhEIc4YhZIWcWJVcPiDWzAPijunUm93TaX7x8dHi_T9Q5CJTap4ewTV7ri5GYzRgFRRRnFTDuziH0_yK6Gi0";
 const PUSH_SUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/subscribe";
+const PUSH_UNSUBSCRIBE_ENDPOINT = "https://weather-alert-worker.gtg0116scratch.workers.dev/unsubscribe";
 const WORKER_PROXY = "https://weather-alert-worker.gtg0116scratch.workers.dev/proxy?url=";
 // Tempest (WeatherFlow) personal weather station serving the Ephrata, PA area.
 // Current conditions for these towns are sourced from this station instead of NWS.
@@ -935,7 +936,7 @@ async function chooseLocation(location) {
   }
   await refreshLiveData();
   try { localStorage.setItem("weatherLastLocation", JSON.stringify(selectedLocation)); } catch {}
-  if (notificationSupported() && Notification.permission === "granted") {
+  if (notificationsEnabled()) {
     registerPushSubscription().catch(e => console.warn("Push location update failed", e));
   }
 }
@@ -2696,6 +2697,17 @@ function notificationSupported() {
   return "Notification" in window && "serviceWorker" in navigator;
 }
 
+// Browsers can't revoke Notification.permission from script, so "off" is a
+// local opt-out flag: it silences in-app notifications and removes the push
+// subscription while leaving the browser permission granted for re-enabling.
+function notificationsOptedOut() {
+  return localStorage.getItem("alertNotificationsOff") === "1";
+}
+
+function notificationsEnabled() {
+  return notificationSupported() && Notification.permission === "granted" && !notificationsOptedOut();
+}
+
 function pushSupported() {
   return notificationSupported() && "PushManager" in window;
 }
@@ -2719,10 +2731,17 @@ function setNotifyButtonState() {
   }
   if (isIOSDevice() && !isStandaloneMode()) {
     notifyButton.disabled = false;
+    notifyButton.classList.remove("subscribed");
     notifyButtonText.textContent = "Alerts";
     return;
   }
-  notifyButtonText.textContent = Notification.permission === "granted" ? "Alerts On" : "Alerts";
+  const on = notificationsEnabled();
+  notifyButton.classList.toggle("subscribed", on);
+  notifyButtonText.textContent = on ? "Alerts On" : "Alerts";
+  const hint = on ? "Notifications enabled — click to turn off" : "Enable weather alert notifications";
+  notifyButton.title = hint;
+  notifyButton.setAttribute("aria-label", hint);
+  notifyButton.setAttribute("aria-pressed", on ? "true" : "false");
 }
 
 function urlBase64ToUint8Array(value) {
@@ -2807,7 +2826,7 @@ function rememberCurrentAlerts() {
 }
 
 async function showAlertNotification(alert) {
-  if (!notificationSupported() || Notification.permission !== "granted") return;
+  if (!notificationsEnabled()) return;
   const title = alertDisplayEvent(alert);
   const body = alert.headline || alert.description || `New alert for ${selectedLocation.name}`;
   const options = {
@@ -2837,7 +2856,7 @@ async function syncPushShownAlerts() {
 }
 
 function notifyNewWeatherAlerts() {
-  if (!notificationSupported() || Notification.permission !== "granted") return;
+  if (!notificationsEnabled()) return;
   const alerts = weatherState.alerts || [];
   const storedIds = localStorage.getItem("weatherSeenAlertIds");
   const currentIds = alerts.map(alertNotificationId).filter(Boolean);
@@ -2853,7 +2872,7 @@ function notifyNewWeatherAlerts() {
 }
 
 function checkMorningOutlookNotification() {
-  if (!notificationSupported() || Notification.permission !== "granted") return;
+  if (!notificationsEnabled()) return;
 
   const tz = selectedLocation.timezone || "America/New_York";
   const now = new Date();
@@ -2935,6 +2954,34 @@ function scheduleMorningNotificationCheck() {
   }, minutesUntil7am * 60 * 1000);
 }
 
+async function disableNotifications() {
+  localStorage.setItem("alertNotificationsOff", "1");
+  localStorage.removeItem("pushSubscribeState");
+  setNotifyButtonState();
+  document.querySelector("#statusBadge").textContent = "Alert notifications turned off";
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration?.pushManager?.getSubscription();
+    if (subscription) {
+      // Tell the worker to drop the stored record so background pushes stop,
+      // then release the browser-side subscription.
+      fetch(PUSH_UNSUBSCRIBE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+      }).catch(() => {});
+      await subscription.unsubscribe().catch(() => false);
+    }
+  } catch (error) {
+    console.warn("Push unsubscribe failed", error);
+  }
+}
+
+async function toggleNotifications() {
+  if (notificationsEnabled()) return disableNotifications();
+  return enableNotifications();
+}
+
 async function enableNotifications() {
   if (!notificationSupported()) {
     document.querySelector("#statusBadge").textContent = "Notifications unavailable in this browser";
@@ -2949,6 +2996,7 @@ async function enableNotifications() {
   if (permission !== "granted") {
     permission = await Notification.requestPermission();
   }
+  if (permission === "granted") localStorage.removeItem("alertNotificationsOff");
   setNotifyButtonState();
   if (permission === "granted") {
     rememberCurrentAlerts();
@@ -2983,7 +3031,7 @@ async function registerAppWorker() {
         });
       }
     });
-    if (notificationSupported() && Notification.permission === "granted") {
+    if (notificationsEnabled()) {
       registerPushSubscription().catch(e => console.warn("Startup push re-subscribe failed", e));
     }
   } catch (error) {
@@ -3084,13 +3132,14 @@ function renderDaily() {
       <div class="daily-badge-row">
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
-      <div class="daily-range">${uTempNum(day.temperature)}° / ${night ? uTempNum(night.temperature) : "--"}°</div>
+      <div class="daily-range">${uTempNum(day.temperature)}°<span class="daily-range-low"> / ${night ? uTempNum(night.temperature) : "--"}°</span></div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
       <div class="daily-chip-row">
-        <span>${f(precip)}% precip</span>
-        <span>Feels ${uTempNum(feelsHigh)}° / ${uTempNum(feelsLow)}°</span>
-        <span>UV ${f(uv, 1)}</span>
-        ${pollenForecast[index] ? `<span class="pollen-chip" title="${safeText(pollenForecast[index].detail || '')}"><svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3m-2.6-7.4-2.1 2.1M9.7 14.3l-2.1 2.1m9.8 0-2.1-2.1M9.7 9.7 7.6 7.6"/></svg> ${safeText(pollenForecast[index].label)}</span>` : ""}
+        <span class="chip-precip">${uiIcon("precip")}${f(precip)}%</span>
+        <span>${uiIcon("temp")}Feels ${uTempNum(feelsHigh)}°/${uTempNum(feelsLow)}°</span>
+        ${windSpeed != null ? `<span>${uiIcon("wind")}${safeText(`${day.windDirection || ""} ${fmtWind(windSpeed)}`.trim())}</span>` : ""}
+        <span class="chip-uv">${uiIcon("uv")}UV ${f(uv, 1)}</span>
+        ${pollenForecast[index] ? `<span class="pollen-chip" title="${safeText(pollenForecast[index].detail || '')}">${uiIcon("pollen")}${safeText(pollenForecast[index].label)}</span>` : ""}
       </div>
     </button>
   `;
@@ -3126,59 +3175,108 @@ function showDailyDetails(index) {
   const { day, night } = pairs[index] || {};
   if (!day) return;
   const extras = weatherState.dailyExtras || {};
-  const precip = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
+  const precipDay = day.probabilityOfPrecipitation?.value;
+  const precipNight = night?.probabilityOfPrecipitation?.value;
+  const precip = precipDay ?? precipNight;
   const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, weatherState.current?.humidity, numericWind(day.windSpeed));
   const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, weatherState.current?.humidity, numericWind(night.windSpeed)) : null);
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
+  const windDay = numericWind(day.windSpeed);
+  const windNight = night ? numericWind(night.windSpeed) : null;
 
-  const rows = [
-    ["High / Low", `${fmtTemp(day.temperature)} / ${night ? fmtTemp(night.temperature) : "--"}`, "temp"],
-    ["Feels Like", `${fmtTemp(feelsHigh)} / ${fmtTemp(feelsLow)}`, "temp"],
-    ["Precipitation Chance", `${f(precip)}%`, "precip"],
-    ["UV Index", f(uv, 1), "uv"],
-    ["Day Wind", `${day.windDirection || ""} ${numericWind(day.windSpeed) != null ? fmtWind(numericWind(day.windSpeed)) : "not reported"}`.trim(), "wind"],
-    ["Night Wind", night && numericWind(night.windSpeed) != null ? `${night.windDirection || ""} ${fmtWind(numericWind(night.windSpeed))}`.trim() : "Not reported", "wind"],
-    ["Night", night?.shortForecast || "Not reported", "cloud"],
-    ["Sunrise", weatherState.astronomy?.sunrise || "--", "sunrise"],
-    ["Sunset", weatherState.astronomy?.sunset || "--", "sunset"],
-  ];
+  const periodDate = day.startTime ? new Date(day.startTime) : new Date();
+  const fwi = FWI.calculate({
+    temp: day.temperature,
+    humidity: weatherState.current?.humidity,
+    wind: windDay,
+    gust: null,
+    precipChance: precip,
+    month: periodDate.getMonth(),
+  });
 
+  const periodCard = (label, icon, period, wind, precipPct) => `
+    <div class="dn-card">
+      <div class="dn-head"><span class="dn-label">${safeText(label)}</span>${icon}</div>
+      <p class="dn-cond">${safeText(period.shortForecast || "Not reported")}</p>
+      <div class="dn-rows">
+        <span>${uiIcon("wind")} ${safeText(`${period.windDirection || ""} ${wind != null ? fmtWind(wind) : "Calm"}`.trim())}</span>
+        <span>${uiIcon("precip")} ${f(precipPct ?? 0)}% precip</span>
+      </div>
+    </div>`;
+
+  const statChip = (icon, label, value) => `
+    <div class="day-modal-stat">${uiIcon(icon)}<div><small>${safeText(label)}</small><strong>${value}</strong></div></div>`;
+
+  // Hazard outlook callouts (SPC severe / WPC excessive rain) for nearby days.
+  const risks = [];
   if (index < 3) {
     const spcDay = weatherState.spcDays?.[index];
     const catLabel = spcDay?.catLabel || null;
     if (catLabel === "TSTM") {
-      rows.push(["Severe Weather Risk", `General thunderstorm area — SPC Day ${index + 1}`, "severe"]);
+      risks.push({ color: spcRiskColor(catLabel) || "#94d894", icon: "severe",
+        title: "General thunderstorms possible", sub: `SPC Day ${index + 1} convective outlook` });
     } else if (catLabel) {
-      rows.push(["Severe Weather Risk", `${spcLabel(catLabel)} — SPC Day ${index + 1}`, "severe"]);
-      if (spcDay.tornado != null) {
-        const desc = spcThreatText("tornado", spcDay.tornCig);
-        rows.push(["Tornado", desc ? `${desc} (${spcDay.tornado}% probability)` : `${spcDay.tornado}% probability`, "severe"]);
-      }
-      if (spcDay.wind != null) {
-        const desc = spcThreatText("wind", spcDay.windCig);
-        rows.push(["Wind", desc ? `${desc} (${spcDay.wind}% probability)` : `${spcDay.wind}% probability`, "wind"]);
-      }
-      if (spcDay.hail != null) {
-        const desc = spcThreatText("hail", spcDay.hailCig);
-        rows.push(["Hail", desc ? `${desc} (${spcDay.hail}% probability)` : `${spcDay.hail}% probability`, "precip"]);
-      }
+      const threats = [];
+      if (spcDay.tornado != null) threats.push(`Tornado ${spcDay.tornado}%`);
+      if (spcDay.wind != null) threats.push(`Damaging wind ${spcDay.wind}%`);
+      if (spcDay.hail != null) threats.push(`Large hail ${spcDay.hail}%`);
+      risks.push({ color: spcRiskColor(catLabel) || "#fbbf24", icon: "severe",
+        title: `${spcLabel(catLabel)} risk of severe storms`,
+        sub: `SPC Day ${index + 1} outlook${threats.length ? ` — ${threats.join(" · ")}` : ""}` });
     }
   }
-
   if (index < 5) {
     const wpcDay = weatherState.wpcDays?.[index];
-    const wpcLabel = wpcDay?.label || null;
-    if (wpcLabel) {
+    if (wpcDay?.label) {
       const wpcNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
-      rows.push(["Excessive Rainfall Risk", `${wpcNames[wpcLabel] || wpcLabel} — WPC Day ${index + 1}`, "precip"]);
+      risks.push({ color: spcRiskColor(wpcDay.label) || "#60a5fa", icon: "precip",
+        title: `${wpcNames[wpcDay.label] || wpcDay.label} risk of excessive rainfall`,
+        sub: `WPC Day ${index + 1} excessive rainfall outlook` });
     }
   }
+  const riskHtml = risks.length ? `<div class="day-modal-risks">${risks.map(risk => `
+    <div class="day-modal-risk" style="border-color:${risk.color}55;background:${risk.color}14">
+      <span class="day-modal-risk-icon" style="color:${risk.color}">${uiIcon(risk.icon)}</span>
+      <div><strong style="color:${risk.color}">${safeText(risk.title)}</strong><small>${safeText(risk.sub)}</small></div>
+    </div>`).join("")}</div>` : "";
 
-  openDetails("Daily Forecast", day.name || "Forecast", rows, day.detailedForecast || day.shortForecast || "");
+  const discussion = [day.detailedForecast, night?.detailedForecast ? `Night: ${night.detailedForecast}` : ""]
+    .filter(Boolean);
 
-  // Inject weather icon next to the modal title after openDetails sets it
-  const iconHtml = weatherIcon(iconForCondition(day.shortForecast), true);
-  modalTitle.innerHTML = `${iconHtml}<span>${safeText(day.name || "Forecast")}</span>`;
+  modalEyebrow.textContent = "Daily Forecast";
+  modalTitle.innerHTML = `${weatherIcon(iconForCondition(day.shortForecast), true)}<span>${safeText(day.name || "Forecast")}</span>`;
+  modalBody.innerHTML = `
+    <div class="day-modal-hero">
+      <div class="day-modal-temps">
+        <span class="day-modal-high">${uTempNum(day.temperature)}°</span>
+        <span class="day-modal-low">/ ${night ? `${uTempNum(night.temperature)}°` : "--"}</span>
+      </div>
+      <div class="day-modal-hero-meta">
+        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>
+        <p>${safeText(fwi.sentence || "")}</p>
+      </div>
+    </div>
+    <div class="day-night-split">
+      ${periodCard("Day", weatherIcon(iconForCondition(day.shortForecast), true), day, windDay, precipDay)}
+      ${night ? periodCard("Night",
+        `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(night.shortForecast), true)}</span>`,
+        night, windNight, precipNight) : ""}
+    </div>
+    <div class="day-modal-stats">
+      ${statChip("temp", "Feels like", `${uTempNum(feelsHigh)}° / ${feelsLow != null ? `${uTempNum(feelsLow)}°` : "--"}`)}
+      ${statChip("uv", "UV index", f(uv, 1))}
+      ${statChip("sunrise", "Sunrise", safeText(weatherState.astronomy?.sunrise || "--"))}
+      ${statChip("sunset", "Sunset", safeText(weatherState.astronomy?.sunset || "--"))}
+    </div>
+    ${riskHtml}
+    ${discussion.length ? `
+      <div class="day-modal-text">
+        <span class="dn-label">Forecast Discussion</span>
+        ${discussion.map(text => `<p>${safeText(text)}</p>`).join("")}
+      </div>` : ""}
+  `;
+  detailModal.hidden = false;
+  document.body.classList.add("modal-open");
 }
 
 function parseAlertSections(text = "") {
@@ -4060,7 +4158,7 @@ async function addRadarLayer() {
     url: mrmsImgUrl(mrmsIdx),
     coordinates: coords,
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "mrms-layer",
     type: "raster",
     source: "mrms-source",
@@ -4095,7 +4193,7 @@ async function addSpcLayer() {
   const probLine = ["step", ["coalesce", ["get", "RISK_NUM"], 0], "rgba(0,0,0,0)"];
   spcProbStops(day, type).forEach(([p, c]) => { probFill.push(p, c); probLine.push(p, c); });
 
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "spc-fill",
     type: "fill",
     source: "spc-source",
@@ -4107,7 +4205,7 @@ async function addSpcLayer() {
       "fill-opacity": 0.46,
     },
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "spc-line",
     type: "line",
     source: "spc-source",
@@ -4125,7 +4223,7 @@ async function addSpcLayer() {
   //   CIG1 → dashed single lines, CIG2 → solid single lines, CIG3 → cross-hatch.
   ensureCigHatchImages();
   const cigFilter = ["in", ["upcase", ["coalesce", ["get", "LABEL"], ""]], ["literal", ["CIG1", "CIG2", "CIG3"]]];
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "spc-cig-fill",
     type: "fill",
     source: "spc-source",
@@ -4136,7 +4234,7 @@ async function addSpcLayer() {
       "fill-opacity": 0.95,
     },
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "spc-cig-line",
     type: "line",
     source: "spc-source",
@@ -4206,7 +4304,7 @@ async function addFireWeatherLayer() {
     };
   }
   radarMap.addSource("fire-source", { type: "geojson", data: fireWeatherDataCache[day] });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "fire-fill", type: "fill", source: "fire-source",
     paint: {
       "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
@@ -4215,7 +4313,7 @@ async function addFireWeatherLayer() {
       "fill-opacity": 0.44,
     },
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "fire-line", type: "line", source: "fire-source",
     paint: {
       "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
@@ -4238,7 +4336,7 @@ async function addWpcRainfallLayer() {
     wpcRainDataCache[day] = normalizeWpcEroData(await fetchOutlookGeoJson(WPC_ERO_URLS[day - 1]));
   }
   radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainDataCache[day] });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "wpc-rain-fill", type: "fill", source: "wpc-rain-source",
     paint: {
       "fill-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
@@ -4247,7 +4345,7 @@ async function addWpcRainfallLayer() {
       "fill-opacity": 0.46,
     },
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "wpc-rain-line", type: "line", source: "wpc-rain-source",
     paint: {
       "line-color": ["match", ["upcase", ["coalesce", ["get", "LABEL"], ""]],
@@ -4289,7 +4387,7 @@ async function addSurfaceAnalysisLayer() {
     tileSize: 256,
     attribution: "NOAA WPC Surface Analysis",
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "surface-layer", type: "raster", source: "surface-source",
     paint: { "raster-opacity": 0.85 },
   });
@@ -4401,12 +4499,47 @@ async function detectSatFrameCount() {
   return count;
 }
 
-// Lowest custom weather layer — satellite imagery is inserted beneath it so
-// radar/overlays always draw on top of the basemap imagery.
-function lowestWeatherLayerId() {
-  return ["mrms-layer", "wpc-rain-fill", "fire-fill", "drought-fill",
-          "spc-fill", "alerts-fill", "nws-alerts-fill", "surface-layer"]
-    .find(id => radarMap.getLayer(id));
+// Bottom→top stacking order for every custom weather layer. Alert fills sit
+// beneath the radar so precipitation stays readable through tinted polygons,
+// while the alert outlines ride above the radar so warned areas stay crisply
+// delineated. The whole stack is inserted beneath the basemap's boundary and
+// label layers (see basemapLabelAnchorId), keeping borders and town names
+// legible above all weather data.
+const WEATHER_LAYER_ORDER = [
+  "satellite-layer",
+  "drought-fill", "drought-line",
+  "fire-fill", "fire-line",
+  "wpc-rain-fill", "wpc-rain-line",
+  "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
+  "surface-layer",
+  "alerts-fill", "nws-alerts-fill",
+  "mrms-layer",
+  "alerts-line", "nws-alerts-line",
+  "lsr-hit",
+  "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track", "cyclones-points",
+];
+
+// First basemap boundary or label layer. Weather layers insert beneath it so
+// admin borders and place names always render on top of the weather stack.
+function basemapLabelAnchorId() {
+  const layers = radarMap.getStyle()?.layers || [];
+  const anchor = layers.find(layer =>
+    layer.type === "symbol" || (layer.type === "line" && /admin|boundary/.test(layer.id)));
+  return anchor?.id;
+}
+
+// Adds a weather layer at its WEATHER_LAYER_ORDER slot: before the next
+// already-mounted layer in the order, or before the basemap labels/borders
+// when it is currently the topmost weather layer.
+function addWeatherLayer(layerDef) {
+  let beforeId;
+  const idx = WEATHER_LAYER_ORDER.indexOf(layerDef.id);
+  if (idx !== -1) {
+    for (let i = idx + 1; i < WEATHER_LAYER_ORDER.length && !beforeId; i++) {
+      if (radarMap.getLayer(WEATHER_LAYER_ORDER[i])) beforeId = WEATHER_LAYER_ORDER[i];
+    }
+  }
+  radarMap.addLayer(layerDef, beforeId || basemapLabelAnchorId());
 }
 
 async function addSatelliteLayer() {
@@ -4425,14 +4558,14 @@ async function addSatelliteLayer() {
   if (radarMap.getSource("satellite-source")) return; // already present
 
   radarMap.addSource("satellite-source", { type: "image", url, coordinates: coords });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "satellite-layer", type: "raster", source: "satellite-source",
     paint: {
       "raster-opacity": radarOpacity,
       "raster-fade-duration": 300,
       "raster-resampling": "nearest", // no bilinear smoothing of source frames
     },
-  }, lowestWeatherLayerId());
+  });
 
   // Reflect satellite frames on the shared timeline when it owns the controls.
   if (satelliteActive) {
@@ -4636,26 +4769,26 @@ async function addCyclonesLayer() {
   }
 
   if (!radarMap.getLayer("cyclones-radii-fill")) {
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "cyclones-radii-fill", type: "fill", source: "cyclones-radii-source",
       paint: { "fill-color": ["get", "color"], "fill-opacity": ["get", "op"] },
     });
   }
   if (!radarMap.getLayer("cyclones-radii-line")) {
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "cyclones-radii-line", type: "line", source: "cyclones-radii-source",
       paint: { "line-color": ["get", "color"], "line-width": 1, "line-opacity": 0.45 },
     });
   }
   if (!radarMap.getLayer("cyclones-track")) {
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "cyclones-track", type: "line", source: "cyclones-track-source",
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": ["get", "color"], "line-width": 2.5, "line-opacity": 0.9, "line-dasharray": [2, 2] },
     });
   }
   if (!radarMap.getLayer("cyclones-points")) {
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "cyclones-points", type: "circle", source: "cyclones-points-source",
       paint: {
         "circle-radius": ["case", ["get", "isCurrent"], 8, 4],
@@ -4773,7 +4906,7 @@ async function addLsrLayer() {
   if (!features.length) return;
 
   radarMap.addSource("lsr-source", { type: "geojson", data: lsrData });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "lsr-hit",
     type: "circle",
     source: "lsr-source",
@@ -5116,7 +5249,7 @@ async function addAlertsLayer() {
     iemSource.setData(iemData);
   } else if (iemData.features?.length) {
     radarMap.addSource("alerts-source", { type: "geojson", data: iemData });
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "alerts-fill",
       type: "fill",
       source: "alerts-source",
@@ -5128,7 +5261,7 @@ async function addAlertsLayer() {
         "fill-opacity": 0.3,
       },
     });
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "alerts-line",
       type: "line",
       source: "alerts-source",
@@ -5148,7 +5281,7 @@ async function addAlertsLayer() {
     nwsSource.setData(nwsData);
   } else if (nwsData.features?.length) {
     radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData });
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "nws-alerts-fill",
       type: "fill",
       source: "nws-alerts-source",
@@ -5157,7 +5290,7 @@ async function addAlertsLayer() {
         "fill-opacity": 0.22,
       },
     });
-    radarMap.addLayer({
+    addWeatherLayer({
       id: "nws-alerts-line",
       type: "line",
       source: "nws-alerts-source",
@@ -5223,7 +5356,7 @@ async function addDroughtLayer() {
   droughtLayerData = droughtLayerData || normalizeDroughtData(await fetchDroughtGeoJson());
   if (!radarMap || !mapLoaded) return;
   radarMap.addSource("drought-source", { type: "geojson", data: droughtLayerData });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "drought-fill",
     type: "fill",
     source: "drought-source",
@@ -5234,7 +5367,7 @@ async function addDroughtLayer() {
       "fill-opacity": 0.5,
     },
   });
-  radarMap.addLayer({
+  addWeatherLayer({
     id: "drought-line",
     type: "line",
     source: "drought-source",
@@ -5957,7 +6090,7 @@ tabs.forEach(tab => {
 });
 
 refreshButton.addEventListener("click", refreshLiveData);
-notifyButton?.addEventListener("click", enableNotifications);
+notifyButton?.addEventListener("click", toggleNotifications);
 document.querySelector("#unitToggle")?.addEventListener("click", event => {
   // Clicking a specific side picks that system; clicking elsewhere just flips.
   const opt = event.target.closest(".unit-opt");

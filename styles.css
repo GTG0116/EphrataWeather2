@@ -68,9 +68,9 @@ body {
   color: var(--text);
   font-family: var(--font-sans);
   /* Keep the body transparent so the root gradient can paint iOS standalone
-     safe-area bands while the negative z-index canvas and glow remain visible
-     above it. Avoid background-attachment: fixed here — on iOS it composites
-     over negative z-index children and hides the animated canvas. */
+     safe-area bands beneath the canvas and glow layers. Avoid
+     background-attachment: fixed here — on iOS it composites unpredictably
+     with the fixed canvas layers. */
   background: transparent;
   overflow-x: hidden;
   transition: color 220ms ease;
@@ -133,7 +133,13 @@ body[data-condition="winter"] {
   width: 100vw;
   height: calc(100vh + 200px);
   height: calc(100lvh + 200px);
-  z-index: -2;
+  /* Never use a negative z-index here: iOS Safari (and standalone web apps)
+     intermittently composite negative z-index fixed elements behind the
+     document background, which made the animated gradient vanish — leaving
+     the flat fallback color showing through the top band and anywhere the
+     page scrolled. The canvas instead sits at z-index 0 with the page
+     content (.shell) raised above it. */
+  z-index: 0;
   /* Safari with the bottom address bar tints the exposed status-bar strip by
      sampling the background-color of fixed elements near the viewport edges —
      it ignores theme-color there and never samples canvas pixels, so without
@@ -147,9 +153,10 @@ body::after {
   content: "";
   position: fixed;
   /* Overshoot the viewport top/bottom like #atmosphereCanvas so the glow
-     overlay also covers the iOS status-bar and home-indicator regions. */
+     overlay also covers the iOS status-bar and home-indicator regions.
+     Sits above the canvas (z-index 0) but below the content shell (2). */
   inset: -100px 0;
-  z-index: -1;
+  z-index: 1;
   background:
     radial-gradient(circle at 80% 12%, var(--glow), transparent 28rem),
     radial-gradient(circle at 14% 85%, rgba(56, 189, 248, 0.18), transparent 24rem),
@@ -167,6 +174,10 @@ body[data-condition="fog"]::after {
 }
 
 .shell {
+  /* Raised above the fixed canvas (0) and glow overlay (1) so the page reads
+     normally while both background layers stay at non-negative z-index. */
+  position: relative;
+  z-index: 2;
   width: min(1440px, calc(100% - 32px));
   margin: 0 auto;
   padding: 28px 0 40px;
@@ -936,10 +947,49 @@ dd {
 }
 
 .daily-chip-row span {
-  padding: 5px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   background: rgba(2, 6, 23, 0.25);
+}
+
+/* Inline chip icons reuse uiIcon markup but drop its boxed treatment. */
+.daily-chip-row .ui-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--accent-2);
+}
+
+.daily-chip-row .ui-icon svg {
+  width: 11px;
+  height: 11px;
+  transform: none;
+}
+
+.daily-chip-row .chip-precip .ui-icon {
+  color: #7dd3fc;
+}
+
+.daily-chip-row .chip-uv .ui-icon {
+  color: var(--accent);
+}
+
+.daily-chip-row .pollen-chip .ui-icon {
+  color: #86efac;
+}
+
+.daily-range-low {
+  color: var(--muted);
+  font-size: 1.1rem;
+  font-weight: 700;
 }
 
 .pollen-chip {
@@ -1493,6 +1543,222 @@ dd {
   background: rgba(2, 6, 23, 0.28);
 }
 
+/* ── Daily forecast modal ── */
+.day-modal-hero {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin: 4px 0 16px;
+}
+
+.day-modal-temps {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.day-modal-high {
+  font-size: 2.6rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.day-modal-low {
+  color: var(--muted);
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+
+.day-modal-hero-meta {
+  min-width: 0;
+}
+
+.day-modal-hero-meta .fwi-badge {
+  font-size: 0.66rem;
+  padding: 3px 9px;
+  margin-bottom: 6px;
+}
+
+.day-modal-hero-meta p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.day-night-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.dn-card {
+  padding: 13px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.28);
+}
+
+.dn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dn-head .weather-icon {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.dn-label {
+  display: block;
+  color: var(--accent-2);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.dn-cond {
+  margin: 6px 0 10px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.dn-rows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.dn-rows span,
+.day-modal-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dn-rows .ui-icon,
+.day-modal-stat .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--accent-2);
+}
+
+.dn-rows .ui-icon svg,
+.day-modal-stat .ui-icon svg {
+  width: 12px;
+  height: 12px;
+  transform: none;
+}
+
+.day-modal-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.day-modal-stat {
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.28);
+}
+
+.day-modal-stat .ui-icon {
+  margin-top: 2px;
+}
+
+.day-modal-stat small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.day-modal-stat strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.92rem;
+}
+
+.day-modal-risks {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.day-modal-risk {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 10px;
+}
+
+.day-modal-risk-icon .ui-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin: 2px 0 0;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+.day-modal-risk-icon .ui-icon svg {
+  width: 15px;
+  height: 15px;
+  transform: none;
+}
+
+.day-modal-risk strong {
+  display: block;
+  font-size: 0.84rem;
+}
+
+.day-modal-risk small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.day-modal-text {
+  padding: 12px 14px;
+  border-left: 3px solid color-mix(in srgb, var(--accent-2) 55%, transparent);
+  border-radius: 0 10px 10px 0;
+  background: rgba(2, 6, 23, 0.24);
+}
+
+.day-modal-text p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
 @keyframes screenIn {
   from {
     opacity: 0;
@@ -1722,6 +1988,26 @@ dd {
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
+}
+
+/* Subscribed state — green treatment plus a status dot so it's obvious
+   notifications are already on (clicking again turns them off). */
+.notify-btn.subscribed {
+  color: #d1fae5;
+  border-color: color-mix(in srgb, #34d399 62%, transparent);
+  background: color-mix(in srgb, #34d399 20%, rgba(15, 23, 42, 0.36));
+}
+.notify-btn.subscribed::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.85);
+}
+.notify-btn.subscribed:hover {
+  box-shadow: 0 10px 24px color-mix(in srgb, #34d399 22%, transparent);
 }
 
 /* ── Map locate button overlay ────────────────────── */
