@@ -1092,20 +1092,22 @@ function filterMapColoredWarnings(data) {
   };
 }
 
+// Normalizes wind tag values from any source ("60", "60 MPH", "60 mph") to a
+// consistent lowercase "60 mph" so the same threat never renders twice in
+// mismatched casing.
 function formatWindTag(value) {
   const text = String(value || "").trim();
   if (!text) return null;
-  if (/mph/i.test(text)) return text;
   const number = text.match(/\d+(\.\d+)?/);
-  return number ? `${number[0]} mph` : text;
+  return number ? `${number[0]} mph` : text.toLowerCase();
 }
 
+// Same normalization for hail sizes ("1.75", '1.75"', "1.75 IN") → "1.75 in".
 function formatHailTag(value) {
   const text = String(value || "").trim();
   if (!text) return null;
-  if (/\bin\b|"/i.test(text)) return text.replace(/"/g, " in");
   const number = text.match(/\d+(\.\d+)?/);
-  return number ? `${number[0]} in` : text;
+  return number ? `${number[0]} in` : text.toLowerCase();
 }
 
 function severeDetectionTag(alert) {
@@ -1121,6 +1123,14 @@ function severeDetectionTag(alert) {
 
 function isDetectionTag(value) {
   return /observed|radar indicated/i.test(String(value || ""));
+}
+
+// Watches indicate a supportive environment — nothing severe is actually
+// occurring yet — so they never rank or style as Extreme even when a feed
+// labels them that way. Warnings keep whatever severity the feed assigns.
+function clampWatchSeverity(event = "", severity = "") {
+  if (/\bwatch\b/i.test(event) && /^extreme$/i.test(severity)) return "Severe";
+  return severity;
 }
 
 function normalizeAlertTag(value) {
@@ -1140,7 +1150,7 @@ function normalizeNwsAlert(feature) {
     id: feature.id || p.id,
     event: p.event || "Weather Alert",
     headline: p.headline || p.event || "Weather Alert",
-    severity: p.severity || "Unknown",
+    severity: clampWatchSeverity(p.event, p.severity || "Unknown"),
     urgency: p.urgency || "Unknown",
     effective: p.effective,
     expires: p.expires,
@@ -1175,25 +1185,35 @@ function mergeAlerts(...groups) {
 function tagsForAlert(alert) {
   const p = alert.parameters || {};
   const detectionTag = severeDetectionTag(alert);
+  // IEM storm-based warnings are enriched with the matching NWS alert's CAP
+  // parameters (see alertsPayload), so both sources can describe the same
+  // hazard. Read each hazard from one source with the other as fallback —
+  // listing both produced duplicate Wind/Hail/Damage chips in mixed casing.
+  const windTag   = p.maxWindGust?.[0] ?? alert.iem_windtag;
+  const hailTag   = p.maxHailSize?.[0] ?? alert.iem_hailtag;
+  const damageTag = p.thunderstormDamageThreat?.[0] ?? alert.iem_damagetag;
+  const floodTag  = p.flashFloodDamageThreat?.[0] ?? alert.iem_floodtag;
+  const tornadoTag = p.tornadoDetection?.[0] ?? alert.iem_tornadotag;
+  // The CAP severity ("Extreme"/"Severe"/"Moderate"...) is intentionally NOT
+  // shown as a chip — it only drives alert ranking and card styling.
   const raw = [
-    !isDetectionTag(alert.severity) && alert.severity,
-    p.tornadoDetection?.[0],
-    p.thunderstormDamageThreat?.[0],
+    tornadoTag && (isDetectionTag(tornadoTag) ? tornadoTag : `Tornado ${String(tornadoTag).toLowerCase()}`),
+    damageTag,
     p.flashFloodDetection?.[0],
-    p.flashFloodDamageThreat?.[0],
-    p.maxWindGust?.[0] && `Wind ${formatWindTag(p.maxWindGust[0])}`,
-    p.maxHailSize?.[0] && `Hail ${formatHailTag(p.maxHailSize[0])}`,
+    floodTag,
+    windTag && `Wind ${formatWindTag(windTag)}`,
+    hailTag && `Hail ${formatHailTag(hailTag)}`,
     detectionTag,
-    alert.iem_tornadotag && `Tornado ${alert.iem_tornadotag}`,
-    alert.iem_damagetag && `Damage ${alert.iem_damagetag}`,
-    alert.iem_windtag && `Wind ${formatWindTag(alert.iem_windtag)}`,
-    alert.iem_hailtag && `Hail ${formatHailTag(alert.iem_hailtag)}`,
-    alert.iem_floodtag && `Flood ${alert.iem_floodtag}`,
     alert.iem_is_pds && "PDS",
     alert.iem_is_emergency && "Emergency",
   ].filter(Boolean);
-  return [...new Set(raw.map(normalizeAlertTag))]
-    .filter(item => !/^immediate$/i.test(item));
+  const seen = new Set();
+  return raw.map(normalizeAlertTag).filter(item => {
+    const key = item.toLowerCase();
+    if (!item || seen.has(key) || key === "immediate") return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function iemEventSeverity(eventName) {
@@ -1305,7 +1325,7 @@ function normalizeEcccAlert(feature) {
     id: ecccStableAlertId(p),
     event,
     headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
-    severity: ecccSeverity(p),
+    severity: clampWatchSeverity(event, ecccSeverity(p)),
     urgency: String(p.alert_type || "").toLowerCase() === "warning" ? "Immediate" : "Expected",
     effective: p.validity_datetime || p.publication_datetime,
     expires: p.expiration_datetime || p.event_end_datetime,
@@ -2194,6 +2214,96 @@ function spcThreatText(type, cig) {
   return null;
 }
 
+// SPC-style categorical summary sentences, matching the wording of the
+// published SPC risk-category table.
+const SPC_CAT_SUMMARY = {
+  TSTM: "Thunderstorms are possible, but no severe storms are expected.",
+  MRGL: "Isolated severe storms are possible.",
+  SLGT: "Isolated to scattered severe storms are expected.",
+  ENH:  "Scattered to numerous severe storms are expected.",
+  MDT:  "Scattered to numerous severe storms are expected.",
+  HIGH: "Numerous severe storms are expected.",
+};
+
+const SPC_COVERAGE_WORDS = {
+  MRGL: "isolated",
+  SLGT: "isolated to scattered",
+  ENH:  "scattered to numerous",
+  MDT:  "scattered to numerous",
+  HIGH: "numerous",
+};
+
+// Maps a hazard probability to its categorical level using the <CIG1 column
+// of the SPC probability-to-category matrices. Tornado probabilities have
+// their own breakpoints; wind and hail share theirs.
+function spcProbCategory(type, prob) {
+  const p = Number(prob);
+  if (!Number.isFinite(p)) return null;
+  if (type === "tornado") {
+    if (p >= 15) return "ENH";
+    if (p >= 5)  return "SLGT";
+    if (p >= 2)  return "MRGL";
+    return null;
+  }
+  if (p >= 45) return "ENH";
+  if (p >= 15) return "SLGT";
+  if (p >= 5)  return "MRGL";
+  return null;
+}
+
+// Conditional Intensity Group add-on for a hazard phrase: CIG1/2/3 escalate
+// the potential significance of that hazard.
+function spcCigClause(type, cig) {
+  if (type === "tornado") {
+    if (cig === 1) return "with some potentially strong (EF2+)";
+    if (cig === 2) return "with some potentially intense (EF3+)";
+    if (cig === 3) return "with some potentially violent (EF4+)";
+  }
+  if (type === "wind") {
+    if (cig === 1) return "with gusts of 65+ mph possible";
+    if (cig === 2) return "with destructive gusts of 85+ mph possible";
+    if (cig === 3) return "with widespread destructive gusts of 95+ mph possible";
+  }
+  if (type === "hail") {
+    if (cig === 1) return "up to 2 inches in diameter";
+    if (cig === 2) return "up to 3.5 inches in diameter";
+    if (cig === 3) return "with giant hail possible";
+  }
+  return null;
+}
+
+// Builds the hazards clause from the day's tornado/wind/hail probabilities and
+// CIG levels, e.g. "Hazards include scattered to numerous instances of
+// damaging winds, isolated severe hail, and isolated to scattered tornadoes,
+// with some potentially strong (EF2+)."
+function spcHazardSentence(spcDay = {}) {
+  const phrases = [];
+  const addHazard = (type, prob, cig, noun) => {
+    const cat = spcProbCategory(type, prob);
+    if (!cat) return;
+    const clause = spcCigClause(type, cig);
+    phrases.push(`${SPC_COVERAGE_WORDS[cat]} ${noun}${clause ? `, ${clause}` : ""}`);
+  };
+  addHazard("wind",    spcDay.wind,    spcDay.windCig, "instances of damaging winds");
+  addHazard("hail",    spcDay.hail,    spcDay.hailCig, "severe hail");
+  addHazard("tornado", spcDay.tornado, spcDay.tornCig, "tornadoes");
+  if (!phrases.length) return "";
+  const list = phrases.length > 1
+    ? `${phrases.slice(0, -1).join(", ")}, and ${phrases[phrases.length - 1]}`
+    : phrases[0];
+  return `Hazards include ${list}.`;
+}
+
+// Full SPC-style outlook summary for one forecast day: the categorical
+// sentence followed by the hazards breakdown.
+function spcDaySummary(spcDay = {}) {
+  const cat = String(spcDay.catLabel || "").toUpperCase();
+  const lead = SPC_CAT_SUMMARY[cat];
+  if (!lead) return "";
+  const hazards = cat === "TSTM" ? "" : spcHazardSentence(spcDay);
+  return hazards ? `${lead} ${hazards}` : lead;
+}
+
 function droughtLabel(category = "") {
   const labels = {
     D0: "D0 Abnormally Dry",
@@ -2648,6 +2758,10 @@ function alertPriority(alert) {
   if (event.includes("flash flood warning")) return 680;
   if (event.includes("snow squall warning")) return 650;
   if (event.includes("warning")) return 560;
+  // All watches rank below every warning: a watch only means the environment
+  // is supportive, while a warning means severe weather is occurring.
+  if (event.includes("tornado watch")) return 480;
+  if (event.includes("severe thunderstorm watch")) return 460;
   if (event.includes("watch")) return 430;
   if (severity === "extreme") return 400;
   if (severity === "severe") return 320;
@@ -3170,6 +3284,64 @@ function showHourDetails(index) {
   ], hour.detailedForecast || "");
 }
 
+// Expandable Fair Weather Index breakdown: one row per scoring component with
+// the points earned, a tier-colored bar, and a short reason for the score.
+function fwiBreakdownHtml(fwi, inputs = {}) {
+  const TIER_COLORS = { good: "#4CAF50", fair: "#FFC107", poor: "#EF5350" };
+  const NOTES = {
+    temp: {
+      good: "Feels-like temperatures sit close to the comfortable range for this time of year.",
+      fair: "Temperatures run somewhat outside the seasonal comfort range.",
+      poor: "Temperatures are well outside the comfortable range for this time of year.",
+    },
+    precip: {
+      good: "Little to no precipitation expected.",
+      fair: "A chance of precipitation could interrupt outdoor plans.",
+      poor: "Precipitation is likely.",
+    },
+    wind: {
+      good: "Light winds.",
+      fair: "Breezy at times.",
+      poor: "Strong winds will be disruptive outdoors.",
+    },
+    humidity: {
+      good: "Comfortable humidity levels.",
+      fair: "Humidity is a bit outside the comfortable range.",
+      poor: "Uncomfortably dry or muggy air.",
+    },
+    cloud: {
+      good: "Mostly sunny skies expected.",
+      fair: "A mix of sun and clouds.",
+      poor: "Mostly cloudy skies.",
+    },
+  };
+  const ROWS = [
+    ["temp", "Temperature", inputs.temp],
+    ["precip", "Precipitation", inputs.precip],
+    ["wind", "Wind", inputs.wind],
+    ["humidity", "Humidity", inputs.humidity],
+    ["cloud", "Cloud cover", inputs.cloud],
+  ];
+  return ROWS.map(([key, label, inputText]) => {
+    const part = fwi.breakdown?.[key];
+    if (!part) return "";
+    const ratio = part.max ? part.pts / part.max : 0;
+    const tier = ratio >= 0.8 ? "good" : ratio >= 0.45 ? "fair" : "poor";
+    const note = inputText == null
+      ? "No forecast data available — a neutral score was used."
+      : NOTES[key][tier];
+    return `
+      <div class="fwi-break-row">
+        <div class="fwi-break-head">
+          <span class="fwi-break-label">${safeText(label)}${inputText ? ` <small>${safeText(inputText)}</small>` : ""}</span>
+          <span class="fwi-break-pts" style="color:${TIER_COLORS[tier]}">${Math.round(part.pts)}/${part.max} pts</span>
+        </div>
+        <div class="fwi-break-bar"><span style="width:${Math.round(ratio * 100)}%;background:${TIER_COLORS[tier]}"></span></div>
+        <p class="fwi-break-note">${safeText(note)}</p>
+      </div>`;
+  }).join("");
+}
+
 function showDailyDetails(index) {
   const pairs = getDailyPairs(weatherState.daily || []);
   const { day, night } = pairs[index] || {};
@@ -3212,17 +3384,10 @@ function showDailyDetails(index) {
   if (index < 3) {
     const spcDay = weatherState.spcDays?.[index];
     const catLabel = spcDay?.catLabel || null;
-    if (catLabel === "TSTM") {
-      risks.push({ color: spcRiskColor(catLabel) || "#94d894", icon: "severe",
-        title: "General thunderstorms possible", sub: `SPC Day ${index + 1} convective outlook` });
-    } else if (catLabel) {
-      const threats = [];
-      if (spcDay.tornado != null) threats.push(`Tornado ${spcDay.tornado}%`);
-      if (spcDay.wind != null) threats.push(`Damaging wind ${spcDay.wind}%`);
-      if (spcDay.hail != null) threats.push(`Large hail ${spcDay.hail}%`);
+    if (catLabel) {
       risks.push({ color: spcRiskColor(catLabel) || "#fbbf24", icon: "severe",
-        title: `${spcLabel(catLabel)} risk of severe storms`,
-        sub: `SPC Day ${index + 1} outlook${threats.length ? ` — ${threats.join(" · ")}` : ""}` });
+        title: catLabel === "TSTM" ? "General thunderstorms possible" : `${spcLabel(catLabel)} of severe storms`,
+        sub: `${spcDaySummary(spcDay)} — SPC Day ${index + 1} convective outlook`.trim() });
     }
   }
   if (index < 5) {
@@ -3252,8 +3417,7 @@ function showDailyDetails(index) {
         <span class="day-modal-low">/ ${night ? `${uTempNum(night.temperature)}°` : "--"}</span>
       </div>
       <div class="day-modal-hero-meta">
-        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>
-        <p>${safeText(fwi.sentence || "")}</p>
+        <p>${safeText(day.shortForecast || "")}</p>
       </div>
     </div>
     <div class="day-night-split">
@@ -3268,6 +3432,25 @@ function showDailyDetails(index) {
       ${statChip("sunrise", "Sunrise", safeText(weatherState.astronomy?.sunrise || "--"))}
       ${statChip("sunset", "Sunset", safeText(weatherState.astronomy?.sunset || "--"))}
     </div>
+    <details class="day-modal-fwi">
+      <summary>
+        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>
+        <span class="day-modal-fwi-sum">
+          <strong>Fair Weather Index — ${fwi.score100}/100</strong>
+          <small>${safeText(fwi.sentence || "")} Tap to see what scored well and what didn't.</small>
+        </span>
+        <svg class="day-modal-fwi-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div class="fwi-breakdown">
+        ${fwiBreakdownHtml(fwi, {
+          temp: day.temperature != null ? `high near ${uTempNum(day.temperature)}°` : null,
+          precip: precip != null ? `${f(precip)}% chance` : null,
+          wind: windDay != null ? fmtWind(windDay) : null,
+          humidity: weatherState.current?.humidity != null ? `~${f(weatherState.current.humidity)}% (current)` : null,
+          cloud: null,
+        })}
+      </div>
+    </details>
     ${riskHtml}
     ${discussion.length ? `
       <div class="day-modal-text">
