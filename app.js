@@ -473,13 +473,22 @@ let droughtLayerData = null;
 let fireWeatherDataCache = {};  // keyed by day (1|2)
 let wpcRainDataCache = {};      // keyed by day (1-5)
 let lsrData = null;
+let lsrMarkers = [];
+let activeLsrTypes = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem("lsrTypeFilter") || "[]");
+    return Array.isArray(saved) ? new Set(saved.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+})();
 let alertPolygonData = null;
 let nwsAlertPolygonData = null;
 let alertFetchBox = null;           // {west,south,east,north} the alert overlay was last fetched for
 let alertPanRefreshInFlight = false;
 let activeAlertFilter = (() => {
   const saved = localStorage.getItem("alertKindFilter");
-  return ["all", "warning", "watch", "advisory"].includes(saved) ? saved : "all";
+  return ["priority", "all", "warning", "watch", "advisory"].includes(saved) ? saved : "priority";
 })();
 let spcPopupWired = false;
 let droughtPopupWired = false;
@@ -791,7 +800,7 @@ function hourFwi(hour) {
     humidity,
     wind: numericWind(hour.windSpeed),
     gust: numericWind(hour.windGust),
-    cloudCover: null,
+    cloudCover: hourCloudCover(hour),
     precipChance: hour.probabilityOfPrecipitation?.value,
     month: hour.startTime ? new Date(hour.startTime).getMonth() : new Date().getMonth(),
   });
@@ -813,6 +822,16 @@ function dailyHumidity(extras, index) {
 function dailyGust(extras, index) {
   const forecast = extras?.wind_gusts_10m_max?.[index];
   return forecast != null ? Math.round(forecast) : null;
+}
+
+function forecastCloudCover(extras, index) {
+  const forecast = extras?.cloud_cover_mean?.[index] ?? extras?.cloud_cover?.[index];
+  return forecast != null ? Math.round(forecast) : null;
+}
+
+function hourCloudCover(hour) {
+  const cloud = nwsValue(hour, "cloudCover") ?? hour?.cloudCover ?? hour?.cloud_cover;
+  return cloud != null ? Math.round(Number(cloud)) : null;
 }
 
 async function searchLocations(query) {
@@ -1108,6 +1127,48 @@ function filterMapColoredWarnings(data) {
     type: data?.type || "FeatureCollection",
     features: (data?.features || []).filter(warningHasMapColor),
   };
+}
+
+const DEFAULT_MAP_ALERT_EVENTS = new Set([
+  "tornado warning", "tornado watch",
+  "severe thunderstorm warning", "severe thunderstorm watch",
+  "flash flood warning",
+  "winter storm watch", "winter storm warning",
+  "blizzard warning", "snow squall warning",
+  "storm surge warning", "storm surge watch",
+  "tropical storm warning", "tropical storm watch",
+  "hurricane warning", "hurricane watch",
+  "typhoon warning", "typhoon watch",
+  "extreme wind warning",
+  "special weather statement",
+]);
+const DEFAULT_IEM_ALERT_PHENOMENA = new Set(["TO", "SV", "FF", "SQ"]);
+
+function normalizeAlertEventName(event = "") {
+  return String(event || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isDefaultMapAlertEvent(event = "") {
+  const normalized = normalizeAlertEventName(event);
+  if (DEFAULT_MAP_ALERT_EVENTS.has(normalized)) return true;
+  // NWS occasionally prefixes marine/coastal variants but the core event name
+  // still matches one of the intentionally prominent map-alert categories.
+  return [...DEFAULT_MAP_ALERT_EVENTS].some(name => normalized.endsWith(name));
+}
+
+function filterAlertCollectionForMap(data, source = "nws") {
+  const features = data?.features || [];
+  let filtered = features;
+  if (activeAlertFilter === "priority") {
+    filtered = source === "iem"
+      ? features.filter(feature => DEFAULT_IEM_ALERT_PHENOMENA.has(String(feature?.properties?.phenomena || "").toUpperCase()))
+      : features.filter(feature => isDefaultMapAlertEvent(feature?.properties?.event || feature?.properties?.prod_type || feature?.properties?.alert_name_en || ""));
+  } else if (source === "iem") {
+    filtered = activeAlertFilter === "all" || activeAlertFilter === "warning" ? features : [];
+  } else if (activeAlertFilter !== "all") {
+    filtered = features.filter(feature => alertKindFor(feature?.properties?.event || "", feature?.properties?.alert_type || "") === activeAlertFilter);
+  }
+  return { ...(data || {}), type: data?.type || "FeatureCollection", features: filtered };
 }
 
 // Normalizes wind tag values from any source ("60", "60 MPH", "60 mph") to a
@@ -1524,7 +1585,7 @@ async function weatherPayload() {
   const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
-  const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,wind_gusts_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
+  const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index,cloud_cover&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,wind_gusts_10m_max,cloud_cover_mean&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
   const [forecast, hourly, stations, alertsData, openMeteo, airQuality, pollen, astronomy, tempest] = await Promise.all([
     getJson(props.forecast),
     getJson(props.forecastHourly),
@@ -1581,6 +1642,7 @@ async function weatherPayload() {
       wind,
       gust,
       uv,
+      cloudCover: openMeteo?.current?.cloud_cover ?? null,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
@@ -1609,9 +1671,9 @@ async function weatherPayload() {
 async function openMeteoWeatherPayload() {
   const loc = point();
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
-    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index` +
-    `&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility` +
-    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean` +
+    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,cloud_cover` +
+    `&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,cloud_cover` +
+    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,cloud_cover_mean` +
     `&temperature_unit=fahrenheit&wind_speed_unit=mph&forecast_days=8&timeformat=unixtime&timezone=auto`;
   const data = await getJson(url);
   selectedLocation.timezone = data.timezone || loc.timezone || "America/New_York";
@@ -1639,6 +1701,7 @@ async function openMeteoWeatherPayload() {
       windDirection: windDirLabel(hi.wind_direction_10m?.[i]),
       probabilityOfPrecipitation: { value: hi.precipitation_probability?.[i] ?? null },
       relativeHumidity: { value: hi.relative_humidity_2m?.[i] ?? null },
+      cloudCover: hi.cloud_cover?.[i] ?? null,
       // Renderers expect NWS-style dewpoint in Celsius
       dewpoint: { value: hi.dew_point_2m?.[i] != null ? (hi.dew_point_2m[i] - 32) * 5 / 9 : null },
       isDaytime: true,
@@ -1681,6 +1744,7 @@ async function openMeteoWeatherPayload() {
       wind: cur.wind_speed_10m != null ? Math.round(cur.wind_speed_10m) : null,
       gust: cur.wind_gusts_10m != null ? Math.round(cur.wind_gusts_10m) : null,
       uv: cur.uv_index ?? null,
+      cloudCover: cur.cloud_cover ?? null,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
@@ -1698,6 +1762,7 @@ async function openMeteoWeatherPayload() {
       uv_index_max: di.uv_index_max || [],
       relative_humidity_2m_mean: di.relative_humidity_2m_mean || [],
       wind_gusts_10m_max: di.wind_gusts_10m_max || [],
+      cloud_cover_mean: di.cloud_cover_mean || [],
     },
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "Unavailable",
@@ -1809,6 +1874,7 @@ async function canadaWeatherPayload() {
       wind: mph(gcVal(cc.wind?.speed)),
       gust: mph(gcVal(cc.wind?.gust)),
       uv,
+      cloudCover: null,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
@@ -2532,7 +2598,7 @@ function renderCurrent() {
     humidity:    current.humidity,
     wind:        current.wind,
     gust:        current.gust,
-    cloudCover:  null,
+    cloudCover:  current.cloudCover,
     precipChance: null,
     month,
   });
@@ -3235,11 +3301,13 @@ function renderDaily() {
     const periodDate = day.startTime ? new Date(day.startTime) : new Date();
     const dayMonth   = periodDate.getMonth();
     const windSpeed  = numericWind(day.windSpeed) || null;
+    const dayCloud   = forecastCloudCover(extras, index);
     const fwi = FWI.calculate({
       temp:        day.temperature,
       humidity:    dayHumidity,
       wind:        windSpeed,
       gust:        dailyGust(extras, index),
+      cloudCover:  dayCloud,
       precipChance: precip,
       month:       dayMonth,
     });
@@ -3378,6 +3446,7 @@ function showDailyDetails(index) {
   const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
   const windDay = numericWind(day.windSpeed);
   const windNight = night ? numericWind(night.windSpeed) : null;
+  const dayCloud = forecastCloudCover(extras, index);
 
   const periodDate = day.startTime ? new Date(day.startTime) : new Date();
   const fwi = FWI.calculate({
@@ -3385,6 +3454,7 @@ function showDailyDetails(index) {
     humidity: dayHumidity,
     wind: windDay,
     gust: dayGust,
+    cloudCover: dayCloud,
     precipChance: precip,
     month: periodDate.getMonth(),
   });
@@ -3472,7 +3542,7 @@ function showDailyDetails(index) {
           humidity: dayHumidity != null
             ? `~${f(dayHumidity)}%${extras.relative_humidity_2m_mean?.[index] != null ? " forecast" : " (current)"}`
             : null,
-          cloud: null,
+          cloud: dayCloud != null ? `${f(dayCloud)}% ${cloudCoverLabel(dayCloud).toLowerCase()}` : null,
         })}
       </div>
     </details>
@@ -4098,6 +4168,7 @@ function renderMapSidebar() {
   const fwi = FWI.calculate({
     temp: current.temp, humidity: current.humidity,
     wind: current.wind, gust: current.gust,
+    cloudCover: current.cloudCover,
     month: new Date().getMonth(),
   });
   const astronomy = weatherState.astronomy;
@@ -4273,6 +4344,8 @@ function clearWeatherLayers() {
    "satellite-source",
    "cyclones-radii-source", "cyclones-track-source", "cyclones-points-source",
   ].forEach(removeMapSource);
+  lsrMarkers.forEach(marker => marker.remove());
+  lsrMarkers = [];
   document.querySelectorAll(".lsr-marker-wrap").forEach(el => el.remove());
   const leg = document.querySelector("#spcLegendBox");
   if (leg) leg.hidden = true;
@@ -5105,27 +5178,29 @@ function buildLsrItemHtml(feature) {
     ${p.valid ? `<div class="popup-stat"><span class="popup-key">Time</span><span class="popup-val">${new Date(p.valid).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}</span></div>` : ""}`;
 }
 
-async function addLsrLayer() {
-  if (!radarMap || !mapLoaded) return;
-  if (!lsrData) {
-    lsrData = await fetchOutlookGeoJson(LSR_URL);
-  }
+function lsrTypeKey(properties = {}) {
+  return String(properties.type || properties.typetext || "Other").trim() || "Other";
+}
+
+function lsrFilteredFeatures() {
   const features = lsrData?.features || [];
-  if (!features.length) return;
+  if (!activeLsrTypes.size) return features;
+  return features.filter(feature => activeLsrTypes.has(lsrTypeKey(feature.properties || {})));
+}
 
-  radarMap.addSource("lsr-source", { type: "geojson", data: lsrData });
-  addWeatherLayer({
-    id: "lsr-hit",
-    type: "circle",
-    source: "lsr-source",
-    paint: {
-      "circle-radius": 18,
-      "circle-opacity": 0,
-      "circle-stroke-opacity": 0,
-    },
-  });
+function lsrFilteredCollection() {
+  return { ...(lsrData || {}), type: "FeatureCollection", features: lsrFilteredFeatures() };
+}
 
-  features.forEach(feat => {
+function updateLsrLayerData() {
+  if (!radarMap || !mapLoaded) return;
+  const data = lsrFilteredCollection();
+  const source = radarMap.getSource("lsr-source");
+  if (source) source.setData(data);
+
+  lsrMarkers.forEach(marker => marker.remove());
+  lsrMarkers = [];
+  data.features.forEach(feat => {
     const p = feat.properties || {};
     const coords = feat.geometry?.coordinates;
     if (!coords) return;
@@ -5145,10 +5220,35 @@ async function addLsrLayer() {
       showUnifiedMapPopup({ lng: coords[0], lat: coords[1] }, radarMap.project([coords[0], coords[1]]), feat);
     });
 
-    new mapboxgl.Marker({ element: wrap, anchor: "center" })
+    const marker = new mapboxgl.Marker({ element: wrap, anchor: "center" })
       .setLngLat([coords[0], coords[1]])
       .addTo(radarMap);
+    lsrMarkers.push(marker);
   });
+}
+
+async function addLsrLayer() {
+  if (!radarMap || !mapLoaded) return;
+  if (!lsrData) {
+    lsrData = await fetchOutlookGeoJson(LSR_URL);
+  }
+  renderLsrSubControls();
+  const features = lsrFilteredFeatures();
+  if (!features.length && !(lsrData?.features || []).length) return;
+
+  radarMap.addSource("lsr-source", { type: "geojson", data: lsrFilteredCollection() });
+  addWeatherLayer({
+    id: "lsr-hit",
+    type: "circle",
+    source: "lsr-source",
+    paint: {
+      "circle-radius": 18,
+      "circle-opacity": 0,
+      "circle-stroke-opacity": 0,
+    },
+  });
+
+  updateLsrLayerData();
 }
 
 // Translate ECCC alert names to their nearest NWS event so Canadian polygons
@@ -5447,15 +5547,15 @@ async function addAlertsLayer() {
   // Update sources in place when they already exist: setData swaps the
   // features without unmounting the layer, so pan refetches never blink.
   // Always feed existing sources — even an empty set — so stale polygons
-  // clear when panning into a quiet region. Sources are only created once
-  // there is something to draw.
+  // clear when panning into a quiet region. Empty sources are still mounted so
+  // switching from Priority to All can reveal already-fetched alerts instantly.
   const emptyCollection = { type: "FeatureCollection", features: [] };
 
-  const iemData = alertPolygonData || emptyCollection;
+  const iemData = filterAlertCollectionForMap(alertPolygonData || emptyCollection, "iem");
   const iemSource = radarMap.getSource("alerts-source");
   if (iemSource) {
     iemSource.setData(iemData);
-  } else if (iemData.features?.length) {
+  } else {
     radarMap.addSource("alerts-source", { type: "geojson", data: iemData });
     addWeatherLayer({
       id: "alerts-fill",
@@ -5483,11 +5583,11 @@ async function addAlertsLayer() {
     });
   }
 
-  const nwsData = nwsAlertPolygonData || emptyCollection;
+  const nwsData = filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws");
   const nwsSource = radarMap.getSource("nws-alerts-source");
   if (nwsSource) {
     nwsSource.setData(nwsData);
-  } else if (nwsData.features?.length) {
+  } else {
     radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData });
     addWeatherLayer({
       id: "nws-alerts-fill",
@@ -5548,15 +5648,21 @@ async function addAlertsLayer() {
 // Apply the active warning/watch/advisory filter to the alert layers without
 // refetching. The IEM storm-based polygons are warnings by definition, so
 // they simply hide unless warnings are visible.
+function refreshAlertSourcesForFilter() {
+  if (!radarMap || !mapLoaded) return;
+  const emptyCollection = { type: "FeatureCollection", features: [] };
+  const iemSource = radarMap.getSource("alerts-source");
+  if (iemSource) iemSource.setData(filterAlertCollectionForMap(alertPolygonData || emptyCollection, "iem"));
+  const nwsSource = radarMap.getSource("nws-alerts-source");
+  if (nwsSource) nwsSource.setData(filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws"));
+}
+
 function applyAlertKindFilter() {
   if (!radarMap || !mapLoaded) return;
-  const kindFilter = activeAlertFilter === "all" ? null : ["==", ["get", "kind"], activeAlertFilter];
-  ["nws-alerts-fill", "nws-alerts-line"].forEach(id => {
-    if (radarMap.getLayer(id)) radarMap.setFilter(id, kindFilter);
-  });
-  const iemVisible = activeAlertFilter === "all" || activeAlertFilter === "warning";
-  ["alerts-fill", "alerts-line"].forEach(id => {
-    if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", iemVisible ? "visible" : "none");
+  refreshAlertSourcesForFilter();
+  ["nws-alerts-fill", "nws-alerts-line", "alerts-fill", "alerts-line"].forEach(id => {
+    if (radarMap.getLayer(id)) radarMap.setFilter(id, null);
+    if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", "visible");
   });
 }
 
@@ -5700,6 +5806,12 @@ function renderLayers() {
     if (activeOverlays.has("Alerts")) renderAlertSubControls();
   }
 
+  const lsrCtrl = document.querySelector("#lsrSubControls");
+  if (lsrCtrl) {
+    lsrCtrl.hidden = !activeOverlays.has("LSR");
+    if (activeOverlays.has("LSR")) renderLsrSubControls();
+  }
+
   const satCtrl = document.querySelector("#satelliteSubControls");
   if (satCtrl) {
     satCtrl.hidden = !satelliteActive;
@@ -5759,10 +5871,38 @@ function renderSpcSubControls() {
   renderSpcLegend();
 }
 
+function renderLsrSubControls() {
+  const el = document.querySelector("#lsrTypeBtns");
+  if (!el) return;
+  const counts = new Map();
+  (lsrData?.features || []).forEach(feature => {
+    const key = lsrTypeKey(feature.properties || {});
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const types = [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  const allActive = !activeLsrTypes.size;
+  el.innerHTML = [`<button type="button" data-lsr-type="__all" class="${allActive ? "active" : ""}">All</button>`,
+    ...types.map(type => `<button type="button" data-lsr-type="${safeText(type)}" class="${activeLsrTypes.has(type) ? "active" : ""}">${safeText(type)} <small>${counts.get(type)}</small></button>`),
+  ].join("");
+  el.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const type = btn.dataset.lsrType;
+      if (type === "__all") activeLsrTypes.clear();
+      else {
+        if (activeLsrTypes.has(type)) activeLsrTypes.delete(type);
+        else activeLsrTypes.add(type);
+      }
+      localStorage.setItem("lsrTypeFilter", JSON.stringify([...activeLsrTypes]));
+      renderLsrSubControls();
+      updateLsrLayerData();
+    });
+  });
+}
+
 function renderAlertSubControls() {
   const el = document.querySelector("#alertFilterBtns");
   if (!el) return;
-  const kinds = [["all", "All"], ["warning", "Warnings"], ["watch", "Watches"], ["advisory", "Advisories"]];
+  const kinds = [["priority", "Priority"], ["all", "All"], ["warning", "Warnings"], ["watch", "Watches"], ["advisory", "Advisories"]];
   el.innerHTML = kinds.map(([id, label]) =>
     `<button type="button" data-alert-kind="${id}" class="${id === activeAlertFilter ? "active" : ""}">${label}</button>`
   ).join("");
@@ -5771,7 +5911,7 @@ function renderAlertSubControls() {
       activeAlertFilter = btn.dataset.alertKind;
       localStorage.setItem("alertKindFilter", activeAlertFilter);
       renderAlertSubControls();
-      // Layer filter only — no refetch or redraw needed.
+      // Swap filtered source data in place — no refetch or redraw needed.
       applyAlertKindFilter();
     });
   });

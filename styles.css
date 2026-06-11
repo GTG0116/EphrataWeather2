@@ -3648,3 +3648,41 @@ dd {
     margin-bottom: 8px;
   }
 }
+
+/* Keep long alert/SPC labels inside popups and level tables on narrow screens. */
+.alert-level-row {
+  display: grid;
+  grid-template-columns: minmax(0, 112px) minmax(0, 1fr);
+  align-items: start;
+}
+.alert-level-label,
+.alert-level-desc {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.alert-level-label {
+  white-space: normal;
+}
+.popup-header > div:not(.popup-icon) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.popup-title,
+.popup-subtitle,
+.popup-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.popup-title {
+  padding-right: 8px;
+}
+.popup-stat {
+  align-items: flex-start;
+}
+.popup-val {
+  max-width: 62%;
+}
+.ctrl-btn-group button small {
+  opacity: 0.7;
+  font-size: 0.68em;
+}
