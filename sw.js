@@ -1,4 +1,4 @@
-const CACHE_NAME = "weather-portal-v2";
+const CACHE_NAME = "weather-portal-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -13,9 +13,14 @@ const APP_SHELL = [
 ];
 
 self.addEventListener("install", event => {
+  // Cache each shell asset independently. cache.addAll() rejects the whole
+  // install when ANY asset 404s — icon-192/512.png were missing from the
+  // deploy for a while, which silently failed install on fresh devices and
+  // with it every push notification (no service worker, no push). One bad
+  // asset must never take down installation.
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(APP_SHELL))
+      .then(cache => Promise.allSettled(APP_SHELL.map(asset => cache.add(asset))))
       .then(() => self.skipWaiting())
   );
 });
