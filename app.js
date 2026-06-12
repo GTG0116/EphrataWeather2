@@ -760,7 +760,13 @@ function safeText(value) {
 function syncModalToVisualViewport() {
   const vv = window.visualViewport;
   if (!vv) return;
-  if (detailModal.hidden) {
+  // Only take over sizing while a zoom/pan is actually in effect. At rest the
+  // CSS inset:0 box is already correct — and in iOS standalone web apps the
+  // visual viewport spans the full screen while fixed elements are confined
+  // to the safe area, so forcing vv dimensions at scale 1 pushed the overlay
+  // partly behind the clipped status-bar/home-indicator bands.
+  const zoomed = vv.scale > 1.02 || vv.offsetLeft > 1 || vv.offsetTop > 1;
+  if (detailModal.hidden || !zoomed) {
     detailModal.style.transform = "";
     detailModal.style.width = "";
     detailModal.style.height = "";
@@ -4176,22 +4182,6 @@ function drawAtmosphere() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
 
-  // iOS Safari and standalone web apps intermittently composite the
-  // status-bar band without fixed-position layers while scrolling, exposing
-  // the flat html background-color (--sky-0 = gradient[0]). The diagonal
-  // gradient varies horizontally, so that flat band met the scene with a
-  // visible seam just below the Dynamic Island. Pin the top of the scene
-  // (220px offscreen bleed + the safe-area strip) to the same flat color and
-  // ease into the diagonal gradient below it; body::before mirrors this
-  // blend in CSS for when the canvas layer itself drops out.
-  const blendEnd = 600;
-  const topBlend = ctx.createLinearGradient(0, 0, 0, blendEnd);
-  topBlend.addColorStop(0, palette.gradient[0]);
-  topBlend.addColorStop(340 / blendEnd, palette.gradient[0]);
-  topBlend.addColorStop(1, hexToTransparent(palette.gradient[0]));
-  ctx.fillStyle = topBlend;
-  ctx.fillRect(0, 0, width, blendEnd);
-
   for (let i = 0; i < 58; i++) {
     const x = (Math.sin(frame * 0.004 + i * 12.7) * 0.5 + 0.5) * width;
     const y = (Math.cos(frame * 0.003 + i * 5.4) * 0.5 + 0.5) * height;
@@ -4241,6 +4231,24 @@ function drawAtmosphere() {
     ctx.lineTo(width * 0.59, height * 0.58);
     ctx.stroke();
   }
+
+  // iOS standalone web apps clip every fixed-position layer out of the
+  // status-bar safe-area band, which only ever paints the flat html
+  // background-color (--sky-0 = gradient[0]). The diagonal gradient (and the
+  // particles) vary across that line, so the band met the scene with a
+  // visible seam just below the Dynamic Island. Painting the top of the
+  // finished scene (220px offscreen bleed + the safe-area strip) back to
+  // that same flat color — over the stars/rain too, hence drawn last —
+  // makes the band and the scene meet seamlessly; body::before and the
+  // body::after mask mirror this same blend geometry in CSS.
+  const blendEnd = 600;
+  const topBlend = ctx.createLinearGradient(0, 0, 0, blendEnd);
+  topBlend.addColorStop(0, palette.gradient[0]);
+  topBlend.addColorStop(340 / blendEnd, palette.gradient[0]);
+  topBlend.addColorStop(1, hexToTransparent(palette.gradient[0]));
+  ctx.fillStyle = topBlend;
+  ctx.fillRect(0, 0, width, blendEnd);
+
   frame += 1;
   requestAnimationFrame(drawAtmosphere);
 }
