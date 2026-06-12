@@ -66,6 +66,16 @@ html {
      Safari/standalone, home-indicator strip) exposed a flat off-palette
      slice instead of the animated scene. */
   background-color: var(--sky-0, #075985);
+  transition: background-color 220ms ease;
+}
+
+/* While the detail modal is open, match the root fallback color to the
+   modal backdrop. iOS standalone clips fixed layers (the backdrop included)
+   out of the status-bar and home-indicator bands and paints them from this
+   background-color — without this they stayed bright sky blue, sandwiching
+   the dark modal and making it look zoomed/shifted. */
+html:has(body.modal-open) {
+  background-color: #0b1222;
 }
 
 body {
@@ -193,6 +203,14 @@ body::after {
      Sits above the canvas (z-index 0) but below the content shell (2). */
   inset: -220px 0;
   z-index: 1;
+  /* Fade the glow/darkening overlay out across the same 340px→600px band the
+     canvas and body::before blend to flat --sky-0. iOS standalone clips all
+     fixed layers out of the status-bar strip (it only paints the flat html
+     background-color there), and this overlay's yellow glow + dark scrim was
+     tinting the scene right below that strip — leaving a visible seam under
+     the Dynamic Island even once the gradients matched. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 340px, #000 600px);
+  mask-image: linear-gradient(to bottom, transparent 340px, #000 600px);
   background:
     radial-gradient(circle at 80% 12%, var(--glow), transparent 28rem),
     radial-gradient(circle at 14% 85%, rgba(56, 189, 248, 0.18), transparent 24rem),
@@ -940,7 +958,9 @@ dd {
 .daily-card .weather-icon {
   width: 44px;
   height: 44px;
-  margin: 0;
+  /* Inset from the card's right edge — flush against the padding the
+     sun rays / cloud edges read as overflowing the card. */
+  margin: 0 8px 0 0;
   flex-shrink: 0;
 }
 
@@ -3000,13 +3020,13 @@ body.modal-open {
   bottom: 52px;
   right: 12px;
   z-index: 10;
-  padding: 10px 13px;
+  padding: 8px 10px;
   background: rgba(6, 12, 30, 0.92);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
-  font-size: 0.72rem;
-  min-width: 130px;
+  font-size: 0.66rem;
+  min-width: 110px;
   pointer-events: none;
   animation: legendIn 200ms ease both;
 }
@@ -3040,14 +3060,15 @@ body.modal-open {
   bottom: 52px;
   left: 12px;
   z-index: 10;
-  padding: 9px 8px 10px;
+  padding: 8px 8px 9px;
   background: rgba(6, 12, 30, 0.96);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
-  font-size: 0.72rem;
-  min-width: 256px;
-  max-height: 260px;
+  font-size: 0.66rem;
+  min-width: 170px;
+  max-width: min(46vw, 240px);
+  max-height: 220px;
   overflow-y: auto;
   pointer-events: none;
   animation: legendIn 200ms ease both;
@@ -3074,7 +3095,7 @@ body.modal-open {
   }
   .mrms-legend-box .legend-gradient {
     width: 100%;
-    height: 13px;
+    height: 10px;
   }
   .mrms-legend-box .legend-ticks {
     display: none;
@@ -3142,16 +3163,16 @@ body.modal-open {
 }
 
 .mrms-legend-box .legend-title {
-  font-size: 0.95rem;
+  font-size: 0.72rem;
   font-weight: 900;
   letter-spacing: 0.035em;
   color: rgba(232, 240, 255, 0.62);
-  margin-bottom: 15px;
+  margin-bottom: 8px;
   line-height: 1;
 }
 
 .mrms-legend-section {
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 
 .mrms-legend-section:last-child {
@@ -3159,24 +3180,24 @@ body.modal-open {
 }
 
 .mrms-legend-box .legend-subtitle {
-  font-size: 0.88rem;
+  font-size: 0.62rem;
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.045em;
   color: rgba(232, 240, 255, 0.62);
-  margin-bottom: 7px;
+  margin-bottom: 5px;
   line-height: 1.05;
 }
 
 .mrms-legend-box .legend-gradient {
-  width: 240px;
+  width: 160px;
   max-width: 100%;
-  height: 17px;
+  height: 11px;
   border-radius: 3px;
 }
 
 .mrms-legend-box .legend-ticks {
-  width: 240px;
+  width: 160px;
   max-width: 100%;
   /* Content-sized ticks spread across the bar: the old equal grid columns
      let the nowrap labels overlap each other when the box narrowed. */
@@ -3185,7 +3206,7 @@ body.modal-open {
   gap: 4px;
   align-items: start;
   color: rgba(232, 240, 255, 0.88);
-  font-size: 0.82rem;
+  font-size: 0.6rem;
   line-height: 1.12;
   margin-top: 3px;
 }
@@ -3210,7 +3231,7 @@ body.modal-open {
 .mrms-legend-box .legend-tick small {
   display: block;
   color: rgba(232, 240, 255, 0.88);
-  font-size: 0.76rem;
+  font-size: 0.56rem;
   line-height: 1.05;
 }
 
