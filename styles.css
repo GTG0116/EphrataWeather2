@@ -958,9 +958,7 @@ dd {
 .daily-card .weather-icon {
   width: 44px;
   height: 44px;
-  /* Inset from the card's right edge — flush against the padding the
-     sun rays / cloud edges read as overflowing the card. */
-  margin: 0 8px 0 0;
+  margin: 0;
   flex-shrink: 0;
 }
 
@@ -1008,19 +1006,25 @@ dd {
 .daily-chip-row span {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 10px 5px 8px;
+  gap: 6px;
+  /* Icon hugs the pill's left end — the larger inset left it floating in
+     the middle of the leading space, which read as misplaced. */
+  padding: 5px 10px 5px 5px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   background: rgba(2, 6, 23, 0.25);
 }
 
-/* Inline chip icons reuse uiIcon markup but drop its boxed treatment. */
+/* Inline chip icons reuse uiIcon markup but drop its boxed treatment.
+   The padding reset matters: the pill rule above targets every span in the
+   row, so without it the icon box also picked up the pill's own padding —
+   leaving the glyph floating mid-air left of the text. */
 .daily-chip-row .ui-icon {
   width: 13px;
   height: 13px;
   flex: 0 0 13px;
   margin: 0;
+  padding: 0;
   border: none;
   border-radius: 0;
   background: none;
@@ -1030,6 +1034,7 @@ dd {
 .daily-chip-row .ui-icon svg {
   width: 11px;
   height: 11px;
+  margin: 0;
   transform: none;
 }
 
