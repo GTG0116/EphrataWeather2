@@ -49,6 +49,10 @@ body::-webkit-scrollbar {
 
 html {
   min-height: 100%;
+  /* iOS Safari inflates text after pinch-zoom/rotation in some layouts,
+     which made map-legend tick labels overlap; pin the adjustment. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   /* The fallback background-color must be the TOP gradient color (--sky-0):
      iOS standalone paints the status-bar safe-area band from the root
      background-color when fixed elements (the animated canvas) are clipped
@@ -90,8 +94,19 @@ body::before {
   position: fixed;
   inset: -220px 0;
   z-index: 0;
-  background: linear-gradient(to bottom right,
-    var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
+  /* The first layer pins the top of the scene to the flat --sky-0 color
+     (uniform across the full width) before easing into the diagonal
+     gradient. iOS intermittently composites the status-bar band without
+     any fixed layers, exposing the flat html background-color — keeping
+     the scene itself flat --sky-0 through that band (220px offscreen bleed
+     + the safe-area strip) makes the seam below the Dynamic Island
+     invisible whether or not the band drops out. The animated canvas
+     mirrors this same blend. */
+  background:
+    linear-gradient(to bottom,
+      var(--sky-0, #075985) 340px, rgba(0, 0, 0, 0) 600px),
+    linear-gradient(to bottom right,
+      var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
   pointer-events: none;
 }
 
@@ -1329,9 +1344,26 @@ dd {
   position: fixed;
   inset: 0;
   z-index: 20;
-  display: grid;
-  place-items: center;
+  /* Flex (not grid) so the card's percentage max-height resolves against the
+     overlay, which JS resizes to the iOS *visual* viewport while pinch or
+     accessibility zoom is active — keeping the whole card reachable. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 18px;
+  overscroll-behavior: none;
+}
+
+/* Freeze the page behind the modal. JS stores the scroll offset in an inline
+   top and restores it on close; without this iOS kept scrolling (and
+   touch-targeting) the extended forecast underneath the popup, and reaching
+   the bottom of the popup chained the scroll to the page and "stuck" there. */
+body.modal-open {
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: 100%;
+  overflow-y: hidden;
 }
 
 .modal-backdrop {
@@ -1346,8 +1378,9 @@ dd {
 .modal-card {
   position: relative;
   width: min(620px, 100%);
-  max-height: min(720px, calc(100vh - 36px));
+  max-height: min(720px, 100%);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 24px;
 }
 
@@ -2985,6 +3018,23 @@ dd {
 
 .spc-legend-box[hidden] { display: none; }
 
+/* Popups read above the legend boxes (z-index 10), and the legends fade out
+   entirely while a popup is open — on phones the two stacked on top of each
+   other and made the alert popup unreadable. */
+.mapboxgl-popup {
+  z-index: 11;
+}
+
+.radar-map-wrap:has(.mapboxgl-popup) .spc-legend-box,
+.radar-map-wrap:has(.mapboxgl-popup) .mrms-legend-box {
+  /* The legendIn entry animation fills 'both', so it must be cleared for
+     opacity to take effect; closing the popup re-runs it as a fade-in. */
+  animation: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 160ms ease, visibility 160ms ease;
+}
+
 .mrms-legend-box {
   position: absolute;
   bottom: 52px;
@@ -3128,8 +3178,11 @@ dd {
 .mrms-legend-box .legend-ticks {
   width: 240px;
   max-width: 100%;
-  display: grid;
-  grid-template-columns: repeat(var(--tick-count), minmax(0, 1fr));
+  /* Content-sized ticks spread across the bar: the old equal grid columns
+     let the nowrap labels overlap each other when the box narrowed. */
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
   align-items: start;
   color: rgba(232, 240, 255, 0.88);
   font-size: 0.82rem;
