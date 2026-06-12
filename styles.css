@@ -53,24 +53,15 @@ html {
      iOS standalone paints the status-bar safe-area band from the root
      background-color when fixed elements (the animated canvas) are clipped
      out of it, and using the bottom color left a visibly darker flat strip
-     across the very top of the app. */
+     across the very top of the app.
+
+     The fallback *gradient* lives on body::before below rather than here:
+     the previous html background relied on background-attachment: fixed,
+     which iOS Safari treats as "scroll" — so the gradient stretched across
+     the full document height and the safe-area bands (status bar in
+     Safari/standalone, home-indicator strip) exposed a flat off-palette
+     slice instead of the animated scene. */
   background-color: var(--sky-0, #075985);
-  background-image: linear-gradient(to bottom right,
-    var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
-  background-repeat: no-repeat;
-  /* Pin the fallback gradient to the viewport rather than stretching it over
-     the full (very tall) scroll height. Without this, background-size:100% 100%
-     spread the three color stops across thousands of pixels, so any spot the
-     fixed canvas momentarily failed to cover — the status-bar band up top, the
-     home-indicator band at the bottom, or an iOS rubber-band overscroll —
-     exposed a locally flat, single-color slice of that stretched gradient
-     instead of the vibrant animated scene. Sizing it to the viewport and
-     fixing the attachment makes the exposed fallback mirror the canvas's full
-     diagonal gradient (matching createLinearGradient(0,0,w,h) → to bottom
-     right), so the background reads as continuous in those spots. */
-  background-attachment: fixed;
-  background-size: 100% 100%;
-  background-position: center;
 }
 
 body {
@@ -79,13 +70,29 @@ body {
   margin: 0;
   color: var(--text);
   font-family: var(--font-sans);
-  /* Keep the body transparent so the root gradient can paint iOS standalone
-     safe-area bands beneath the canvas and glow layers. Avoid
-     background-attachment: fixed here — on iOS it composites unpredictably
-     with the fixed canvas layers. */
+  /* Keep the body transparent so the ::before gradient can paint iOS
+     standalone safe-area bands beneath the canvas and glow layers. */
   background: transparent;
   overflow-x: hidden;
   transition: color 220ms ease;
+}
+
+/* Viewport-pinned fallback gradient that mirrors the canvas palette. A real
+   fixed-position element (unlike background-attachment: fixed, which iOS
+   ignores) stays glued to the viewport on Safari and iOS standalone, so the
+   status-bar band, home-indicator strip, and rubber-band overscroll always
+   show the same diagonal gradient as the animated canvas even when iOS
+   intermittently drops the canvas's compositing layer out of those bands.
+   Paint order: body::before (gradient) → #atmosphereCanvas (later in DOM,
+   same z-index) → body::after glow (1) → .shell content (2). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -220px 0;
+  z-index: 0;
+  background: linear-gradient(to bottom right,
+    var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a));
+  pointer-events: none;
 }
 
 body[data-theme="sunny"] {
@@ -955,6 +962,9 @@ dd {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  /* Breathing room between the summary text above and the chip row — the
+     chips previously sat almost flush against the forecast sentence. */
+  margin-top: 14px;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 800;
@@ -963,8 +973,8 @@ dd {
 .daily-chip-row span {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 9px 5px 7px;
+  gap: 8px;
+  padding: 5px 10px 5px 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   background: rgba(2, 6, 23, 0.25);
@@ -1526,6 +1536,46 @@ dd {
   color: var(--muted);
   line-height: 1.5;
 }
+.alert-full-text {
+  margin-top: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.28);
+}
+.alert-full-text summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.alert-full-text[open] summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.alert-full-text pre {
+  margin: 0;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--muted);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.lsr-cat-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+
 .alert-modal-source {
   margin-top: 14px;
   font-size: 0.7rem;
@@ -3216,14 +3266,16 @@ dd {
   background: rgba(6, 12, 30, 0.96) !important;
   border: 1px solid rgba(255, 255, 255, 0.18) !important;
   border-radius: 12px !important;
-  padding: 14px 16px !important;
+  padding: 11px 13px !important;
   color: #f8fbff !important;
   font-family: "Inter", system-ui, sans-serif !important;
   font-size: 0.84rem !important;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05) !important;
   backdrop-filter: blur(20px) !important;
-  max-width: 320px !important;
-  max-height: 65vh !important;
+  max-width: 290px !important;
+  /* Keep popups short enough to fit the visible map on phones — taller
+     popups forced panning the map down to read or dismiss them. */
+  max-height: 42vh !important;
   overflow-y: auto !important;
   animation: popupIn 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both !important;
 }
@@ -3344,6 +3396,44 @@ dd {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.07);
   line-height: 1.45;
+}
+
+/* Compact alert popup: header + one wrapping chip row + details button. */
+.popup-compact .popup-header {
+  margin-bottom: 7px;
+  padding-bottom: 6px;
+}
+
+.popup-compact .popup-icon {
+  width: 24px;
+  height: 24px;
+  font-size: 0.85rem;
+}
+
+.popup-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.popup-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(232, 240, 255, 0.85);
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popup-compact .popup-alert-details-btn {
+  margin-top: 8px;
+  padding: 6px 10px;
 }
 
 /* ═══════════════════════════════════════════════
@@ -3519,13 +3609,16 @@ dd {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 6px 10px;
+  padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid rgba(255,255,255,0.12);
   background: rgba(2,6,23,0.3);
   text-align: center;
   flex: 1;
-  min-width: 54px;
+  /* Long values must wrap inside the chip instead of spilling out of the
+     sidebar tile (e.g. SPC probability strings on narrow sidebars). */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .sidebar-chip-label {
@@ -3534,11 +3627,16 @@ dd {
   text-transform: uppercase;
   color: var(--muted);
   margin-bottom: 3px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .sidebar-chip-val {
   font-size: 0.9rem;
   font-weight: 800;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 /* ═══════════════════════════════════════════════

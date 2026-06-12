@@ -418,8 +418,8 @@ let activeTheme = "sunny";
 // status-bar buffer itself from theme-color; matching the gradient keeps that
 // strip blended with the scene instead of reading as a flat dark band.
 // Also mirror the palette onto the root element's --sky-* custom properties:
-// the html background gradient (see styles.css) is what iOS paints in the
-// safe-area bands where fixed-position elements get clipped.
+// the body::before fallback gradient (see styles.css) is what iOS paints in
+// the safe-area bands when the canvas's compositing layer drops out of them.
 function syncThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
@@ -476,7 +476,9 @@ let lsrData = null;
 let lsrMarkers = [];
 let activeLsrTypes = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem("lsrTypeFilter") || "[]");
+    // "lsrCategoryFilter" stores readable category ids (tornado, wind, hail…);
+    // the old "lsrTypeFilter" key held raw IEM type codes and is ignored.
+    const saved = JSON.parse(localStorage.getItem("lsrCategoryFilter") || "[]");
     return Array.isArray(saved) ? new Set(saved.map(String)) : new Set();
   } catch {
     return new Set();
@@ -1104,10 +1106,6 @@ function alertKindFor(event = "", alertType = "") {
   return "advisory";
 }
 
-function isWarningEvent(event = "") {
-  return /\bwarning\b/i.test(event);
-}
-
 // Warning types the IEM storm-based-warning feed carries (and that the map's
 // IEM layer already draws). Other warnings — winter storm, high wind, flood,
 // heat, etc. — are county/zone based and only exist in the NWS feed, so they
@@ -1177,27 +1175,47 @@ function filterAlertCollectionForMap(data, source = "nws") {
 function formatWindTag(value) {
   const text = String(value || "").trim();
   if (!text) return null;
-  const number = text.match(/\d+(\.\d+)?/);
-  return number ? `${number[0]} mph` : text.toLowerCase();
+  const number = text.match(/\d*\.?\d+/);
+  return number ? `${parseFloat(number[0])} mph` : text.toLowerCase();
 }
 
 // Same normalization for hail sizes ("1.75", '1.75"', "1.75 IN") → "1.75 in".
+// NWS maxHailSize values can lead with a bare decimal point ("Up to .75"),
+// which a digit-first match misread as 75 — parseFloat keeps it 0.75.
 function formatHailTag(value) {
   const text = String(value || "").trim();
   if (!text) return null;
-  const number = text.match(/\d+(\.\d+)?/);
-  return number ? `${number[0]} in` : text.toLowerCase();
+  const number = text.match(/\d*\.?\d+/);
+  return number ? `${parseFloat(number[0])} in` : text.toLowerCase();
 }
 
 function severeDetectionTag(alert) {
   if (!/severe thunderstorm warning/i.test(alert.event || "")) return null;
-  const detections = [alert.iem_windthreat, alert.iem_hailthreat, alert.iem_windtag, alert.iem_hailtag]
+  const p = alert.parameters || {};
+  const detections = [
+    p.windThreat?.[0], p.hailThreat?.[0],
+    alert.iem_windthreat, alert.iem_hailthreat, alert.iem_windtag, alert.iem_hailtag,
+  ]
     .filter(Boolean)
     .map(item => String(item).toUpperCase());
   if (!detections.length) return null;
   if (detections.some(item => item.includes("OBSERVED"))) return "Observed";
   if (detections.some(item => item.includes("RADAR"))) return "Radar indicated";
   return null;
+}
+
+// PDS ("Particularly Dangerous Situation") and emergency wording are only
+// printed in the product text for watches and tornado warnings — there is no
+// CAP parameter for them — so detect them from the headline/description.
+// When neither appears, the alert simply carries no tag and renders as a
+// regular watch/warning.
+function alertTextFlags(alert) {
+  const text = `${alert.headline || ""} ${alert.description || ""}`;
+  return {
+    pds: !!alert.iem_is_pds || /particularly dangerous situation/i.test(text),
+    emergency: !!alert.iem_is_emergency ||
+      /\b(tornado|flash flood) emergency\b/i.test(text),
+  };
 }
 
 function isDetectionTag(value) {
@@ -1264,15 +1282,15 @@ function mergeAlerts(...groups) {
 function tagsForAlert(alert) {
   const p = alert.parameters || {};
   const detectionTag = severeDetectionTag(alert);
-  // IEM storm-based warnings are enriched with the matching NWS alert's CAP
-  // parameters (see alertsPayload), so both sources can describe the same
-  // hazard. Read each hazard from one source with the other as fallback —
-  // listing both produced duplicate Wind/Hail/Damage chips in mixed casing.
+  // NWS alerts carry the hazard tags from the bottom of the raw product as
+  // CAP parameters (maxWindGust, maxHailSize, tornadoDetection…). The iem_*
+  // fields remain as fallbacks for map-popup alerts built from IEM features.
   const windTag   = p.maxWindGust?.[0] ?? alert.iem_windtag;
   const hailTag   = p.maxHailSize?.[0] ?? alert.iem_hailtag;
   const damageTag = p.thunderstormDamageThreat?.[0] ?? alert.iem_damagetag;
   const floodTag  = p.flashFloodDamageThreat?.[0] ?? alert.iem_floodtag;
   const tornadoTag = p.tornadoDetection?.[0] ?? alert.iem_tornadotag;
+  const flags = alertTextFlags(alert);
   // The CAP severity ("Extreme"/"Severe"/"Moderate"...) is intentionally NOT
   // shown as a chip — it only drives alert ranking and card styling.
   const raw = [
@@ -1283,8 +1301,8 @@ function tagsForAlert(alert) {
     windTag && `Wind ${formatWindTag(windTag)}`,
     hailTag && `Hail ${formatHailTag(hailTag)}`,
     detectionTag,
-    alert.iem_is_pds && "PDS",
-    alert.iem_is_emergency && "Emergency",
+    flags.pds && "PDS",
+    flags.emergency && "Emergency",
   ].filter(Boolean);
   const seen = new Set();
   return raw.map(normalizeAlertTag).filter(item => {
@@ -1436,49 +1454,26 @@ async function ecccAlertsPayload(lat, lon) {
     .map(normalizeEcccAlert);
 }
 
+// The NWS API is the single US alert source: every alert (storm-based
+// warnings included) arrives with the full CAP text plus the hazard tag
+// parameters (maxWindGust, maxHailSize, tornadoDetection, damage threats…)
+// printed at the bottom of the raw product, so no IEM merge/enrichment pass
+// is needed. The IEM storm-based feed is now only used for map polygons.
 async function alertsPayload(lat, lon) {
-  const [iemResult, nwsResult, ecccResult] = await Promise.allSettled([
-    getJson("https://mesonet.agron.iastate.edu/geojson/sbw.geojson"),
+  const [nwsResult, ecccResult] = await Promise.allSettled([
     getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
     ecccAlertsPayload(lat, lon),
   ]);
-  const allNwsFeatures = nwsResult.status === "fulfilled" ? (nwsResult.value.features || []) : [];
-  const nwsWarningsByEvent = new Map();
-  allNwsFeatures
-    .map(normalizeNwsAlert)
-    .filter(alert => isWarningEvent(alert.event) && alert.description)
-    .forEach(alert => { if (!nwsWarningsByEvent.has(alert.event)) nwsWarningsByEvent.set(alert.event, alert); });
-  const iemAlerts = iemResult.status === "fulfilled"
-    ? (iemResult.value.features || [])
-      .filter(feature => pointInGeometry(lon, lat, feature.geometry))
-      .map(normalizeIemFeature)
-      .map(alert => {
-        const nwsMatch = nwsWarningsByEvent.get(alert.event);
-        if (nwsMatch) {
-          return {
-            ...alert,
-            description: nwsMatch.description || alert.description,
-            parameters: nwsMatch.parameters || {},
-          };
-        }
-        return alert;
-      })
+  const nwsAlerts = nwsResult.status === "fulfilled"
+    ? (nwsResult.value.features || []).map(normalizeNwsAlert)
     : [];
-  // Keep county/zone warnings (winter storm, high wind, flood...) that the
-  // storm-based feed doesn't carry; drop only warnings IEM already supplies.
-  const iemEvents = new Set(iemAlerts.map(alert => String(alert.event || "").toLowerCase()));
-  const nwsAlerts = allNwsFeatures
-    .map(normalizeNwsAlert)
-    .filter(alert => !isStormBasedWarning(alert.event) &&
-      !(isWarningEvent(alert.event) && iemEvents.has(String(alert.event).toLowerCase())));
   const ecccAlerts = ecccResult.status === "fulfilled" ? ecccResult.value : [];
-  const alerts = mergeAlerts(iemAlerts, nwsAlerts, ecccAlerts).map(alert => ({
+  const alerts = mergeAlerts(nwsAlerts, ecccAlerts).map(alert => ({
     ...alert,
     tags: alert.source === "ECCC" ? [] : tagsForAlert(alert),
   }));
   const sources = [
-    iemResult.status === "fulfilled" && "IEM storm-based warnings",
-    nwsResult.status === "fulfilled" && "NWS watches/advisories",
+    nwsResult.status === "fulfilled" && "NWS api.weather.gov alerts",
     isInCanada(lat, lon) && ecccResult.status === "fulfilled" && "ECCC alerts",
   ].filter(Boolean);
   return {
@@ -2054,11 +2049,17 @@ async function mapsPayload() {
     ? (normalizeDroughtData(droughtResult.value).features || [])
       .find(feature => pointInGeometry(loc.lon, loc.lat, feature.geometry))
     : null;
+  // Chip values stay compact ("15%") — the longer "15% probability" phrasing
+  // overflowed the narrow sidebar chips.
+  const chipPct = feature => {
+    const num = Number(feature?.properties?.RISK_NUM);
+    return Number.isFinite(num) ? `${num}%` : "0%";
+  };
   return {
     spcRisk: spcCat ? spcLabel(spcCat.properties?.LABEL) : "No Day 1 categorical risk",
-    spcTorn: spcTorn ? spcPopupLabel(spcTorn.properties || {}) : "0%",
-    spcWind: spcWind ? spcPopupLabel(spcWind.properties || {}) : "0%",
-    spcHail: spcHail ? spcPopupLabel(spcHail.properties || {}) : "0%",
+    spcTorn: chipPct(spcTorn),
+    spcWind: chipPct(spcWind),
+    spcHail: chipPct(spcHail),
     drought: droughtFeature ? droughtLabel(droughtFeature.properties?.CATEGORY) : "No active USDM drought category",
     radar: {
       time: "Manual timeline controls",
@@ -2388,6 +2389,20 @@ function spcDaySummary(spcDay = {}) {
   if (!lead) return "";
   const hazards = cat === "TSTM" ? "" : spcHazardSentence(spcDay);
   return hazards ? `${lead} ${hazards}` : lead;
+}
+
+// WPC Excessive Rainfall Outlook summary sentences. The WPC categorical scale
+// mirrors the SPC scale (minus Enhanced), so each level reuses the SPC
+// coverage wording for the same-named level, with flash flooding as the hazard.
+const WPC_CAT_SUMMARY = {
+  MRGL: "Isolated instances of excessive rainfall leading to flash flooding are possible.",
+  SLGT: "Isolated to scattered instances of excessive rainfall leading to flash flooding are expected.",
+  MDT:  "Scattered to numerous instances of excessive rainfall leading to flash flooding are expected.",
+  HIGH: "Numerous instances of excessive rainfall leading to flash flooding are expected.",
+};
+
+function wpcDaySummary(label = "") {
+  return WPC_CAT_SUMMARY[String(label).toUpperCase()] || "";
 }
 
 function droughtLabel(category = "") {
@@ -2870,7 +2885,7 @@ function renderAlerts() {
         <p class="eyebrow">Weather Alerts</p>
         <h3>${alerts.length} active alert${alerts.length > 1 ? "s" : ""} for ${safeText(selectedLocation.name)}</h3>
       </div>
-      <span>${safeText(weatherState.alertSource || "IEM storm-based warnings")}</span>
+      <span>${safeText(weatherState.alertSource || "NWS api.weather.gov alerts")}</span>
     </div>
     <div class="alert-list">
       ${alerts.map((alert, index) => `
@@ -3487,9 +3502,10 @@ function showDailyDetails(index) {
     const wpcDay = weatherState.wpcDays?.[index];
     if (wpcDay?.label) {
       const wpcNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
+      const wpcSummary = wpcDaySummary(wpcDay.label);
       risks.push({ color: spcRiskColor(wpcDay.label) || "#60a5fa", icon: "precip",
         title: `${wpcNames[wpcDay.label] || wpcDay.label} risk of excessive rainfall`,
-        sub: `WPC Day ${index + 1} excessive rainfall outlook` });
+        sub: `${wpcSummary ? `${wpcSummary} — ` : ""}WPC Day ${index + 1} excessive rainfall outlook` });
     }
   }
   const riskHtml = risks.length ? `<div class="day-modal-risks">${risks.map(risk => `
@@ -3748,20 +3764,34 @@ function showAlertDetails(indexOrAlert) {
     ? `<div class="alert-section"><div class="alert-section-label">Details</div><p class="alert-raw-desc">${safeText(rawDesc)}</p></div>`
     : "";
 
-  // Hazard tags
+  // Hazard tags — read from the NWS CAP parameters with the IEM fields as
+  // fallback for alerts built from map features.
+  const params = alert.parameters || {};
+  const windHazard    = params.maxWindGust?.[0] ?? alert.iem_windtag;
+  const hailHazard    = params.maxHailSize?.[0] ?? alert.iem_hailtag;
+  const damageHazard  = params.thunderstormDamageThreat?.[0] ?? alert.iem_damagetag;
+  const tornadoHazard = params.tornadoDetection?.[0] ?? alert.iem_tornadotag;
+  const floodHazard   = params.flashFloodDamageThreat?.[0] ?? alert.iem_floodtag;
   const hazardItems = [
     severeDetectionTag(alert) && `Detection: ${severeDetectionTag(alert)}`,
-    alert.iem_windtag    && `Wind: ${formatWindTag(alert.iem_windtag)}`,
-    alert.iem_hailtag    && `Hail: ${formatHailTag(alert.iem_hailtag)}`,
-    alert.iem_damagetag  && `Damage: ${alert.iem_damagetag}`,
-    alert.iem_tornadotag && `Tornado: ${alert.iem_tornadotag}`,
-    alert.iem_floodtag   && `Flood tag: ${alert.iem_floodtag}`,
+    windHazard    && `Wind: ${formatWindTag(windHazard)}`,
+    hailHazard    && `Hail: ${formatHailTag(hailHazard)}`,
+    damageHazard  && `Damage: ${normalizeAlertTag(damageHazard)}`,
+    tornadoHazard && `Tornado: ${normalizeAlertTag(tornadoHazard)}`,
+    floodHazard   && `Flood tag: ${normalizeAlertTag(floodHazard)}`,
   ].filter(Boolean);
   const hazardHtml = hazardItems.length ? `<div class="alert-hazard-tags">${hazardItems.map(h => `<span class="alert-hazard-tag">${safeText(h)}</span>`).join("")}</div>` : "";
 
-  // Level categories table
+  // Level categories table. Watches use their own ladder ("WATCH"/"PDS
+  // WATCH"); when no PDS tag is found the regular WATCH row highlights —
+  // previously the fallback returned "WARNING", which matches no watch row,
+  // so watches never highlighted a level at all.
   const categories = ALERT_LEVEL_CATEGORIES[event] || null;
   const activeLevel = categories ? (() => {
+    if (/\bwatch\b/i.test(event)) {
+      if (currentTagsLower.some(t => t.includes("pds") || t.includes("particularly dangerous"))) return "PDS WATCH";
+      return "WATCH";
+    }
     if (currentTagsLower.some(t => t.includes("emergency"))) return "EMERGENCY";
     if (currentTagsLower.some(t => t.includes("pds") || t.includes("particularly dangerous"))) return "PDS";
     if (currentTagsLower.some(t => t.includes("destructive"))) return "DESTRUCTIVE";
@@ -3809,7 +3839,17 @@ function showAlertDetails(indexOrAlert) {
     : `NWS API (${alert.source || "NWS"})`;
   const srcHtml = `<p class="alert-modal-source">Source: ${safeText(srcLabel)}</p>`;
 
-  modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + rawDescHtml + categoriesHtml + tipsHtml + srcHtml;
+  // Full alert text — the complete product text was previously never shown
+  // when the description parsed into WHAT/WHERE/WHEN sections. Always offer
+  // it in a collapsible block so nothing from the original alert is lost.
+  const fullText = [rawDesc, (alert.instruction || "").trim()].filter(Boolean).join("\n\n");
+  const fullTextHtml = fullText ? `
+    <details class="alert-full-text">
+      <summary>Full Alert Text</summary>
+      <pre>${safeText(fullText)}</pre>
+    </details>` : "";
+
+  modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + rawDescHtml + categoriesHtml + tipsHtml + fullTextHtml + srcHtml;
   detailModal.hidden = false;
   document.body.classList.add("modal-open");
 }
@@ -4070,7 +4110,7 @@ function drawAtmosphere() {
   const dpr = window.devicePixelRatio || 1;
   // Measure the canvas's actual rendered size so its buffer matches the CSS
   // overshoot. iOS standalone can still clip fixed elements out of safe-area
-  // bands, so the root html gradient mirrors this palette as the reliable fallback.
+  // bands, so the body::before gradient mirrors this palette as the reliable fallback.
   const width = canvas.clientWidth || window.innerWidth;
   const height = canvas.clientHeight || window.innerHeight;
   const bufferW = Math.round(width * dpr);
@@ -5144,20 +5184,43 @@ function fitCyclonesInView() {
 }
 
 const LSR_ICONS = {
-  "T": { svg: `<path d="M12 3c-1 3-4 5-4 9h3l-2 9 9-12h-5z" fill="currentColor"/><path d="M10 21c0 0 1-2 3-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`, color: "#ef4444", label: "Tornado" },
-  "H": { svg: `<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="5" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="5" y1="12" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#f97316", label: "Hail" },
-  "W": { svg: `<path d="M5 8h10.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12h14.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 16h8.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#38bdf8", label: "Wind" },
-  "F": { svg: `<path d="M7 10c0-3 5-7 5-7s5 4 5 7a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 19c2-3 5-3 7-1.5s5 1.5 7-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#10b981", label: "Flood" },
-  "R": { svg: `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="19" x2="8" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="19" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#60a5fa", label: "Rain" },
-  "S": { svg: `<line x1="2" x2="22" y1="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" x2="12" y1="2" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m20 16-4-4 4-4m-16 8 4-4-4-4m12-4-4 4-4-4m0 16 4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`, color: "#a5f3fc", label: "Snow" },
-  "Z": { svg: `<polygon points="12,2 14.5,8.5 22,8.5 16.5,13 18.5,20 12,16 5.5,20 7.5,13 2,8.5 9.5,8.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>`, color: "#bfdbfe", label: "Ice" },
-  "M": { svg: `<path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="currentColor"/>`, color: "#94a3b8", label: "TSTM" },
+  "tornado": { svg: `<path d="M12 3c-1 3-4 5-4 9h3l-2 9 9-12h-5z" fill="currentColor"/><path d="M10 21c0 0 1-2 3-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`, color: "#ef4444", label: "Tornado" },
+  "hail": { svg: `<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="5" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="5" y1="12" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#f97316", label: "Hail" },
+  "wind": { svg: `<path d="M5 8h10.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12h14.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 16h8.5a2.5 2.5 0 1 0-2.5-2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#38bdf8", label: "Wind" },
+  "flood": { svg: `<path d="M7 10c0-3 5-7 5-7s5 4 5 7a5 5 0 0 1-10 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 19c2-3 5-3 7-1.5s5 1.5 7-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#10b981", label: "Flood" },
+  "rain": { svg: `<path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="19" x2="8" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="19" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`, color: "#60a5fa", label: "Rain" },
+  "winter": { svg: `<line x1="2" x2="22" y1="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" x2="12" y1="2" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m20 16-4-4 4-4m-16 8 4-4-4-4m12-4-4 4-4-4m0 16 4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`, color: "#a5f3fc", label: "Snow" },
+  "lightning": { svg: `<path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="currentColor"/>`, color: "#facc15", label: "Lightning" },
 };
 
+// Plain-language LSR groupings. Reports are bucketed by their typetext — the
+// raw IEM single-letter type codes used to drive the filter buttons, which
+// read as meaningless letters ("T", "G", "M"…). First matching category wins;
+// "other" is the catch-all.
+const LSR_CATEGORIES = [
+  { id: "tornado",   label: "Tornado",    match: /TORNADO|FUNNEL|WATERSPOUT|WALL CLOUD|LANDSPOUT/ },
+  { id: "wind",      label: "Wind",       match: /WIND|\bWND\b|DOWNBURST|MICROBURST|GUSTNADO|DUST/ },
+  { id: "hail",      label: "Hail",       match: /HAIL/ },
+  { id: "flood",     label: "Flooding",   match: /FLOOD|HIGH WATER|DEBRIS FLOW|MUDSLIDE/ },
+  { id: "rain",      label: "Rain",       match: /RAIN/ },
+  { id: "winter",    label: "Snow & Ice", match: /SNOW|BLIZZARD|SLEET|FREEZING|\bICE\b|GRAUPEL|WINTER/ },
+  { id: "lightning", label: "Lightning",  match: /LIGHTNING/ },
+  { id: "other",     label: "Other",      match: /./ },
+];
+
+function lsrCategory(properties = {}) {
+  const text = String(properties.typetext || properties.type || "").toUpperCase();
+  return LSR_CATEGORIES.find(cat => cat.match.test(text)) || LSR_CATEGORIES[LSR_CATEGORIES.length - 1];
+}
+
 function lsrIconConfig(properties = {}) {
-  const typeKey = (properties.type || "").toUpperCase().charAt(0);
+  const category = lsrCategory(properties);
   const defaultSvg = `<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="9" x2="12" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`;
-  return LSR_ICONS[typeKey] || { svg: defaultSvg, color: "#94a3b8", label: properties.type || "LSR" };
+  const icon = LSR_ICONS[category.id] || { svg: defaultSvg, color: "#94a3b8" };
+  // Use the report's own typetext ("TSTM WND GST" → "Tstm Wnd Gst") for the
+  // popup label; the category label is the fallback.
+  const typetext = String(properties.typetext || "").trim();
+  return { ...icon, label: typetext ? titleCaseAlertName(typetext.toLowerCase()) : category.label };
 }
 
 function buildLsrItemHtml(feature) {
@@ -5179,7 +5242,7 @@ function buildLsrItemHtml(feature) {
 }
 
 function lsrTypeKey(properties = {}) {
-  return String(properties.type || properties.typetext || "Other").trim() || "Other";
+  return lsrCategory(properties).id;
 }
 
 function lsrFilteredFeatures() {
@@ -5474,51 +5537,60 @@ function buildPopupNavHtml(idx, total) {
     </div>`;
 }
 
+// Compact map-click alert popup: one header line (event + source · expiry)
+// and a single wrapping row of hazard chips. The old multi-row stat list grew
+// taller than the visible map on phones, forcing a scroll just to reach the
+// details button — full information lives behind "View Alert Details".
 function buildAlertBodyHtml(feature, alertIdx, popupId) {
   const p = feature.properties || {};
   const isIem = p.phenomena != null;
-  let title, subtitle, detailHtml, iconStyle;
+  let title, subtitle, chips, iconStyle;
+  const expiresChip = expires => expires
+    ? `Expires ${new Date(expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+    : null;
 
   if (isIem) {
-    const rawKey = `${p.phenomena}.${p.significance}`;
-    const key = rawKey.toUpperCase();
-    const eventName = iemPhenomenaMap[key] || iemPhenomenaMap[rawKey] || rawKey;
-    const expires = p.expire ? new Date(p.expire).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
     const tempAlert = normalizeIemFeature(feature);
     tempAlert.tags = tagsForAlert(tempAlert);
     title = safeText(alertDisplayEvent(tempAlert));
-    subtitle = "IEM Storm-Based Warning";
+    subtitle = `Storm-Based Warning${p.wfo ? ` · ${safeText(p.wfo)}` : ""}`;
     iconStyle = "background:rgba(251,146,60,0.18);border:1px solid rgba(251,146,60,0.35);";
-    detailHtml = `
-      <div class="popup-stat"><span class="popup-key">WFO</span><span class="popup-val">${safeText(p.wfo || "--")}</span></div>
-      <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>
-      ${p.windtag ? `<div class="popup-stat"><span class="popup-key">Wind</span><span class="popup-val">${numericWind(p.windtag) != null ? safeText(fmtWind(numericWind(p.windtag))) : safeText(p.windtag) + " mph"}</span></div>` : ""}
-      ${p.hailtag ? `<div class="popup-stat"><span class="popup-key">Hail</span><span class="popup-val">${isMetric() && Number.isFinite(Number(p.hailtag)) ? (Number(p.hailtag) * 2.54).toFixed(1) + " cm" : safeText(p.hailtag) + "\""}</span></div>` : ""}
-      ${p.tornadotag ? `<div class="popup-stat"><span class="popup-key">Tornado</span><span class="popup-val">${safeText(p.tornadotag)}</span></div>` : ""}`;
+    chips = [
+      expiresChip(p.expire),
+      p.windtag && `Wind ${numericWind(p.windtag) != null ? fmtWind(numericWind(p.windtag)) : `${p.windtag} mph`}`,
+      p.hailtag && `Hail ${isMetric() && Number.isFinite(Number(p.hailtag)) ? `${(Number(p.hailtag) * 2.54).toFixed(1)} cm` : `${p.hailtag}"`}`,
+      p.tornadotag && `Tornado ${String(p.tornadotag).toLowerCase()}`,
+    ];
   } else {
-    const expires = p.expires ? new Date(p.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
     const evtLower = (p.event || "").toLowerCase();
     const matchedAlert = (weatherState.alerts || []).find(a => a.event?.toLowerCase() === evtLower);
     title = safeText(matchedAlert ? alertDisplayEvent(matchedAlert) : (p.event || "Weather Alert"));
-    subtitle = p.ecccAlert ? "ECCC Alert" : "NWS County/Zone Alert";
+    subtitle = p.ecccAlert ? "ECCC Alert" : "NWS Alert";
     iconStyle = `background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;`;
-    detailHtml = `
-      <div class="popup-stat"><span class="popup-key">Area</span><span class="popup-val">${safeText(p.zoneName || p.areaDesc || "--")}</span></div>
-      <div class="popup-stat"><span class="popup-key">Severity</span><span class="popup-val">${safeText(p.severity || "--")}</span></div>
-      <div class="popup-stat"><span class="popup-key">Expires</span><span class="popup-val">${expires}</span></div>`;
+    chips = [
+      expiresChip(p.expires),
+      p.severity,
+      p.zoneName || p.areaDesc,
+    ];
   }
 
+  const chipsHtml = chips.filter(Boolean)
+    .map(chip => `<span class="popup-chip">${safeText(String(chip))}</span>`)
+    .join("");
+
   return `
-    <div class="popup-header">
-      <div class="popup-icon popup-alert" style="${iconStyle}">⚠️</div>
-      <div>
-        <div class="popup-title">${title}</div>
-        <div class="popup-subtitle">${safeText(subtitle)}</div>
+    <div class="popup-compact">
+      <div class="popup-header">
+        <div class="popup-icon popup-alert" style="${iconStyle}">⚠️</div>
+        <div>
+          <div class="popup-title">${title}</div>
+          <div class="popup-subtitle">${subtitle}</div>
+        </div>
       </div>
-    </div>
-    [NAV_SLOT]
-    ${detailHtml}
-    <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${popupId},${alertIdx})">View Alert Details</button>`;
+      [NAV_SLOT]
+      ${chipsHtml ? `<div class="popup-chip-row">${chipsHtml}</div>` : ""}
+      <button class="popup-alert-details-btn" onclick="window._viewAlertFromMapFeature(${popupId},${alertIdx})">View Alert Details</button>
+    </div>`;
 }
 
 function buildAlertFeatureHtml(feature, idx, total, popupId) {
@@ -5879,10 +5951,18 @@ function renderLsrSubControls() {
     const key = lsrTypeKey(feature.properties || {});
     counts.set(key, (counts.get(key) || 0) + 1);
   });
-  const types = [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  // Buttons follow the fixed category order (most severe hazards first) and
+  // only appear for categories that actually have reports right now. Each
+  // shows a color dot matching its map markers plus a live report count.
   const allActive = !activeLsrTypes.size;
-  el.innerHTML = [`<button type="button" data-lsr-type="__all" class="${allActive ? "active" : ""}">All</button>`,
-    ...types.map(type => `<button type="button" data-lsr-type="${safeText(type)}" class="${activeLsrTypes.has(type) ? "active" : ""}">${safeText(type)} <small>${counts.get(type)}</small></button>`),
+  const categoryBtn = cat => {
+    const icon = LSR_ICONS[cat.id];
+    const dot = icon ? `<span class="lsr-cat-dot" style="background:${icon.color}"></span>` : "";
+    return `<button type="button" data-lsr-type="${cat.id}" class="${activeLsrTypes.has(cat.id) ? "active" : ""}" title="Show only ${safeText(cat.label.toLowerCase())} reports">${dot}${safeText(cat.label)} <small>${counts.get(cat.id)}</small></button>`;
+  };
+  el.innerHTML = [
+    `<button type="button" data-lsr-type="__all" class="${allActive ? "active" : ""}" title="Show every storm report">All reports</button>`,
+    ...LSR_CATEGORIES.filter(cat => counts.has(cat.id)).map(categoryBtn),
   ].join("");
   el.querySelectorAll("button").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -5892,7 +5972,7 @@ function renderLsrSubControls() {
         if (activeLsrTypes.has(type)) activeLsrTypes.delete(type);
         else activeLsrTypes.add(type);
       }
-      localStorage.setItem("lsrTypeFilter", JSON.stringify([...activeLsrTypes]));
+      localStorage.setItem("lsrCategoryFilter", JSON.stringify([...activeLsrTypes]));
       renderLsrSubControls();
       updateLsrLayerData();
     });
