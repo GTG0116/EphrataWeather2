@@ -751,6 +751,45 @@ function safeText(value) {
   })[char]);
 }
 
+// Pin the modal overlay to the *visual* viewport. position:fixed anchors to
+// the layout viewport, so after a pinch or accessibility zoom on iOS the
+// overlay could sit half off-screen — the top of the popup unreachable while
+// touches landed on the page behind it. While the modal is open, mirror the
+// visual viewport's size and offset onto the overlay so the card always
+// centers in what the user can actually see.
+function syncModalToVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  if (detailModal.hidden) {
+    detailModal.style.transform = "";
+    detailModal.style.width = "";
+    detailModal.style.height = "";
+    return;
+  }
+  detailModal.style.transform = `translate(${vv.offsetLeft}px, ${vv.offsetTop}px)`;
+  detailModal.style.width = `${vv.width}px`;
+  detailModal.style.height = `${vv.height}px`;
+}
+window.visualViewport?.addEventListener("resize", syncModalToVisualViewport);
+window.visualViewport?.addEventListener("scroll", syncModalToVisualViewport);
+
+// Opening freezes the page scroll by fixing the body at its current offset
+// (body.modal-open in styles.css); iOS ignores plain overflow:hidden on the
+// body, which let the extended forecast keep scrolling under the popup.
+let modalScrollLockY = 0;
+
+function showDetailModal() {
+  if (!detailModal.hidden) {
+    syncModalToVisualViewport();
+    return;
+  }
+  modalScrollLockY = window.scrollY || document.documentElement.scrollTop || 0;
+  document.body.style.top = `-${modalScrollLockY}px`;
+  document.body.classList.add("modal-open");
+  detailModal.hidden = false;
+  syncModalToVisualViewport();
+}
+
 function openDetails(eyebrow, title, rows, summary = "") {
   modalEyebrow.textContent = eyebrow;
   modalTitle.textContent = title;
@@ -760,13 +799,16 @@ function openDetails(eyebrow, title, rows, summary = "") {
       ${rows.map(([term, desc, icon]) => `<div><dt>${icon ? uiIcon(icon) : ""}<span>${safeText(term)}</span></dt><dd>${safeText(desc)}</dd></div>`).join("")}
     </dl>
   `;
-  detailModal.hidden = false;
-  document.body.classList.add("modal-open");
+  showDetailModal();
 }
 
 function closeDetails() {
+  if (detailModal.hidden) return;
   detailModal.hidden = true;
   document.body.classList.remove("modal-open");
+  document.body.style.top = "";
+  window.scrollTo(0, modalScrollLockY);
+  syncModalToVisualViewport();
 }
 
 function apparentTemperature(tempF, humidity = 50, windMph = 0) {
@@ -3569,8 +3611,7 @@ function showDailyDetails(index) {
         ${discussion.map(text => `<p>${safeText(text)}</p>`).join("")}
       </div>` : ""}
   `;
-  detailModal.hidden = false;
-  document.body.classList.add("modal-open");
+  showDetailModal();
 }
 
 function parseAlertSections(text = "") {
@@ -3850,8 +3891,7 @@ function showAlertDetails(indexOrAlert) {
     </details>` : "";
 
   modalBody.innerHTML = tagsHtml + metaHtml + hazardHtml + whatHtml + impactsHtml + whereHtml + whenHtml + rawDescHtml + categoriesHtml + tipsHtml + fullTextHtml + srcHtml;
-  detailModal.hidden = false;
-  document.body.classList.add("modal-open");
+  showDetailModal();
 }
 
 function renderMetar(aviation) {
@@ -4105,6 +4145,16 @@ function initHistoricalCalendar() {
   renderHistCalendar();
 }
 
+// Same color with alpha 0, for canvas gradients: fading to "transparent"
+// (transparent black) instead would darken the blend midway because canvas
+// gradients interpolate without premultiplying alpha.
+function hexToTransparent(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(String(hex || ""));
+  if (!match) return "rgba(7, 89, 133, 0)";
+  const n = parseInt(match[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 0)`;
+}
+
 function drawAtmosphere() {
   const palette = themePalettes[activeTheme] || themePalettes.sunny;
   const dpr = window.devicePixelRatio || 1;
@@ -4125,6 +4175,22 @@ function drawAtmosphere() {
   palette.gradient.forEach((color, index) => grad.addColorStop(index / (palette.gradient.length - 1), color));
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
+
+  // iOS Safari and standalone web apps intermittently composite the
+  // status-bar band without fixed-position layers while scrolling, exposing
+  // the flat html background-color (--sky-0 = gradient[0]). The diagonal
+  // gradient varies horizontally, so that flat band met the scene with a
+  // visible seam just below the Dynamic Island. Pin the top of the scene
+  // (220px offscreen bleed + the safe-area strip) to the same flat color and
+  // ease into the diagonal gradient below it; body::before mirrors this
+  // blend in CSS for when the canvas layer itself drops out.
+  const blendEnd = 600;
+  const topBlend = ctx.createLinearGradient(0, 0, 0, blendEnd);
+  topBlend.addColorStop(0, palette.gradient[0]);
+  topBlend.addColorStop(340 / blendEnd, palette.gradient[0]);
+  topBlend.addColorStop(1, hexToTransparent(palette.gradient[0]));
+  ctx.fillStyle = topBlend;
+  ctx.fillRect(0, 0, width, blendEnd);
 
   for (let i = 0; i < 58; i++) {
     const x = (Math.sin(frame * 0.004 + i * 12.7) * 0.5 + 0.5) * width;
@@ -5628,7 +5694,11 @@ async function addAlertsLayer() {
   if (iemSource) {
     iemSource.setData(iemData);
   } else {
-    radarMap.addSource("alerts-source", { type: "geojson", data: iemData });
+    // maxzoom 10: past z10 Mapbox overzooms existing tiles instead of
+    // re-tiling the polygons for every zoom level, which made the alert
+    // fills blink out for a moment on each zoom step (the source geometry
+    // is only ~110m precision, so nothing visible is lost).
+    radarMap.addSource("alerts-source", { type: "geojson", data: iemData, maxzoom: 10 });
     addWeatherLayer({
       id: "alerts-fill",
       type: "fill",
@@ -5660,7 +5730,8 @@ async function addAlertsLayer() {
   if (nwsSource) {
     nwsSource.setData(nwsData);
   } else {
-    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData });
+    // maxzoom 10 for the same zoom-blink reason as alerts-source above.
+    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData, maxzoom: 10 });
     addWeatherLayer({
       id: "nws-alerts-fill",
       type: "fill",
@@ -5681,7 +5752,12 @@ async function addAlertsLayer() {
     });
   }
 
-  applyAlertKindFilter();
+  // The data fed above is already filtered for the active alert kind, so only
+  // sync layer visibility here. Calling applyAlertKindFilter() would setData
+  // the same collections a second time, and every setData drops the source's
+  // tiles until the worker re-cuts them — a visible blink of the alert
+  // polygons after each zoom/pan refetch.
+  ensureAlertLayersVisible();
 
   // Cursor changes only — clicks handled by wireUnifiedClickHandler().
   // Mapbox delegates layer events by id, so wiring before a layer exists is
@@ -5729,13 +5805,18 @@ function refreshAlertSourcesForFilter() {
   if (nwsSource) nwsSource.setData(filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws"));
 }
 
-function applyAlertKindFilter() {
+function ensureAlertLayersVisible() {
   if (!radarMap || !mapLoaded) return;
-  refreshAlertSourcesForFilter();
   ["nws-alerts-fill", "nws-alerts-line", "alerts-fill", "alerts-line"].forEach(id => {
     if (radarMap.getLayer(id)) radarMap.setFilter(id, null);
     if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", "visible");
   });
+}
+
+function applyAlertKindFilter() {
+  if (!radarMap || !mapLoaded) return;
+  refreshAlertSourcesForFilter();
+  ensureAlertLayersVisible();
 }
 
 async function addDroughtLayer() {
