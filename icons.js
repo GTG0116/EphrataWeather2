@@ -37,15 +37,53 @@ const WeatherIcons = {
         const base = `fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`;
         const softAttr = `fill="none" stroke="${soft}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`;
 
+        // Every mask needs an id that is unique across the whole document —
+        // these icons are rendered dozens at a time (hourly strip, daily grid,
+        // popups) and duplicate ids would make them all share one mask.
+        const uid = `wx${(WeatherIcons._seq = (WeatherIcons._seq || 0) + 1).toString(36)}`;
+
         const CLOUD = "M20.5 46.5h22.8a9.4 9.4 0 0 0 1.2-18.7 14.2 14.2 0 0 0-26.6-3.4 9.6 9.6 0 0 0 2.6 22.1z";
-        const cloud = (dx, dy, s = 1, opacity = 1, dur = 8) => `
+
+        const driftStyle = (dur) => anim
+            ? `transform-box:fill-box;transform-origin:center;animation:wxDrift ${dur}s ease-in-out infinite;`
+            : "";
+
+        const cloud = (dx, dy, s = 1, opacity = 1, dur = 8, extra = "") => `
             <path d="${CLOUD}" ${softAttr} opacity="${opacity}"
                 transform="translate(${dx} ${dy}) scale(${s})"
-                style="${anim ? `transform-box:fill-box;transform-origin:center;animation:wxDrift ${dur}s ease-in-out infinite;` : ""}"/>`;
+                style="${driftStyle(dur)}" ${extra}/>`;
 
-        const sun = (cx, cy, r, rays = 8) => {
+        // Solid silhouette of a cloud, padded outward by `pad` user units, for
+        // use inside a mask. Stroke width is divided by the scale factor
+        // because the stroke is measured in the path's own (pre-transform)
+        // coordinate system.
+        const cloudSilhouette = (dx, dy, s = 1, pad = 5, dur = 8) => `
+            <path d="${CLOUD}" fill="#000" stroke="#000" stroke-width="${(pad / s).toFixed(2)}"
+                stroke-linejoin="round" stroke-linecap="round"
+                transform="translate(${dx} ${dy}) scale(${s})"
+                style="${driftStyle(dur)}"/>`;
+
+        // Knockout mask: white everywhere (keep) except the given silhouettes
+        // (cut away). Without this the front element is a hollow outline, so
+        // whatever sits behind it — sun rays, a second cloud, a star — shows
+        // straight through the shape and the two line drawings tangle into an
+        // unreadable mess wherever they cross. The silhouette carries the same
+        // drift animation as the shape it stands in for, so the cutout tracks
+        // the cloud instead of sliding out from under it.
+        const mask = (id, silhouettes) => `
+            <mask id="${id}" maskUnits="userSpaceOnUse" x="-16" y="-16" width="96" height="96">
+                <rect x="-16" y="-16" width="96" height="96" fill="#fff"/>
+                ${silhouettes}
+            </mask>`;
+
+        // `skip` drops individual rays by index. Masking hides a ray only where
+        // the cloud actually covers it, so a ray aimed at the cloud's shoulder
+        // gets trimmed to a stray tick hanging off the outline instead of
+        // disappearing. Those rays are simply not drawn.
+        const sun = (cx, cy, r, rays = 8, skip = []) => {
             let lines = "";
             for (let i = 0; i < rays; i++) {
+                if (skip.includes(i)) continue;
                 const a = (i * 2 * Math.PI) / rays + Math.PI / 8;
                 const x1 = cx + Math.cos(a) * (r + 4.5), y1 = cy + Math.sin(a) * (r + 4.5);
                 const x2 = cx + Math.cos(a) * (r + 9.5), y2 = cy + Math.sin(a) * (r + 9.5);
@@ -59,7 +97,12 @@ const WeatherIcons = {
         const drops = (n, y0, kind) => {
             let out = "";
             for (let i = 0; i < n; i++) {
-                const x = 24 + i * (kind === "storm" ? 16 : 8.5);
+                // Storm streaks flank the bolt (which occupies x 26-40) rather
+                // than running through it; snowflakes need more room than plain
+                // rain streaks because their arms are ~3.7 units wide.
+                const x = kind === "storm" ? 22 + i * 22
+                        : kind === "snow"  ? 21 + i * 11
+                        : 24 + i * 8.5;
                 if (kind === "snow") {
                     out += `
                     <g style="${anim ? `transform-box:fill-box;transform-origin:center;animation:wxFlake 2.1s linear ${(i * 0.34).toFixed(2)}s infinite;` : ""}">
@@ -85,18 +128,29 @@ const WeatherIcons = {
                 return wrap(sun(32, 32, 12));
 
             case "clearNight": {
+                const MOON = "M40.5 12.5a19 19 0 1 0 12.2 27.9A20.5 20.5 0 0 1 40.5 12.5z";
                 const stars = [[15, 18, 2.2], [22, 44, 1.6], [50, 50, 1.9]].map(([x, y, r], i) => `
                     <g style="${anim ? `transform-box:fill-box;transform-origin:center;animation:wxBreathe ${2.6 + i * 0.8}s ease-in-out infinite;` : ""}">
                         <path d="M${x} ${y - r}l${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)} ${(r * 0.58).toFixed(2)} ${(r * 0.42).toFixed(2)}-${(r * 0.58).toFixed(2)} ${(r * 0.42).toFixed(2)}-${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)}-${(r * 0.58).toFixed(2)}-${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)}z" fill="${color}" stroke="none"/>
                     </g>`).join("");
-                return wrap(`<path d="M40.5 12.5a19 19 0 1 0 12.2 27.9A20.5 20.5 0 0 1 40.5 12.5z" ${base}/>${stars}`);
+                const moonCut = `<path d="${MOON}" fill="#000" stroke="#000" stroke-width="4.5" stroke-linejoin="round"/>`;
+                return wrap(
+                    mask(uid, moonCut) +
+                    `<g mask="url(#${uid})">${stars}</g>` +
+                    `<path d="${MOON}" ${base}/>`);
             }
 
             case "partly":
-                return wrap(sun(43, 20, 8.5, 8) + cloud(-2, 5, 1));
+                return wrap(
+                    mask(uid, cloudSilhouette(-2, 5, 1, 6)) +
+                    `<g mask="url(#${uid})">${sun(45, 19, 8.5, 8, [1, 2, 3])}</g>` +
+                    cloud(-2, 5, 1));
 
             case "overcast":
-                return wrap(cloud(4, -6, 0.82, 0.5, 9) + cloud(-3, 5, 1, 1, 9));
+                return wrap(
+                    mask(uid, cloudSilhouette(-3, 5, 1, 5)) +
+                    `<g mask="url(#${uid})">${cloud(4, -6, 0.82, 0.5, 9)}</g>` +
+                    cloud(-3, 5, 1, 1, 9));
 
             case "rain":
                 return wrap(cloud(-2, -3, 1, 1, 8) + drops(4, 50));
@@ -104,7 +158,14 @@ const WeatherIcons = {
             case "storm": {
                 const bolt = `<path d="M34 44l-7.5 10.5H32l-3 8.5 10.5-12.5H33l4-6.5z" fill="rgba(255,232,160,.95)" stroke="none"
                     style="${anim ? "animation:wxBolt 3.2s linear infinite;" : ""}"/>`;
-                return wrap(cloud(-2, -5, 1, 1, 8) + drops(2, 49, "storm") + bolt);
+                // The bolt is a solid shape, so the rain streaks behind it are
+                // cut away where it overlaps rather than crossing through it.
+                const boltCut = `<path d="M34 44l-7.5 10.5H32l-3 8.5 10.5-12.5H33l4-6.5z" fill="#000" stroke="#000" stroke-width="3.4" stroke-linejoin="round"/>`;
+                return wrap(
+                    cloud(-2, -5, 1, 1, 8) +
+                    mask(uid, boltCut) +
+                    `<g mask="url(#${uid})">${drops(2, 49, "storm")}</g>` +
+                    bolt);
             }
 
             case "snow":
@@ -123,12 +184,19 @@ const WeatherIcons = {
             case "sunset": {
                 const rays = [[10, 30], [54, 30], [16, 20], [48, 20]].map(([x, y]) =>
                     `<line x1="${x}" y1="${y}" x2="${x + (x < 32 ? -3.5 : 3.5)}" y2="${y - 2.5}" ${base}/>`).join("");
+                // The horizon line runs straight through the base of the sun
+                // dome; cut the dome out of it so the two read as one figure
+                // instead of a circle with a bar drawn across it.
+                const domeCut = `<path d="M21 38a11 11 0 0 1 22 0" fill="#000" stroke="#000" stroke-width="4.5" stroke-linejoin="round"/>`;
                 return wrap(`
+                    ${mask(uid, domeCut)}
                     <g style="${anim ? "transform-origin:32px 38px;animation:wxBreathe 6.5s ease-in-out infinite;" : ""}">
                         <path d="M21 38a11 11 0 0 1 22 0" ${base}/>
                     </g>
                     ${rays}
-                    <line x1="10" y1="44" x2="54" y2="44" ${base}/>
+                    <g mask="url(#${uid})">
+                        <line x1="10" y1="44" x2="54" y2="44" ${base}/>
+                    </g>
                     <line x1="18" y1="51" x2="46" y2="51" ${softAttr} opacity="0.55"/>
                     <line x1="26" y1="58" x2="38" y2="58" ${softAttr} opacity="0.3"/>`);
             }

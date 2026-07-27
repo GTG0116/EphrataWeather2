@@ -599,8 +599,7 @@ button:focus-visible {
   overflow: hidden;
 }
 
-.forecast-banner::before,
-.radar-card::before {
+.forecast-banner::before {
   content: "";
   position: absolute;
   inset: 1px;
@@ -611,8 +610,7 @@ button:focus-visible {
   pointer-events: none;
 }
 
-.forecast-banner > *,
-.radar-card > * {
+.forecast-banner > * {
   position: relative;
 }
 
@@ -1189,37 +1187,191 @@ dd {
   stroke: #86efac;
 }
 
-.map-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: 16px;
-}
-
-.map-sidebar {
-  display: grid;
-  gap: 16px;
-  align-content: start;
-}
-
-.radar-card {
-  position: relative;
+/* Fullscreen: the stage leaves the document flow entirely and covers the
+   header and tab bar too, so the map really is the whole screen. */
+body.map-fullscreen {
   overflow: hidden;
-  padding: 22px;
 }
 
-.radar-map-wrap {
+body.map-fullscreen .map-stage {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  margin: 0;
+  z-index: 60;
+}
+
+body.map-fullscreen .map-hud {
+  top: max(12px, env(safe-area-inset-top));
+  bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+/* On the radar tab the map screen is sized to fill the viewport exactly, so
+   the shell's bottom gutter has to go — otherwise the page is 40px taller than
+   the window and the map can be scrolled partly off screen. */
+body.map-mode .shell {
+  padding-bottom: 0;
+}
+
+/* The stage is measured from its position on screen, so it must not be
+   mid-slide when that measurement is taken. */
+.map-screen.active {
+  animation: none;
+}
+
+/* ═══════════════════════════════════════════════
+   FULL-BLEED MAP STAGE
+   The radar used to be a 16:9 panel stacked above a sidebar inside a tile.
+   It now takes the whole screen below the tabs: the map is the page, and
+   every control floats over it as a translucent panel.
+═══════════════════════════════════════════════ */
+.map-stage {
   position: relative;
+  /* Escape the shell's max-width and side gutters so the map runs edge to
+     edge, then fill everything from the tabs down to the bottom of the
+     viewport. --map-stage-top is measured in JS (see sizeMapStage) because
+     the header/tab block's height depends on wrapping and safe-area insets. */
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  height: calc(100vh - var(--map-stage-top, 240px));
+  height: calc(100dvh - var(--map-stage-top, 240px));
+  min-height: 420px;
+  overflow: hidden;
+  isolation: isolate;
 }
 
 #radarMap {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  min-height: 420px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 14px;
+  height: 100%;
   background: rgba(2, 6, 23, 0.52);
   overflow: hidden;
+}
+
+/* Everything that floats over the map lives in one column pinned to the top of
+   the stage: the control bar, then the panels beneath it. Laying the panels
+   out *below* the bar in normal flow (rather than pinning them at a guessed
+   offset) means a bar that wraps to two rows pushes them down instead of
+   being covered by them. */
+.map-hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The column spans the map so the panels can use its height, but only the
+     controls themselves should swallow clicks — the rest passes to the map. */
+  pointer-events: none;
+}
+
+.map-hud-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-right: 46px; /* clear of the Mapbox zoom/compass stack */
+  flex-shrink: 0;
+}
+
+.map-hud-bar > * {
+  pointer-events: auto;
+}
+
+.map-hud-panels {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.map-hud-title {
+  margin: 0 auto 0 0;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(6, 12, 30, 0.78);
+  backdrop-filter: blur(14px);
+  font-size: 0.86rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.map-hud-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  color: var(--muted);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(6, 12, 30, 0.78);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.timeline-slider:disabled,
+.play-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The HUD pills have to fit one row on a phone; the locate button carries a
+   shorter label for narrow widths. */
+.hud-label-narrow { display: none; }
+
+.map-hud-btn.active {
+  color: #12181f;
+  border-color: transparent;
+  background: #ffffff;
+}
+
+/* Panels float over the map instead of taking layout space away from it. */
+.map-panel {
+  pointer-events: auto;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: mapPanelIn 180ms ease both;
+}
+
+.map-panel[hidden] {
+  display: none;
+}
+
+@keyframes mapPanelIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+#mapControlsPanel {
+  width: min(400px, 100%);
+}
+
+.map-sidebar {
+  width: min(300px, 100%);
+  margin-left: auto; /* hugs the right edge even when the layer panel is closed */
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 0;
 }
 
 .radar-controls {
@@ -1298,14 +1450,12 @@ dd {
   transform: translateY(-1px);
 }
 
-.map-sidebar,
 .aviation-grid,
 .space-readouts {
   display: grid;
   gap: 16px;
 }
 
-.map-sidebar .tile,
 .metar-card,
 .space-card {
   padding: 22px;
@@ -1483,28 +1633,37 @@ dd {
 
 .detail-modal {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  /* Sized to the *dynamic* viewport rather than inset:0, which resolves
+     against the large (URL-bar-hidden) viewport on mobile Safari and centred
+     the card against a box taller than what is actually on screen. JS
+     overrides these while pinch or accessibility zoom is active so the whole
+     card stays reachable inside the visual viewport. */
+  width: 100vw;
+  width: 100dvw;
+  height: 100vh;
+  height: 100dvh;
   z-index: 20;
   /* Flex (not grid) so the card's percentage max-height resolves against the
-     overlay, which JS resizes to the iOS *visual* viewport while pinch or
-     accessibility zoom is active — keeping the whole card reachable. */
+     overlay. */
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 18px;
-  overscroll-behavior: none;
+  overscroll-behavior: contain;
 }
 
-/* Freeze the page behind the modal. JS stores the scroll offset in an inline
-   top and restores it on close; without this iOS kept scrolling (and
-   touch-targeting) the extended forecast underneath the popup, and reaching
-   the bottom of the popup chained the scroll to the page and "stuck" there. */
+/* Freeze the page behind the modal *without moving it*. An earlier version
+   switched the body to position:fixed with a negative top offset, which
+   yanked the document out of flow the moment the popup opened and made the
+   card visibly jump upward a beat after it appeared. Plain overflow:hidden on
+   both the root and the body stops the scroll; iOS ignores it on the body
+   alone, which is why the root carries it too. */
+html.modal-open,
 body.modal-open {
-  position: fixed;
-  left: 0;
-  right: 0;
-  width: 100%;
-  overflow-y: hidden;
+  overflow: hidden;
+  touch-action: none;
 }
 
 .modal-backdrop {
@@ -1514,6 +1673,8 @@ body.modal-open {
   background: rgba(2, 6, 23, 0.72);
   backdrop-filter: blur(10px);
   cursor: pointer;
+  /* Drags on the backdrop must not pan the frozen page behind it. */
+  touch-action: none;
 }
 
 .modal-card {
@@ -1522,6 +1683,9 @@ body.modal-open {
   max-height: min(720px, 100%);
   overflow: auto;
   overscroll-behavior: contain;
+  /* The overlay sets touch-action:none to freeze the page; the card itself
+     still has to scroll its own overflow. */
+  touch-action: pan-y;
   padding: 24px;
 }
 
@@ -2182,7 +2346,6 @@ body.modal-open {
   }
 
   .hero-grid,
-  .map-layout,
   .aviation-grid {
     grid-template-columns: 1fr;
   }
@@ -2359,21 +2522,22 @@ body.modal-open {
 }
 
 /* ── Map locate button overlay ────────────────────── */
+/* Sits in the floating HUD bar alongside the panel toggles, so it is laid
+   out by that flex row rather than pinned to a corner of the map. */
 .map-locate-btn {
-  position: absolute;
-  bottom: 14px;
-  left: 14px;
-  z-index: 5;
-  min-height: 36px;
-  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
   color: var(--text);
   border: 1px solid color-mix(in srgb, var(--accent-2) 55%, transparent);
-  border-radius: 14px;
-  background: rgba(2, 6, 23, 0.82);
-  backdrop-filter: blur(10px);
+  border-radius: 999px;
+  background: rgba(6, 12, 30, 0.82);
+  backdrop-filter: blur(14px);
   cursor: pointer;
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   font-weight: 800;
   transition: transform 160ms ease, background 160ms ease;
 }
@@ -2944,15 +3108,14 @@ body.modal-open {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 14px;
   padding: 12px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.11);
-}
-
-.map-section-head {
-  margin-bottom: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  /* Opaque enough to stay readable over bright radar returns and satellite
+     imagery — the old translucent white washed out over pale basemaps. */
+  background: rgba(6, 12, 30, 0.86);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 40px rgba(2, 6, 23, 0.45);
 }
 
 .layer-group-row {
@@ -3135,7 +3298,7 @@ body.modal-open {
   position: absolute;
   bottom: 52px;
   right: 12px;
-  z-index: 10;
+  z-index: 3;
   padding: 8px 10px;
   background: rgba(6, 12, 30, 0.92);
   backdrop-filter: blur(14px);
@@ -3161,8 +3324,8 @@ body.modal-open {
   z-index: 11;
 }
 
-.radar-map-wrap:has(.mapboxgl-popup) .spc-legend-box,
-.radar-map-wrap:has(.mapboxgl-popup) .mrms-legend-box {
+.map-stage:has(.mapboxgl-popup) .spc-legend-box,
+.map-stage:has(.mapboxgl-popup) .mrms-legend-box {
   /* The legendIn entry animation fills 'both', so it must be cleared for
      opacity to take effect; closing the popup re-runs it as a fade-in. */
   animation: none;
@@ -3175,7 +3338,7 @@ body.modal-open {
   position: absolute;
   bottom: 52px;
   left: 12px;
-  z-index: 10;
+  z-index: 3;
   padding: 8px 8px 9px;
   background: rgba(6, 12, 30, 0.96);
   backdrop-filter: blur(14px);
@@ -3760,11 +3923,13 @@ body.modal-open {
    MAP SIDEBAR ENHANCEMENTS
 ═══════════════════════════════════════════════ */
 .sidebar-tile {
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  background: var(--panel);
-  backdrop-filter: blur(24px);
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  /* Matches the layer panel's glass so both float legibly over the map. */
+  background: rgba(6, 12, 30, 0.86);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 40px rgba(2, 6, 23, 0.45);
 }
 
 .sidebar-icon {
@@ -3773,10 +3938,6 @@ body.modal-open {
   vertical-align: middle;
   margin-right: 3px;
   opacity: 0.8;
-}
-
-.sidebar-tile + .sidebar-tile {
-  margin-top: 12px;
 }
 
 .sidebar-tile .eyebrow {
@@ -3894,12 +4055,6 @@ body.modal-open {
 /* ═══════════════════════════════════════════════
    RESPONSIVE UPDATES FOR NEW ELEMENTS
 ═══════════════════════════════════════════════ */
-@media (max-width: 1120px) {
-  .map-layout {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (max-width: 720px) {
   .hourly-metric-switcher {
     justify-content: flex-start;
@@ -3911,6 +4066,58 @@ body.modal-open {
 
   .map-controls-wrap {
     padding: 10px;
+  }
+
+  /* Phones: there is no room for the section heading alongside three control
+     pills, and wrapping it to its own row eats a third of the map. Keep it in
+     the accessibility tree (it is the section's aria-labelledby target) but
+     take it out of the layout, and let the panels use the full width. */
+  .map-hud {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    gap: 6px;
+  }
+
+  .map-hud-bar {
+    gap: 6px;
+    padding-right: 42px;
+  }
+
+  /* Four pills have to share a phone's width without wrapping to a second row
+     that eats into the map. */
+  .map-hud-btn,
+  .map-locate-btn {
+    min-height: 30px;
+    padding: 0 9px;
+    font-size: 0.7rem;
+    gap: 4px;
+  }
+
+  .hud-label-wide { display: none; }
+  .hud-label-narrow { display: inline; }
+
+  .map-hud-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .map-hud-panels {
+    flex-direction: column;
+  }
+
+  #mapControlsPanel,
+  .map-sidebar {
+    width: 100%;
+    margin-left: 0;
   }
 
   .hourly-metric-switcher button {
@@ -3926,15 +4133,6 @@ body.modal-open {
     min-height: 28px;
     padding: 0 10px;
     font-size: 0.72rem;
-  }
-
-  .map-section-head h2 {
-    font-size: 1.4rem;
-    margin-bottom: 8px;
-  }
-
-  .map-section-head {
-    margin-bottom: 8px;
   }
 }
 
