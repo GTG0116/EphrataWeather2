@@ -68,6 +68,13 @@ body::-webkit-scrollbar {
 
 html {
   min-height: 100%;
+  /* Nothing in this app is meant to pan sideways. `clip` (unlike `hidden`)
+     never makes the root a scroll container, so a stray wide descendant can
+     no longer open blank gutters beside the centered shell, and disabling
+     x-axis overscroll stops the sideways rubber-band that made the layout
+     drift off-center mid-scroll on trackpads and iOS. */
+  overflow-x: clip;
+  overscroll-behavior-x: none;
   /* iOS Safari inflates text after pinch-zoom/rotation in some layouts,
      which made map-legend tick labels overlap; pin the adjustment. */
   -webkit-text-size-adjust: 100%;
@@ -106,7 +113,8 @@ body {
   /* Keep the body transparent so the ::before gradient can paint iOS
      standalone safe-area bands beneath the canvas and glow layers. */
   background: transparent;
-  overflow-x: hidden;
+  overflow-x: clip;
+  overscroll-behavior-x: none;
   transition: color 220ms ease;
 }
 
@@ -506,6 +514,7 @@ button:focus-visible {
   padding: 6px;
   margin-bottom: 18px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   border: none;
   border-radius: 16px;
   background: transparent;
@@ -938,6 +947,7 @@ dd {
   grid-auto-columns: 136px;
   gap: 10px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding-bottom: 8px;
 }
 
@@ -2816,6 +2826,7 @@ body.modal-open {
   grid-auto-columns: 100px;
   gap: 8px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding-bottom: 6px;
   margin-top: 12px;
 }
@@ -4462,6 +4473,28 @@ body.modal-open {
    inline, so they scale uniformly instead of stretching the labels. */
 .coastal-chart {
   margin: 16px auto 0;
+  touch-action: pan-y;
+}
+
+.chart-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px 10px;
+  margin: 14px 0 0;
+  min-height: 1.3em;
+}
+
+.chart-readout strong {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--accent-2);
+}
+
+.chart-readout span {
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.55);
 }
 
 .coastal-chart svg {
