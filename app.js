@@ -105,17 +105,24 @@ const SURFACE_WMS  = "https://nowcoast.noaa.gov/arcgis/services/nowcoast/analysi
 //                   the lon/lat corners reproduces the projection exactly.
 const SATELLITE_RAW = "https://raw.githubusercontent.com/GTG0116";
 const SATELLITE_MAX_FRAMES = 10;
+// `base` overrides the default raw.githubusercontent path when a repo publishes
+// its rendered frames through GitHub Pages instead.
 const SATELLITE_SOURCES = [
-  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    extent: [-156,    6, -81, 81], sectorScheme: "goes",     proj: "platecarree" },
+  { id: "goes19fd",    label: "GOES-19 Full Disk", note: "Atlantic / Americas",   repo: "goes19fulldisk",    base: "https://gtg0116.github.io/goes19fulldisk/site/data",
+                                                                                                             extent: [-156,    6, -81, 81], sectorScheme: "goes",     proj: "platecarree" },
   { id: "goes19conus", label: "GOES-19 CONUS",     note: "Continental U.S.",      repo: "Satellite",         extent: [-135,  -60,  20, 55], sectorScheme: "goes",     proj: "platecarree" },
   { id: "goes18",      label: "GOES-18 Full Disk", note: "Pacific / NHC E-Pac",   repo: "Goes18satellite",   extent: [-220,  -55, -80, 80], sectorScheme: "goes18",   proj: "mercator"    },
   { id: "himawari",    label: "Himawari",          note: "W. Pacific / Typhoons", repo: "Himawari_Satellite",extent: [  80,  200, -60, 60], sectorScheme: "himawari", proj: "mercator"    },
 ];
+// `sources` (when present) restricts a band to the feeds that publish it.
+// `experimental` flags products the upstream renderer is still validating.
 const SATELLITE_BANDS = [
   { id: "geocolor",   label: "GeoColor",    file: "geocolor"    },
   { id: "infrared",   label: "Infrared",    file: "infrared"    },
   { id: "watervapor", label: "Water Vapor", file: "water_vapor" },
   { id: "visible",    label: "Visible",     file: "visible"     },
+  { id: "precip",     label: "Precip Rate", file: "precip",     sources: ["goes19fd", "goes19conus", "goes18"], experimental: true,
+    note: "Experimental — GOES rainfall-rate estimate, not a substitute for radar" },
 ];
 
 // ─── Tropical cyclones overlay (JTWC + NHC, GitHub-generated) ──────────────────
@@ -6389,8 +6396,13 @@ async function addSurfaceAnalysisLayer() {
 function satSource() {
   return SATELLITE_SOURCES.find(s => s.id === activeSatelliteSource) || SATELLITE_SOURCES[0];
 }
+// Bands the given source actually publishes (some products are GOES-only).
+function satBandsFor(source) {
+  return SATELLITE_BANDS.filter(b => !b.sources || b.sources.includes(source.id));
+}
 function satBand() {
-  return SATELLITE_BANDS.find(b => b.id === activeSatelliteType) || SATELLITE_BANDS[0];
+  const available = satBandsFor(satSource());
+  return available.find(b => b.id === activeSatelliteType) || available[0];
 }
 
 // The active TC sector object (or null for the standard full-disk/region view).
@@ -6403,20 +6415,21 @@ function currentSatExtent() {
   return sector ? sector.extent : satSource().extent;
 }
 
-function satDataUrl(repo, file) {
-  return `${SATELLITE_RAW}/${repo}/main/site/data/${file}`;
+function satDataUrl(source, file) {
+  const base = source.base || `${SATELLITE_RAW}/${source.repo}/main/site/data`;
+  return `${base}/${file}`;
 }
 // Raw PNG url for a given frame (full-disk or sector), honouring repo naming.
 function satFrameRawUrl(frame) {
   const source = satSource(), band = satBand(), sector = currentSatSector();
   const fr = String(frame).padStart(2, "0");
-  if (sector) return satDataUrl(source.repo, sector.fileFor(band.file, fr));
-  return satDataUrl(source.repo, `${band.file}_${fr}.png`);
+  if (sector) return satDataUrl(source, sector.fileFor(band.file, fr));
+  return satDataUrl(source, `${band.file}_${fr}.png`);
 }
 // Stable cache key for a frame's warped image.
 function satFrameKey(frame) {
   const sectorPart = activeSatelliteSector ? `sec:${activeSatelliteSector}` : "full";
-  return `${activeSatelliteSource}|${sectorPart}|${activeSatelliteType}|${frame}`;
+  return `${activeSatelliteSource}|${sectorPart}|${satBand().id}|${frame}`;
 }
 
 // ─── Equirectangular → Web Mercator warp ──────────────────────────────────────
@@ -6596,7 +6609,7 @@ function setSatelliteFrame(index) {
 // tropical cyclones, with its own metadata file and naming convention.
 function sectorMetaUrl(source) {
   const file = source.sectorScheme === "himawari" ? "sectors_meta.json" : "cyclones.json";
-  return satDataUrl(source.repo, file);
+  return satDataUrl(source, file);
 }
 function parseSatSectors(source, json) {
   if (!json) return [];
@@ -7785,6 +7798,7 @@ function renderSatelliteSubControls() {
         if (btn.dataset.satSource === activeSatelliteSource) return;
         activeSatelliteSource = btn.dataset.satSource;
         activeSatelliteSector = null; // sectors are per-source
+        activeSatelliteType = satBand().id; // drop bands the new source lacks
         localStorage.setItem("satelliteSource", activeSatelliteSource);
         renderSatelliteSubControls();
         drawRadar(false);
@@ -7794,9 +7808,15 @@ function renderSatelliteSubControls() {
   }
 
   if (typeEl) {
-    typeEl.innerHTML = SATELLITE_BANDS.map(b =>
-      `<button type="button" data-sat-type="${b.id}" class="${b.id === activeSatelliteType ? "active" : ""}">${safeText(b.label)}</button>`
-    ).join("");
+    const activeBandId = satBand().id;
+    typeEl.innerHTML = satBandsFor(satSource()).map(b => {
+      const cls = [b.id === activeBandId ? "active" : "", b.experimental ? "is-experimental" : ""]
+        .filter(Boolean).join(" ");
+      const badge = b.experimental ? `<span class="exp-badge" aria-hidden="true">EXP</span>` : "";
+      const title = b.note ? ` title="${safeText(b.note)}"` : "";
+      const label = b.experimental ? `${b.label} (experimental)` : b.label;
+      return `<button type="button" data-sat-type="${b.id}" class="${cls}"${title} aria-label="${safeText(label)}">${safeText(b.label)}${badge}</button>`;
+    }).join("");
     typeEl.querySelectorAll("button").forEach(btn => {
       btn.addEventListener("click", () => {
         activeSatelliteType = btn.dataset.satType;

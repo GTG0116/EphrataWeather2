@@ -4185,6 +4185,32 @@ body.modal-open {
   font-size: 0.68em;
 }
 
+/* Experimental products (e.g. satellite precip rate) — flagged so the data is
+   never mistaken for a validated, operational product. */
+.ctrl-btn-group button.is-experimental {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ctrl-btn-group button .exp-badge {
+  padding: 1px 4px;
+  border: 1px solid rgba(120, 200, 255, 0.45);
+  border-radius: 5px;
+  background: rgba(120, 200, 255, 0.14);
+  color: #78c8ff;
+  font-size: 0.62em;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+}
+
+.ctrl-btn-group button.is-experimental.active .exp-badge {
+  border-color: rgba(255, 160, 64, 0.5);
+  background: rgba(255, 160, 64, 0.16);
+  color: #ffa040;
+}
+
 /* ==========================================================================
    COASTAL SCREEN — rip currents, tides and waves
    ========================================================================== */

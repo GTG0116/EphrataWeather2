@@ -1,4 +1,4 @@
-const CACHE_NAME = "weather-portal-v7";
+const CACHE_NAME = "weather-portal-v8";
 const APP_SHELL = [
   "./",
   "./index.html",
