@@ -730,6 +730,15 @@ function fmtSnow(valueIn, digits = 1) {
   return isMetric() ? `${(valueIn * 2.54).toFixed(digits)} cm` : `${valueIn.toFixed(digits)} in`;
 }
 
+// Wave, swell and tide heights are carried in feet internally: NOAA CO-OPS and
+// the NWS surf products both publish feet, so metres are converted on arrival.
+function uHeight(valueFt)  { return valueFt == null ? null : (isMetric() ? valueFt * 0.3048 : valueFt); }
+function heightUnit()      { return isMetric() ? "m" : "ft"; }
+function fmtHeight(valueFt, digits = 1) {
+  const v = uHeight(valueFt);
+  return v == null ? "--" : `${v.toFixed(digits)} ${heightUnit()}`;
+}
+
 function updateUnitToggleLabel() {
   const metric = isMetric();
   document.querySelectorAll("#unitToggle .unit-opt").forEach(el => {
@@ -748,6 +757,7 @@ function rerenderUnits() {
     renderMapSidebar();
     renderMetar(weatherState.aviation || null);
   }
+  if (coastalState) renderCoastal();
   if (histSelectedDate) renderClimate(histSelectedDate);
 }
 
@@ -2130,6 +2140,384 @@ async function spacePayload() {
   };
 }
 
+/* ============================================================================
+   COASTAL: rip currents, tides, waves
+   ----------------------------------------------------------------------------
+   Three independent sources, each of which may be missing for a given beach:
+     • Open-Meteo Marine  — global wave/swell/sea-surface-temperature forecast
+     • NOAA CO-OPS        — US tide predictions and live gauge observations
+     • NWS text products  — SRF (surf zone forecast, carries the official rip
+                            current risk) and CWF (coastal waters forecast)
+   ========================================================================== */
+
+const MARINE_API = "https://marine-api.open-meteo.com/v1/marine";
+const COOPS_DATA = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+const COOPS_STATIONS = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=waterlevels";
+const COOPS_APP = "EphrataWeatherPortal";
+const TIDE_STATION_MAX_MI = 45;   // beyond this a gauge no longer describes the local tide
+const M_TO_FT = 3.28084;
+
+function milesBetween(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const toRad = deg => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+// The CO-OPS gauge list is ~300 stations that never move, so it is cached for a
+// month rather than refetched on every location change.
+let coopsStationCache = null;
+const COOPS_STATION_TTL = 30 * 24 * 60 * 60 * 1000;
+async function coopsStations() {
+  if (coopsStationCache) return coopsStationCache;
+  try {
+    const saved = JSON.parse(localStorage.getItem("coopsStations") || "null");
+    if (saved?.stations?.length && Date.now() - saved.time < COOPS_STATION_TTL) {
+      coopsStationCache = saved.stations;
+      return coopsStationCache;
+    }
+  } catch { /* fall through to a network fetch */ }
+  const data = await getJson(COOPS_STATIONS);
+  coopsStationCache = (data.stations || [])
+    .filter(s => Number.isFinite(s.lat) && Number.isFinite(s.lng) && s.id)
+    .map(s => ({ id: String(s.id), name: s.name, state: s.state || "", lat: s.lat, lon: s.lng }));
+  try {
+    localStorage.setItem("coopsStations", JSON.stringify({ time: Date.now(), stations: coopsStationCache }));
+  } catch { /* private mode or quota — the in-memory cache still holds */ }
+  return coopsStationCache;
+}
+
+async function nearestTideStation(lat, lon) {
+  const stations = await coopsStations();
+  let best = null;
+  for (const station of stations) {
+    const distance = milesBetween(lat, lon, station.lat, station.lon);
+    if (!best || distance < best.distance) best = { ...station, distance };
+  }
+  return best && best.distance <= TIDE_STATION_MAX_MI ? best : null;
+}
+
+function coopsDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}${m}${d}`;
+}
+
+function coopsUrl(params) {
+  const query = new URLSearchParams({ application: COOPS_APP, time_zone: "lst_ldt", units: "english", format: "json", ...params });
+  return `${COOPS_DATA}?${query}`;
+}
+
+// CO-OPS stamps rows as "YYYY-MM-DD HH:mm" in the station's own local time with
+// no offset, so it is parsed as a wall-clock time and only ever formatted back
+// as one — never converted through the browser's zone.
+function parseCoopsTime(value = "") {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return null;
+  return {
+    iso: `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`,
+    day: `${m[1]}-${m[2]}-${m[3]}`,
+    minutes: Number(m[4]) * 60 + Number(m[5]),
+    label: new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00`).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+  };
+}
+
+async function tidePayload(lat, lon) {
+  const station = await nearestTideStation(lat, lon);
+  if (!station) return null;
+
+  const today = new Date();
+  const end = new Date(today.getTime() + 3 * 24 * 60 * 60 * 1000);
+  const begin = coopsDate(today);
+  const [highLow, curve, level, water] = await Promise.allSettled([
+    getJson(coopsUrl({ product: "predictions", datum: "MLLW", interval: "hilo", begin_date: begin, end_date: coopsDate(end), station: station.id })),
+    getJson(coopsUrl({ product: "predictions", datum: "MLLW", interval: "30", begin_date: begin, end_date: coopsDate(new Date(today.getTime() + 24 * 60 * 60 * 1000)), station: station.id })),
+    getJson(coopsUrl({ product: "water_level", datum: "MLLW", date: "latest", station: station.id })),
+    getJson(coopsUrl({ product: "water_temperature", date: "latest", station: station.id })),
+  ]);
+
+  // Great Lakes gauges have no tidal signal, so they return no predictions —
+  // the station is still kept for its live water level and temperature.
+  const events = (highLow.status === "fulfilled" ? highLow.value.predictions || [] : []).map(row => ({
+    ...parseCoopsTime(row.t),
+    heightFt: Number(row.v),
+    type: row.type === "H" ? "High" : "Low",
+  })).filter(row => row.iso);
+
+  const curvePoints = (curve.status === "fulfilled" ? curve.value.predictions || [] : []).map(row => ({
+    ...parseCoopsTime(row.t),
+    heightFt: Number(row.v),
+  })).filter(row => row.iso);
+
+  const observedRow = level.status === "fulfilled" ? level.value.data?.[0] : null;
+  const tempRow = water.status === "fulfilled" ? water.value.data?.[0] : null;
+
+  return {
+    station,
+    datum: "MLLW",
+    hasTides: events.length > 0,
+    events,
+    curve: curvePoints,
+    observed: observedRow ? { ...parseCoopsTime(observedRow.t), heightFt: Number(observedRow.v) } : null,
+    waterTempF: tempRow && Number.isFinite(Number(tempRow.v)) ? Number(tempRow.v) : null,
+    waterTempAt: tempRow ? parseCoopsTime(tempRow.t) : null,
+  };
+}
+
+async function marinePayload(lat, lon) {
+  const query = new URLSearchParams({
+    latitude: lat,
+    longitude: lon,
+    current: "wave_height,wave_direction,wave_period,wind_wave_height,wind_wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction",
+    hourly: "wave_height,wave_period,swell_wave_height,wind_wave_height,sea_surface_temperature",
+    daily: "wave_height_max,wave_direction_dominant,wave_period_max,swell_wave_height_max",
+    forecast_days: "7",
+    timezone: selectedLocation.timezone || "auto",
+    cell_selection: "sea",
+  });
+  const data = await getJson(`${MARINE_API}?${query}`);
+  const c = data.current || {};
+  const ft = value => (Number.isFinite(value) ? value * M_TO_FT : null);
+
+  const hourly = (data.hourly?.time || []).map((time, i) => ({
+    time,
+    waveFt: ft(data.hourly.wave_height?.[i]),
+    swellFt: ft(data.hourly.swell_wave_height?.[i]),
+    windWaveFt: ft(data.hourly.wind_wave_height?.[i]),
+    periodS: data.hourly.wave_period?.[i] ?? null,
+    sstF: data.hourly.sea_surface_temperature?.[i] == null ? null : fahrenheit(data.hourly.sea_surface_temperature[i]),
+  }));
+
+  const daily = (data.daily?.time || []).map((date, i) => ({
+    date,
+    waveMaxFt: ft(data.daily.wave_height_max?.[i]),
+    swellMaxFt: ft(data.daily.swell_wave_height_max?.[i]),
+    periodMaxS: data.daily.wave_period_max?.[i] ?? null,
+    direction: data.daily.wave_direction_dominant?.[i] ?? null,
+  }));
+
+  return {
+    hasWaves: Number.isFinite(c.wave_height),
+    updated: c.time || null,
+    current: {
+      waveFt: ft(c.wave_height),
+      waveDir: c.wave_direction ?? null,
+      periodS: c.wave_period ?? null,
+      windWaveFt: ft(c.wind_wave_height),
+      windWavePeriodS: c.wind_wave_period ?? null,
+      swellFt: ft(c.swell_wave_height),
+      swellDir: c.swell_wave_direction ?? null,
+      swellPeriodS: c.swell_wave_period ?? null,
+      sstF: c.sea_surface_temperature == null ? null : fahrenheit(c.sea_surface_temperature),
+      currentKt: Number.isFinite(c.ocean_current_velocity) ? c.ocean_current_velocity * 1.94384 : null,
+      currentDir: c.ocean_current_direction ?? null,
+    },
+    hourly,
+    daily,
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   NWS text-product parsing (SRF / CWF)
+   Both products are a header followed by UGC-coded segments terminated by "$$".
+   ------------------------------------------------------------------------- */
+
+const UGC_LINE = /^[A-Z]{2}[ZC]\d{3}(?:[->](?:[A-Z]{2}[ZC])?\d{3})*-(?:\d{6}-)?$/;
+const NWS_TIME_LINE = /^\d{3,4}\s+(?:AM|PM)\s+\w{2,4}\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}$/;
+
+// "VAZ099-100-272015-" → ["VAZ099","VAZ100"];  "FLZ141>148-" expands the range.
+function expandUgcBlock(block = "") {
+  const zones = [];
+  let prefix = "";
+  for (const raw of block.replace(/\d{6}-?\s*$/, "").split("-")) {
+    const part = raw.trim();
+    if (!part) continue;
+    const [startRaw, endRaw] = part.split(">");
+    let start = startRaw;
+    if (/^[A-Z]{2}[ZC]\d{3}$/.test(start)) prefix = start.slice(0, 3);
+    else if (/^\d{3}$/.test(start) && prefix) start = prefix + start;
+    else continue;
+    if (endRaw == null) { zones.push(start); continue; }
+    const end = Number(/^\d{3}$/.test(endRaw) ? endRaw : endRaw.slice(3));
+    for (let n = Number(start.slice(3)); n <= end && n - Number(start.slice(3)) < 200; n += 1) {
+      zones.push(prefix + String(n).padStart(3, "0"));
+    }
+  }
+  return zones;
+}
+
+function parseNwsProductSegments(text = "") {
+  const segments = [];
+  for (const chunk of text.split(/^\$\$\s*$/m)) {
+    const lines = chunk.split(/\r?\n/);
+    const start = lines.findIndex(line => UGC_LINE.test(line.trim()));
+    if (start === -1) continue;
+
+    let i = start;
+    let ugc = "";
+    while (i < lines.length && UGC_LINE.test(lines[i].trim())) { ugc += lines[i].trim(); i += 1; }
+    const zones = expandUgcBlock(ugc);
+
+    // Zone titles are the following lines that end in "-", before the issuance
+    // time. The synopsis segment has no title at all.
+    const titleParts = [];
+    while (i < lines.length && /-\s*$/.test(lines[i]) && !NWS_TIME_LINE.test(lines[i].trim())) {
+      titleParts.push(lines[i].trim().replace(/-\s*$/, ""));
+      i += 1;
+    }
+    const detailParts = [];
+    while (i < lines.length && lines[i].trim() && !NWS_TIME_LINE.test(lines[i].trim()) && !lines[i].trim().startsWith(".")) {
+      detailParts.push(lines[i].trim());
+      i += 1;
+    }
+    if (i < lines.length && NWS_TIME_LINE.test(lines[i].trim())) i += 1;
+
+    // Everything past "&&" is the product's static legend, not forecast text.
+    const body = lines.slice(i).join("\n").split(/^&&\s*$/m)[0];
+    segments.push({
+      zones,
+      name: titleParts.join(" ").trim(),
+      detail: detailParts.join(" ").trim(),
+      periods: parseNwsPeriods(body),
+    });
+  }
+  return segments;
+}
+
+// Splits a segment body on ".TODAY...", ".TUE NIGHT...", ".Synopsis for …" heads.
+function parseNwsPeriods(body = "") {
+  const periods = [];
+  // A head may wrap across lines (".Synopsis for … out 60\nnautical miles…"),
+  // so newlines are allowed inside the name but literal dots are not.
+  const re = /^\.([A-Za-z][^.]*?)\.{3}/gm;
+  const heads = [];
+  let match;
+  while ((match = re.exec(body)) !== null) heads.push({ name: match[1].replace(/\s+/g, " ").trim(), start: match.index, bodyStart: re.lastIndex });
+  heads.forEach((head, idx) => {
+    const end = idx + 1 < heads.length ? heads[idx + 1].start : body.length;
+    periods.push({ name: head.name, rows: parseNwsPeriodRows(body.slice(head.bodyStart, end)) });
+  });
+  return periods;
+}
+
+// SRF periods are "Label......Value." rows; CWF periods are free prose, which
+// falls through as a single unlabelled row.
+function parseNwsPeriodRows(block = "") {
+  const rows = [];
+  for (const raw of block.split(/\r?\n/)) {
+    if (!raw.trim()) continue;
+    const labelled = !/^\s/.test(raw) && raw.match(/^(\S.*?)\.{2,}\s*(.*)$/);
+    if (labelled) {
+      rows.push({ label: labelled[1].replace(/\*+$/, "").trim(), value: labelled[2].trim() });
+    } else if (rows.length) {
+      rows[rows.length - 1].value = `${rows[rows.length - 1].value} ${raw.trim().replace(/\.{2,}\s*/, ": ")}`.trim();
+    } else {
+      rows.push({ label: "", value: raw.trim() });
+    }
+  }
+  return rows.map(row => ({ ...row, value: row.value.replace(/\s+/g, " ").trim() }));
+}
+
+async function latestNwsProduct(type, office) {
+  const list = await getJson(`https://api.weather.gov/products/types/${type}/locations/${office}`);
+  const latest = list["@graph"]?.[0];
+  if (!latest) return null;
+  const product = await getJson(latest["@id"]);
+  return { issued: product.issuanceTime, text: product.productText || "" };
+}
+
+async function surfZonePayload(office) {
+  const product = await latestNwsProduct("SRF", office);
+  if (!product) return null;
+  const segments = parseNwsProductSegments(product.text).filter(seg => seg.periods.length);
+  return segments.length ? { office, issued: product.issued, segments } : null;
+}
+
+async function coastalWatersPayload(office) {
+  const product = await latestNwsProduct("CWF", office);
+  if (!product) return null;
+  const all = parseNwsProductSegments(product.text);
+  const synopsis = all.find(seg => seg.periods.some(p => /synopsis/i.test(p.name)));
+  const zones = all.filter(seg => seg !== synopsis && seg.periods.length);
+  return zones.length || synopsis ? { office, issued: product.issued, synopsis, zones } : null;
+}
+
+const RIP_LEVELS = {
+  low:      { key: "low",      label: "Low",      score: 1, color: "#4ade80", advice: "Dangerous currents are unlikely, but rip currents still form near jetties, groins, piers and reefs. Swim near a lifeguard." },
+  moderate: { key: "moderate", label: "Moderate", score: 2, color: "#fbbf24", advice: "Life-threatening currents are possible in the surf zone. Only enter the water near a lifeguard, and stay in waist-deep water if you are not a strong swimmer." },
+  high:     { key: "high",     label: "High",     score: 3, color: "#f87171", advice: "Life-threatening currents are likely. Stay out of the surf — even experienced swimmers are at risk. If caught, swim parallel to shore to escape the current." },
+};
+
+// Ocean offices publish "Rip Current Risk"; the Great Lakes offices publish the
+// equivalent "Swim Risk" on the same Low/Moderate/High scale.
+const RIP_ROW_RE = /rip current risk|swim risk/i;
+const SURF_HEIGHT_RE = /surf height|wave height/i;
+
+function ripLevelFromText(value = "") {
+  const text = value.toLowerCase();
+  if (/\bhigh\b/.test(text)) return RIP_LEVELS.high;
+  if (/\bmoderate\b/.test(text)) return RIP_LEVELS.moderate;
+  if (/\blow\b/.test(text)) return RIP_LEVELS.low;
+  return null;
+}
+
+function surfRowValue(period, matcher) {
+  return period?.rows?.find(row => matcher.test(row.label))?.value || null;
+}
+
+// Fallback for beaches with no NWS surf zone forecast (most of the world, and a
+// few US offices). Breaking-wave energy scales with height² × period, which is
+// what actually drives the rip; the result is always labelled an estimate.
+function estimateRipRisk(marineCurrent = {}, windMph = null) {
+  const waveFt = marineCurrent.waveFt;
+  if (!Number.isFinite(waveFt)) return null;
+  const periodS = Number.isFinite(marineCurrent.periodS) ? marineCurrent.periodS : 7;
+  let score = waveFt * waveFt * periodS * 0.045;
+  if (Number.isFinite(windMph) && windMph >= 18) score += 0.6;
+  const level = score >= 4 ? RIP_LEVELS.high : score >= 1.8 ? RIP_LEVELS.moderate : RIP_LEVELS.low;
+  return { ...level, estimated: true, basis: `${fmtHeight(waveFt)} seas at ${Math.round(periodS)} s` };
+}
+
+async function coastalPayload() {
+  const loc = point();
+  const [marineResult, tideResult] = await Promise.allSettled([
+    marinePayload(loc.lat, loc.lon),
+    tidePayload(loc.lat, loc.lon),
+  ]);
+  const marine = marineResult.status === "fulfilled" ? marineResult.value : null;
+  const tides = tideResult.status === "fulfilled" ? tideResult.value : null;
+
+  if (!marine?.hasWaves && !tides?.station) {
+    return { isCoastal: false, marine: null, tides: null, surf: null, waters: null };
+  }
+
+  // The surf and coastal-waters text products are published per WFO, so they
+  // only exist for US locations inside a coastal forecast office.
+  let surf = null;
+  let waters = null;
+  let zoneId = null;
+  if (!isCanadianLocation() && (selectedLocation.countryCode || "US") === "US") {
+    try {
+      const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
+      const office = gridPoint.properties?.cwa;
+      zoneId = (gridPoint.properties?.forecastZone || "").split("/").pop() || null;
+      if (office) {
+        const [surfResult, watersResult] = await Promise.allSettled([
+          surfZonePayload(office),
+          coastalWatersPayload(office),
+        ]);
+        surf = surfResult.status === "fulfilled" ? surfResult.value : null;
+        waters = watersResult.status === "fulfilled" ? watersResult.value : null;
+      }
+    } catch { /* no NWS coverage here — Open-Meteo and CO-OPS still stand */ }
+  }
+
+  return { isCoastal: true, marine, tides, surf, waters, zoneId };
+}
+
 async function climatePayload(date) {
   const loc = point();
   const maxD = histMaxDate();
@@ -2762,6 +3150,13 @@ function uiIcon(name) {
     degree:   `<rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/>`,
     severe:   `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
     fwi:      `<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>`,
+    wave:     `<path d="M2 8c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 14c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 20c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/>`,
+    swell:    `<path d="M2 16c3.5 0 4-9 8-9s4.5 9 8 9 4-4 4-4"/><path d="M2 20h20"/>`,
+    tide:     `<path d="M2 17c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M12 3v9"/><path d="m8.5 8.5 3.5 3.5 3.5-3.5"/>`,
+    period:   `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.9"/>`,
+    seaTemp:  `<path d="M13 14.3V4.5a2.5 2.5 0 0 0-5 0v9.8a4.5 4.5 0 1 0 5 0z"/><path d="M16 8h5"/><path d="M16 12h3"/>`,
+    ripCurrent: `<path d="M4 20c1.7-1.7 3.3-1.7 5 0s3.3 1.7 5 0 3.3-1.7 5 0"/><path d="M12 16V4"/><path d="m7.5 8.5 4.5-4.5 4.5 4.5"/>`,
+    seaCurrent: `<path d="M3 12h13"/><path d="m12 7 5 5-5 5"/><path d="M3 6h8"/><path d="M3 18h8"/>`,
   };
   return `<span class="ui-icon" aria-hidden="true"><svg viewBox="0 0 24 24">${icons[name] || icons.pressure}</svg></span>`;
 }
@@ -4096,6 +4491,483 @@ function renderSpace(space) {
   `).join("");
   const kp = Number(space?.kp || 0);
   document.querySelector(".aurora-bar span").style.width = `${Math.min(100, Math.max(8, kp * 12))}%`;
+}
+
+/* ============================================================================
+   COASTAL SCREEN
+   ========================================================================== */
+
+let coastalState = null;          // null while loading; {isCoastal:…} once resolved
+let coastalError = null;
+let coastalSegmentIndex = 0;      // which SRF beach segment is on screen
+let coastalWatersIndex = 0;       // which CWF marine zone is on screen
+let coastalWaveMode = "hourly";   // hourly | daily
+
+const COASTAL_PRESETS = [
+  { name: "Ocean City, MD",     lat: 38.3365, lon: -75.0849, timezone: "America/New_York", countryCode: "US" },
+  { name: "Virginia Beach, VA", lat: 36.8529, lon: -75.9780, timezone: "America/New_York", countryCode: "US" },
+  { name: "Miami Beach, FL",    lat: 25.7907, lon: -80.1300, timezone: "America/New_York", countryCode: "US" },
+  { name: "Cape Hatteras, NC",  lat: 35.2510, lon: -75.5288, timezone: "America/New_York", countryCode: "US" },
+  { name: "Santa Monica, CA",   lat: 34.0195, lon: -118.4912, timezone: "America/Los_Angeles", countryCode: "US" },
+  { name: "Cannon Beach, OR",   lat: 45.8918, lon: -123.9615, timezone: "America/Los_Angeles", countryCode: "US" },
+];
+
+// Minutes past midnight where the selected location currently is, used to place
+// the "now" marker on the tide curve without leaving wall-clock time.
+function localMinutesNow(timezone = selectedLocation.timezone || "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "2-digit", minute: "2-digit", hour12: false })
+    .formatToParts(new Date())
+    .reduce((acc, part) => { acc[part.type] = part.value; return acc; }, {});
+  return (Number(parts.hour) % 24) * 60 + Number(parts.minute);
+}
+
+// A sortable wall-clock key (days since epoch × 1440 + minutes).
+function tideKey(row) {
+  if (!row?.day) return null;
+  return Math.round(Date.parse(`${row.day}T00:00:00Z`) / 86400000) * 1440 + row.minutes;
+}
+
+function tideNowKey() {
+  const day = localDateISO();
+  return Math.round(Date.parse(`${day}T00:00:00Z`) / 86400000) * 1440 + localMinutesNow();
+}
+
+function activeSurfSegment() {
+  const segments = coastalState?.surf?.segments;
+  if (!segments?.length) return null;
+  return segments[Math.min(coastalSegmentIndex, segments.length - 1)];
+}
+
+function surfPeriodsWithRip(segment) {
+  return (segment?.periods || []).filter(period => period.rows.some(row => RIP_ROW_RE.test(row.label)));
+}
+
+// The official NWS risk when the beach has a surf zone forecast, otherwise the
+// wave-energy estimate, which renders with an "estimated" badge.
+function currentRipRisk() {
+  const segment = activeSurfSegment();
+  const today = surfPeriodsWithRip(segment)[0];
+  const row = today?.rows.find(item => RIP_ROW_RE.test(item.label));
+  const fromSrf = row && ripLevelFromText(row.value);
+  if (fromSrf) return { ...fromSrf, estimated: false, periodName: today.name, title: row.label };
+  return estimateRipRisk(coastalState?.marine?.current || {}, weatherState?.current?.wind ?? null);
+}
+
+function compassLabel(deg) {
+  return deg == null ? "--" : `${windDirLabel(deg)} (${Math.round(deg)}°)`;
+}
+
+function coastalSourceLine() {
+  const parts = ["Open-Meteo marine model"];
+  if (coastalState?.tides) parts.push(coastalState.tides.hasTides ? "NOAA CO-OPS tides" : "NOAA CO-OPS gauge");
+  if (coastalState?.surf) parts.push(`NWS ${coastalState.surf.office} surf zone forecast`);
+  return parts.join(" · ");
+}
+
+function renderCoastal() {
+  const body = document.querySelector("#coastalBody");
+  const status = document.querySelector("#coastalStatus");
+  if (!body) return;
+
+  if (coastalError) {
+    if (status) status.textContent = "Marine data unavailable";
+    body.innerHTML = `<article class="tile coastal-empty"><h3>Coastal data unavailable</h3><p>${safeText(coastalError)}</p></article>`;
+    return;
+  }
+  if (!coastalState) {
+    if (status) status.textContent = "Checking for marine data…";
+    body.innerHTML = `<article class="tile coastal-empty"><h3>Loading coastal conditions…</h3><p>Checking wave models, tide gauges and NWS surf zone forecasts for ${safeText(selectedLocation.name)}.</p></article>`;
+    return;
+  }
+  if (!coastalState.isCoastal) {
+    if (status) status.textContent = "No marine coverage here";
+    body.innerHTML = renderCoastalEmpty();
+    return;
+  }
+
+  if (status) status.textContent = coastalSourceLine();
+  body.innerHTML = [
+    renderBeachPicker(),
+    renderRipAndSea(),
+    renderCoastalMetrics(),
+    renderTidePanel(),
+    renderWavePanel(),
+    renderSurfForecastPanel(),
+    renderCoastalWatersPanel(),
+  ].filter(Boolean).join("");
+}
+
+function renderCoastalEmpty() {
+  const shortcuts = COASTAL_PRESETS.map((preset, index) =>
+    `<button type="button" class="coastal-preset" data-coastal-preset="${index}">${safeText(preset.name)}</button>`
+  ).join("");
+  return `
+    <article class="tile coastal-empty">
+      <span class="coastal-empty-icon" aria-hidden="true">${uiIcon("wave")}</span>
+      <h3>${safeText(townName())} is inland</h3>
+      <p>No wave model, tide gauge or NWS surf zone forecast covers this location. Pick a coastline below — or search any coastal town — to see rip current risk, tides and wave heights.</p>
+      <div class="coastal-presets">${shortcuts}</div>
+    </article>
+  `;
+}
+
+function renderBeachPicker() {
+  const segments = coastalState?.surf?.segments || [];
+  if (segments.length < 2) return "";
+  const options = segments.map((segment, index) =>
+    `<option value="${index}"${index === coastalSegmentIndex ? " selected" : ""}>${safeText(segment.name || segment.zones.join(", "))}</option>`
+  ).join("");
+  return `
+    <div class="beach-picker">
+      <span class="ctrl-label">Beach forecast area</span>
+      <select id="coastalBeachSelect" class="mrms-select" aria-label="Beach forecast area">${options}</select>
+    </div>
+  `;
+}
+
+function renderRipAndSea() {
+  const risk = currentRipRisk();
+  const segment = activeSurfSegment();
+  const today = surfPeriodsWithRip(segment)[0];
+  const marine = coastalState.marine?.current || {};
+
+  const outlook = surfPeriodsWithRip(segment).slice(0, 4).map(period => {
+    const level = ripLevelFromText(surfRowValue(period, RIP_ROW_RE) || "") || RIP_LEVELS.low;
+    return `
+      <div class="rip-day" style="--rip-color:${level.color}">
+        <strong>${safeText(period.name)}</strong>
+        <span>${level.label}</span>
+      </div>`;
+  }).join("");
+
+  const ripCard = risk ? `
+    <article class="tile rip-tile" style="--rip-color:${risk.color}">
+      <div class="tile-heading">
+        <p class="eyebrow">${safeText(risk.title || "Rip Current Risk")}</p>
+        ${risk.estimated ? `<span class="rip-badge">Estimated</span>` : `<strong>${safeText(coastalState.surf?.office || "NWS")}</strong>`}
+      </div>
+      <div class="rip-dial" data-level="${risk.key}">
+        <span class="rip-level">${risk.label}</span>
+        <small>${safeText(risk.periodName || "Now")}</small>
+      </div>
+      <p class="rip-advice">${safeText(risk.advice)}</p>
+      ${risk.estimated
+        ? `<p class="rip-note">No NWS surf zone forecast covers this beach. Estimated from ${safeText(risk.basis)} of modelled sea state — not an official NWS rip current risk.</p>`
+        : ""}
+      ${outlook ? `<div class="rip-outlook">${outlook}</div>` : ""}
+    </article>` : "";
+
+  const surfHeight = surfRowValue(today, SURF_HEIGHT_RE);
+  const waterTemp = coastalState.tides?.waterTempF ?? marine.sstF;
+  const seaRows = [
+    ["Surf height", surfHeight ? safeText(surfHeight) : fmtHeight(marine.waveFt)],
+    ["Significant wave height", fmtHeight(marine.waveFt)],
+    ["Dominant period", marine.periodS == null ? "--" : `${marine.periodS.toFixed(1)} s`],
+    ["Swell", `${fmtHeight(marine.swellFt)} from ${compassLabel(marine.swellDir)}`],
+    ["Wind waves", fmtHeight(marine.windWaveFt)],
+    ["Water temperature", waterTemp == null ? "--" : fmtTemp(waterTemp)],
+    ["Sea surface (model)", marine.sstF == null ? "--" : fmtTemp(marine.sstF)],
+    ["Wave direction", compassLabel(marine.waveDir)],
+  ];
+
+  return `
+    <div class="coastal-hero">
+      ${ripCard}
+      <article class="tile sea-tile">
+        <div class="tile-heading">
+          <p class="eyebrow">Sea State Now</p>
+          <strong>${safeText(townName())}</strong>
+        </div>
+        <dl class="sea-rows">
+          ${seaRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
+        </dl>
+      </article>
+    </div>
+  `;
+}
+
+function renderCoastalMetrics() {
+  const marine = coastalState.marine?.current || {};
+  const tides = coastalState.tides;
+  const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
+  const waterTemp = tides?.waterTempF ?? marine.sstF;
+
+  const metrics = [
+    ["wave", "Wave Height", fmtHeight(marine.waveFt), marine.periodS == null ? "Significant height" : `Dominant period ${marine.periodS.toFixed(1)} s`],
+    ["swell", "Swell", fmtHeight(marine.swellFt), marine.swellDir == null ? "Long-period energy" : `From ${compassLabel(marine.swellDir)}`],
+    ["seaTemp", "Water Temp", waterTemp == null ? "--" : fmtTemp(waterTemp), tides?.waterTempF != null ? `Gauge at ${safeText(tides.station.name)}` : "Modelled sea surface"],
+    tides?.hasTides ? ["tide", nextTide ? `Next ${nextTide.type} Tide` : "Next Tide", nextTide ? nextTide.label : "--", nextTide ? `${fmtHeight(nextTide.heightFt, 1)} above ${tides.datum}` : `${safeText(tides.station.name)}`] : null,
+    tides?.observed ? ["tide", "Water Level", fmtHeight(tides.observed.heightFt, 1), `${safeText(tides.station.name)} gauge, ${tides.observed.label}`] : null,
+    marine.currentKt == null ? null : ["seaCurrent", "Ocean Current", `${marine.currentKt.toFixed(1)} kt`, `Setting toward ${compassLabel(marine.currentDir)}`],
+  ].filter(Boolean);
+
+  return `<div class="metric-grid">${metrics.map(([icon, name, value, detail]) => `
+    <article class="tile metric">
+      <div class="metric-head">${uiIcon(icon)}<p class="eyebrow">${name}</p></div>
+      <span>${value}</span>
+      <small>${detail}</small>
+    </article>`).join("")}</div>`;
+}
+
+function renderTidePanel() {
+  const tides = coastalState.tides;
+  if (!tides?.hasTides) return "";
+  const nowKey = tideNowKey();
+  const upcoming = tides.events.filter(event => tideKey(event) >= nowKey).slice(0, 5);
+  const chips = upcoming.map(event => {
+    const hours = (tideKey(event) - nowKey) / 60;
+    const away = hours < 1 ? `${Math.max(1, Math.round(hours * 60))} min` : `${hours.toFixed(1)} h`;
+    return `
+      <div class="tide-chip ${event.type.toLowerCase()}">
+        <span class="tide-chip-type">${event.type}</span>
+        <strong>${safeText(event.label)}</strong>
+        <small>${fmtHeight(event.heightFt, 1)} · in ${away}</small>
+      </div>`;
+  }).join("");
+
+  return `
+    <section class="tile coastal-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NOAA CO-OPS · ${safeText(tides.station.name)}${tides.station.state ? `, ${safeText(tides.station.state)}` : ""}</p>
+          <h3>Tides</h3>
+        </div>
+        <span>Station ${safeText(tides.station.id)} · ${tides.station.distance.toFixed(0)} mi away · heights above ${tides.datum}</span>
+      </div>
+      <div class="tide-chips">${chips || "<p>No further tide predictions in the next three days.</p>"}</div>
+      ${tideCurveSvg(tides)}
+      ${tides.observed ? `<p class="coastal-footnote">Gauge reading ${fmtHeight(tides.observed.heightFt, 1)} at ${safeText(tides.observed.label)}${tides.waterTempF == null ? "" : ` · water ${fmtTemp(tides.waterTempF)}`}. Predictions are astronomical only — wind and surge shift the real water level.</p>` : ""}
+    </section>
+  `;
+}
+
+// 24-hour tide trace (6 h behind, 18 h ahead) with high/low callouts.
+function tideCurveSvg(tides) {
+  const nowKey = tideNowKey();
+  const points = tides.curve
+    .map(row => ({ ...row, key: tideKey(row) }))
+    .filter(row => row.key >= nowKey - 360 && row.key <= nowKey + 1080);
+  if (points.length < 4) return "";
+
+  // Narrow screens get a smaller viewBox so the SVG's fixed-size labels are not
+  // scaled down into illegibility.
+  const narrow = window.innerWidth < 760;
+  const W = narrow ? 380 : 720, H = narrow ? 200 : 190;
+  const padL = 12, padR = 12, padT = 26, padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const values = points.map(p => p.heightFt);
+  const minV = Math.min(...values);
+  const maxV = Math.max(...values);
+  const range = maxV - minV || 1;
+  const xFor = key => padL + ((key - points[0].key) / (points[points.length - 1].key - points[0].key)) * plotW;
+  const yFor = v => padT + plotH - ((v - minV) / range) * plotH;
+
+  const line = points.map((p, i) => `${i ? "L" : "M"}${xFor(p.key).toFixed(1)},${yFor(p.heightFt).toFixed(1)}`).join(" ");
+  const area = `${line} L${xFor(points[points.length - 1].key).toFixed(1)},${(padT + plotH).toFixed(1)} L${xFor(points[0].key).toFixed(1)},${(padT + plotH).toFixed(1)} Z`;
+
+  const marks = tides.events
+    .map(event => ({ ...event, key: tideKey(event) }))
+    .filter(event => event.key >= points[0].key && event.key <= points[points.length - 1].key)
+    .map(event => {
+      const x = xFor(event.key);
+      const y = yFor(event.heightFt);
+      const anchor = x < 60 ? "start" : x > W - 60 ? "end" : "middle";
+      return `
+        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="#8fd3ff" stroke="rgba(2,6,23,0.85)" stroke-width="1.6"/>
+        <text x="${x.toFixed(1)}" y="${(event.type === "High" ? y - 10 : y + 18).toFixed(1)}" text-anchor="${anchor}"
+          fill="#8fd3ff" font-size="11" font-weight="800" font-family="Inter,system-ui,sans-serif">${event.type === "High" ? "H" : "L"} ${safeText(event.label)}</text>`;
+    }).join("");
+
+  const nowX = xFor(nowKey);
+  return `
+    <div class="coastal-chart" style="aspect-ratio:${W} / ${H}">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" role="img" aria-label="Tide curve for the next 18 hours">
+        <defs>
+          <linearGradient id="tideFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.42"/>
+            <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <path d="${area}" fill="url(#tideFill)"/>
+        <path d="${line}" fill="none" stroke="#38bdf8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="${nowX.toFixed(1)}" y1="${padT - 12}" x2="${nowX.toFixed(1)}" y2="${padT + plotH}" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="4,3"/>
+        <text x="${nowX.toFixed(1)}" y="${padT - 16}" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="800" font-family="Inter,system-ui,sans-serif">Now</text>
+        ${marks}
+      </svg>
+    </div>
+  `;
+}
+
+function renderWavePanel() {
+  const marine = coastalState.marine;
+  if (!marine?.hourly?.length) return "";
+  return `
+    <section class="tile coastal-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Open-Meteo wave model</p>
+          <h3>Wave Height Forecast</h3>
+        </div>
+        <div class="wave-mode-switch" id="coastalWaveSwitch">
+          <button type="button" data-wave-mode="hourly" class="${coastalWaveMode === "hourly" ? "active" : ""}">Next 48 h</button>
+          <button type="button" data-wave-mode="daily" class="${coastalWaveMode === "daily" ? "active" : ""}">7 days</button>
+        </div>
+      </div>
+      ${coastalWaveMode === "daily" ? waveDailySvg(marine.daily) : waveHourlySvg(marine.hourly)}
+    </section>
+  `;
+}
+
+function waveHourlySvg(hourly) {
+  const now = Date.now();
+  let start = hourly.findIndex(row => Date.parse(row.time) >= now - 60 * 60 * 1000);
+  if (start < 0) start = 0;
+  const rows = hourly.slice(start, start + 48).filter(row => row.waveFt != null);
+  if (rows.length < 3) return `<p class="coastal-footnote">No wave model data for this point.</p>`;
+
+  const narrow = window.innerWidth < 760;
+  const W = narrow ? 380 : 720, H = narrow ? 220 : 210;
+  const padL = 12, padR = 12, padT = 28, padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const maxV = Math.max(...rows.map(r => Math.max(r.waveFt, r.swellFt ?? 0))) || 1;
+  const xFor = i => padL + (i / (rows.length - 1)) * plotW;
+  const yFor = v => padT + plotH - (v / maxV) * plotH;
+
+  const path = key => rows.map((row, i) => `${i ? "L" : "M"}${xFor(i).toFixed(1)},${yFor(row[key] ?? 0).toFixed(1)}`).join(" ");
+  const waveLine = path("waveFt");
+  const area = `${waveLine} L${xFor(rows.length - 1).toFixed(1)},${(padT + plotH).toFixed(1)} L${padL},${(padT + plotH).toFixed(1)} Z`;
+
+  const step = narrow ? 12 : 6;
+  const labels = rows.map((row, i) => {
+    if (i % step !== 0) return "";
+    const t = new Date(row.time);
+    return `
+      <text x="${xFor(i).toFixed(1)}" y="${(H - 8).toFixed(1)}" text-anchor="middle" fill="rgba(232,240,255,0.5)"
+        font-size="11" font-weight="600" font-family="Inter,system-ui,sans-serif">${i === 0 ? "Now" : t.toLocaleTimeString([], { hour: "numeric" })}</text>
+      <text x="${xFor(i).toFixed(1)}" y="${(yFor(row.waveFt) - 9).toFixed(1)}" text-anchor="middle" fill="#7dd3fc"
+        font-size="11" font-weight="800" font-family="Inter,system-ui,sans-serif">${fmtHeight(row.waveFt)}</text>`;
+  }).join("");
+
+  return `
+    <div class="coastal-chart tall" style="aspect-ratio:${W} / ${H}">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" role="img" aria-label="Hourly wave height forecast">
+        <defs>
+          <linearGradient id="waveFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.38"/>
+            <stop offset="100%" stop-color="#7dd3fc" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <path d="${area}" fill="url(#waveFill)"/>
+        <path d="${waveLine}" fill="none" stroke="#7dd3fc" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="${path("swellFt")}" fill="none" stroke="#c4b5fd" stroke-width="1.8" stroke-dasharray="5,4" stroke-linecap="round"/>
+        ${labels}
+      </svg>
+    </div>
+    <p class="coastal-legend"><span class="swatch" style="--c:#7dd3fc"></span>Significant wave height<span class="swatch dashed" style="--c:#c4b5fd"></span>Swell component</p>
+  `;
+}
+
+function waveDailySvg(daily) {
+  const rows = (daily || []).filter(row => row.waveMaxFt != null);
+  if (!rows.length) return `<p class="coastal-footnote">No daily wave model data for this point.</p>`;
+  const maxV = Math.max(...rows.map(r => r.waveMaxFt)) || 1;
+  return `
+    <div class="wave-days">
+      ${rows.map((row, index) => {
+        const date = new Date(`${row.date}T12:00:00`);
+        return `
+          <div class="wave-day">
+            <strong>${index === 0 ? "Today" : date.toLocaleDateString([], { weekday: "short" })}</strong>
+            <div class="wave-bar"><span style="height:${Math.max(6, (row.waveMaxFt / maxV) * 100)}%"></span></div>
+            <span class="wave-day-value">${fmtHeight(row.waveMaxFt)}</span>
+            <small>${row.periodMaxS == null ? "" : `${Math.round(row.periodMaxS)} s`} ${row.direction == null ? "" : windDirLabel(row.direction)}</small>
+          </div>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderSurfForecastPanel() {
+  const segment = activeSurfSegment();
+  const periods = (segment?.periods || []).filter(period => period.rows.length);
+  if (!periods.length) return "";
+  const issued = coastalState.surf?.issued ? new Date(coastalState.surf.issued).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+
+  return `
+    <section class="tile coastal-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NWS ${safeText(coastalState.surf.office)} surf zone forecast</p>
+          <h3>${safeText(segment.name || "Beach Forecast")}</h3>
+        </div>
+        <span>${[segment.detail, issued && `issued ${issued}`].filter(Boolean).map(safeText).join(" · ")}</span>
+      </div>
+      <div class="surf-periods">
+        ${periods.map(period => `
+          <article class="surf-period">
+            <h4>${safeText(period.name)}</h4>
+            <dl>
+              ${period.rows.map(row => row.label
+                ? `<div><dt>${safeText(row.label)}</dt><dd>${safeText(row.value)}</dd></div>`
+                : `<div class="surf-prose"><dd>${safeText(row.value)}</dd></div>`).join("")}
+            </dl>
+          </article>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCoastalWatersPanel() {
+  const waters = coastalState.waters;
+  if (!waters?.zones?.length && !waters?.synopsis) return "";
+  const zones = waters.zones || [];
+  const zone = zones[Math.min(coastalWatersIndex, Math.max(0, zones.length - 1))];
+  const synopsisText = waters.synopsis?.periods?.[0]?.rows?.map(row => row.value).join(" ") || "";
+
+  const picker = zones.length > 1 ? `
+    <select id="coastalWatersSelect" class="mrms-select" aria-label="Coastal waters zone">
+      ${zones.map((item, index) => `<option value="${index}"${index === coastalWatersIndex ? " selected" : ""}>${safeText(item.name || item.zones.join(", "))}</option>`).join("")}
+    </select>` : "";
+
+  return `
+    <section class="tile coastal-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NWS ${safeText(waters.office)} coastal waters forecast</p>
+          <h3>Offshore Outlook</h3>
+        </div>
+        ${picker || `<span>${safeText(zone?.name || "")}</span>`}
+      </div>
+      ${synopsisText ? `<p class="waters-synopsis">${safeText(synopsisText)}</p>` : ""}
+      ${zone ? `<div class="waters-periods">
+        ${zone.periods.map(period => `
+          <article class="waters-period">
+            <h4>${safeText(period.name)}</h4>
+            <p>${safeText(period.rows.map(row => row.value).join(" "))}</p>
+          </article>`).join("")}
+      </div>` : ""}
+    </section>
+  `;
+}
+
+function refreshCoastal() {
+  coastalState = null;
+  coastalError = null;
+  coastalSegmentIndex = 0;
+  coastalWatersIndex = 0;
+  renderCoastal();
+  return coastalPayload().then(data => {
+    coastalState = data;
+    const segments = data.surf?.segments || [];
+    const matched = segments.findIndex(segment => segment.zones.includes(data.zoneId));
+    coastalSegmentIndex = matched === -1 ? 0 : matched;
+    renderCoastal();
+  }).catch(error => {
+    coastalError = error.message;
+    renderCoastal();
+  });
 }
 
 async function renderClimate(date) {
@@ -6881,6 +7753,9 @@ async function refreshLiveData() {
   renderSpace(space.status === "fulfilled" ? space.value : null);
   renderMapSidebar();
   drawRadar();
+  // Coastal sources are slow and only matter on one tab, so they resolve on
+  // their own rather than holding up the rest of the refresh.
+  refreshCoastal();
 
   refreshButton.disabled = false;
   refreshButton.textContent = "Refresh";
@@ -7059,6 +7934,29 @@ document.querySelector("#mrmsProductSelect")?.addEventListener("change", event =
   drawRadar(false);
 });
 
+const coastalBody = document.querySelector("#coastalBody");
+coastalBody?.addEventListener("click", event => {
+  const preset = event.target.closest("[data-coastal-preset]");
+  if (preset) {
+    chooseLocation(COASTAL_PRESETS[Number(preset.dataset.coastalPreset)]);
+    return;
+  }
+  const modeBtn = event.target.closest("[data-wave-mode]");
+  if (modeBtn) {
+    coastalWaveMode = modeBtn.dataset.waveMode;
+    renderCoastal();
+  }
+});
+coastalBody?.addEventListener("change", event => {
+  if (event.target.id === "coastalBeachSelect") {
+    coastalSegmentIndex = Number(event.target.value);
+    renderCoastal();
+  } else if (event.target.id === "coastalWatersSelect") {
+    coastalWatersIndex = Number(event.target.value);
+    renderCoastal();
+  }
+});
+
 document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event => {
   const btn = event.target.closest("[data-metric]");
   if (!btn) return;
@@ -7067,12 +7965,17 @@ document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event
   renderHourlyChart();
 });
 
+let coastalResizeTimer;
 window.addEventListener("resize", () => {
   sizeMapStage();
   drawRadar();
+  // The coastal charts pick their viewBox from the viewport width.
+  clearTimeout(coastalResizeTimer);
+  coastalResizeTimer = setTimeout(() => { if (coastalState?.isCoastal) renderCoastal(); }, 180);
 });
 
 renderLayers();
+renderCoastal();   // placeholder until the first refresh resolves the marine sources
 registerAppWorker();
 initHistoricalCalendar();
 scheduleMorningNotificationCheck();
