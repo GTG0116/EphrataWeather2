@@ -136,17 +136,37 @@ const DROUGHT_URLS = [
 ];
 
 // ─── MRMS Radar (EphrataWeather/MRMS on GitHub) ───────────────────────────────
+// The generator now publishes each frame as smoothed filled contour bands in
+// GeoJSON rather than a pixel raster. Every feature is one band polygon whose
+// properties carry the band's fill colour ('c') and its value range ('v0' low,
+// 'v1' high, null on the open-ended top band). Drawing them as real vector
+// fills keeps the radar sharp at any zoom — the old PNGs broke up into blocky
+// pixels past the source resolution — and lets a click read the exact band
+// straight out of the rendered feature instead of decoding an image pixel.
 const MRMS_BASE = "https://raw.githubusercontent.com/EphrataWeather/MRMS/main/public/data/";
 const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
 const MRMS_PRODUCTS = {
-  rate:      { label: "Precip Type",     getImg: i => i === 0 ? "master.png" : `master_${i}.png`,  getMeta: i => `metadata_${i}.json`,          hasVal: false },
-  refl:      { label: "Reflectivity",    getImg: i => `refl_${i}.png`,                              getMeta: i => `metadata_refl_${i}.json`,      hasVal: true,  getVal: i => `refl_val_${i}.png`,      valMax: 80.0, valUnit: "dBZ" },
-  mesh:      { label: "Hail (MESH)",     getImg: i => `mesh_${i}.png`,                              getMeta: i => `metadata_mesh_${i}.json`,      hasVal: true,  getVal: i => `mesh_val_${i}.png`,      valMax: 8.0,  valUnit: "in" },
-  qpe6h:     { label: "6-Hr Precip",     getImg: i => `qpe6h_${i}.png`,                             getMeta: i => `metadata_qpe6h_${i}.json`,     hasVal: true,  getVal: i => `qpe6h_val_${i}.png`,     valMax: 40.0, valUnit: "in" },
-  qpe24h:    { label: "24-Hr Precip",    getImg: i => `qpe24h_${i}.png`,                            getMeta: i => `metadata_qpe24h_${i}.json`,    hasVal: true,  getVal: i => `qpe24h_val_${i}.png`,    valMax: 80.0, valUnit: "in" },
-  lightning: { label: "Lightning Prob",  getImg: i => `lightning_${i}.png`,                         getMeta: i => `metadata_lightning_${i}.json`, hasVal: true,  getVal: i => `lightning_val_${i}.png`, valMax: 100,  valUnit: "%" },
-  rotation:  { label: "Azimuthal Shear", getImg: i => `rotation_${i}.png`,                          getMeta: i => `metadata_rotation_${i}.json`,  hasVal: true,  getVal: i => `rotation_val_${i}.png`,  valMax: 1.0,  valUnit: "s⁻¹" },
+  rate:      { label: "Precip Type",     getGeo: i => i === 0 ? "master.geojson" : `master_${i}.geojson`, getMeta: i => `metadata_${i}.json`,           unit: "in/hr", dec: 2, typed: true },
+  refl:      { label: "Reflectivity",    getGeo: i => `refl_${i}.geojson`,                                getMeta: i => `metadata_refl_${i}.json`,      unit: "dBZ",   dec: 0 },
+  mesh:      { label: "Hail (MESH)",     getGeo: i => `mesh_${i}.geojson`,                                getMeta: i => `metadata_mesh_${i}.json`,      unit: "in",    dec: 2 },
+  qpe6h:     { label: "6-Hr Precip",     getGeo: i => `qpe6h_${i}.geojson`,                               getMeta: i => `metadata_qpe6h_${i}.json`,     unit: "in",    dec: 2 },
+  qpe24h:    { label: "24-Hr Precip",    getGeo: i => `qpe24h_${i}.geojson`,                              getMeta: i => `metadata_qpe24h_${i}.json`,    unit: "in",    dec: 2 },
+  lightning: { label: "Lightning Prob",  getGeo: i => `lightning_${i}.geojson`,                           getMeta: i => `metadata_lightning_${i}.json`, unit: "%",     dec: 0 },
+  rotation:  { label: "Azimuthal Shear", getGeo: i => `rotation_${i}.geojson`,                            getMeta: i => `metadata_rotation_${i}.json`,  unit: "s⁻¹",   dec: 3 },
 };
+
+// The "rate" product contours rain, snow and ice against three separate colour
+// tables and merges them into one file, so a band's fill colour is the only
+// thing that says which precipitation type it came from. Colours mirror
+// RAIN/SNOW/ICE_COLORS in the generator's process_mrms.py.
+const MRMS_RATE_TYPE_BY_COLOR = (() => {
+  const map = {};
+  const add = (colors, type) => colors.forEach(c => { map[c.toLowerCase()] = type; });
+  add(["#00fb90", "#00cc00", "#009900", "#006600", "#ffff00", "#ffcc00", "#ff9100", "#ff5500", "#ff0000", "#cc0000"], "Rain");
+  add(["#00ffff", "#80ffff", "#ffffff", "#adc5ff", "#5a82ff"], "Snow");
+  add(["#ff00ff", "#d100d1", "#910091", "#4b0082", "#2d004b"], "Ice / Sleet");
+  return map;
+})();
 const MRMS_LEGENDS = {
   rate: {
     title: "PRECIP TYPE",
@@ -596,9 +616,9 @@ let activeUnifiedPopup = null;
 let activeUnifiedPopupNav = null;
 let alertPopupCounter = 0;
 let activeMrmsProduct = (() => { const s = localStorage.getItem("mrmsProduct"); return MRMS_PRODUCTS[s] ? s : "rate"; })();
-let mrmsImageBounds = null;  // {west, east, north, south}
-let mrmsTimeCache = {};      // `${product}_${frameIdx}` → time string
-let mrmsCanvasCache = {};    // `${product}_${frameIdx}` → {imgData, width, height}
+let mrmsTimeCache = {};        // `${product}_${frameIdx}` → time string
+let mrmsGeoCache = {};         // `${product}_${frameIdx}` → parsed FeatureCollection
+let mrmsFrameCountCache = {};  // product → number of frames published in the rolling buffer
 
 async function getJson(url, options = {}) {
   const response = await fetch(url, {
@@ -858,18 +878,21 @@ function syncModalToVisualViewport() {
 window.visualViewport?.addEventListener("resize", syncModalToVisualViewport);
 window.visualViewport?.addEventListener("scroll", syncModalToVisualViewport);
 
-// Opening freezes the page scroll by fixing the body at its current offset
-// (body.modal-open in styles.css); iOS ignores plain overflow:hidden on the
-// body, which let the extended forecast keep scrolling under the popup.
-let modalScrollLockY = 0;
-
+// Opening used to freeze the page by switching the body to position:fixed with
+// a negative top equal to the scroll offset. That reflowed the whole document
+// the instant the popup appeared: the card rendered centred, then jumped
+// upward by roughly the scroll distance as the fixed body settled — so tapping
+// a day far down the 7-day list threw the popup way above where it belonged.
+// The page is now held still without moving it: overflow:hidden on the scroll
+// container, overscroll-behavior on the overlay to stop scroll chaining, and
+// touch-action:none on the backdrop so drags outside the card don't pan iOS.
+// Nothing about the document's position changes, so there is nothing to jump.
 function showDetailModal() {
   if (!detailModal.hidden) {
     syncModalToVisualViewport();
     return;
   }
-  modalScrollLockY = window.scrollY || document.documentElement.scrollTop || 0;
-  document.body.style.top = `-${modalScrollLockY}px`;
+  document.documentElement.classList.add("modal-open");
   document.body.classList.add("modal-open");
   detailModal.hidden = false;
   syncModalToVisualViewport();
@@ -890,9 +913,8 @@ function openDetails(eyebrow, title, rows, summary = "") {
 function closeDetails() {
   if (detailModal.hidden) return;
   detailModal.hidden = true;
+  document.documentElement.classList.remove("modal-open");
   document.body.classList.remove("modal-open");
-  document.body.style.top = "";
-  window.scrollTo(0, modalScrollLockY);
   syncModalToVisualViewport();
 }
 
@@ -4471,9 +4493,31 @@ function radarLayerForLocation(location = selectedLocation) {
   return "conus_base_reflectivity_mosaic";
 }
 
-function mrmsFrameArray() {
-  // Returns [MRMS_FRAMES-1, ..., 1, 0] so slider 0=oldest, slider max=latest(mrmsIdx=0)
-  return Array.from({ length: MRMS_FRAMES }, (_, i) => MRMS_FRAMES - 1 - i);
+function mrmsFrameArray(count = MRMS_FRAMES) {
+  // Returns [count-1, ..., 1, 0] so slider 0=oldest, slider max=latest(mrmsIdx=0)
+  return Array.from({ length: count }, (_, i) => count - 1 - i);
+}
+
+// How many frames of the active product the generator has actually published.
+// The rolling buffer is contiguous (frame 0 is always the newest), so walking
+// up from 1 until the first 404 finds the end in a couple of requests instead
+// of probing all MRMS_FRAMES slots.
+async function detectMrmsFrameCount(product = activeMrmsProduct) {
+  if (mrmsFrameCountCache[product]) return mrmsFrameCountCache[product];
+  const cfg = MRMS_PRODUCTS[product];
+  let count = 1; // frame 0 is assumed to exist
+  for (let i = 1; i < MRMS_FRAMES; i++) {
+    let res;
+    try {
+      res = await fetch(MRMS_BASE + cfg.getGeo(i), { method: "HEAD", cache: "no-store" });
+    } catch {
+      break; // network/CORS hiccup — keep whatever we have confirmed so far
+    }
+    if (!res.ok) break; // genuine 404 → end of the rolling buffer
+    count = i + 1;
+  }
+  mrmsFrameCountCache[product] = count;
+  return count;
 }
 
 
@@ -4482,6 +4526,18 @@ function stopRadarAnimation() {
   radarAnimationTimer = null;
   const lbl = document.querySelector("#playLabel");
   if (lbl) lbl.textContent = "Play";
+}
+
+// The layer controls and the conditions sidebar float over the map, so each one
+// is a panel the user can dismiss to get the full view back.
+function toggleMapPanel(panelId, buttonId, show) {
+  const panel = document.querySelector(panelId);
+  const button = document.querySelector(buttonId);
+  if (!panel || !button) return;
+  const open = show ?? panel.hidden;
+  panel.hidden = !open;
+  button.classList.toggle("active", open);
+  button.setAttribute("aria-expanded", String(open));
 }
 
 function renderMapSidebar() {
@@ -4565,8 +4621,31 @@ function renderMapSidebar() {
   `;
 }
 
-function mrmsImgUrl(mrmsIdx) {
-  return MRMS_BASE + MRMS_PRODUCTS[activeMrmsProduct].getImg(mrmsIdx);
+function mrmsGeoUrl(mrmsIdx, product = activeMrmsProduct) {
+  return MRMS_BASE + MRMS_PRODUCTS[product].getGeo(mrmsIdx);
+}
+
+// Fetch (and memoise) one frame's contour bands. Frames are handed to Mapbox as
+// parsed objects rather than URLs so scrubbing the timeline re-shows a cached
+// frame instantly instead of re-downloading and blanking the map.
+async function loadMrmsFrame(mrmsIdx, product = activeMrmsProduct) {
+  const key = `${product}_${mrmsIdx}`;
+  if (mrmsGeoCache[key]) return mrmsGeoCache[key];
+  const data = await getJson(mrmsGeoUrl(mrmsIdx, product));
+  mrmsGeoCache[key] = data;
+  return data;
+}
+
+// Warm the rest of the buffer in the background so pressing Play animates
+// smoothly instead of stuttering on each frame's download.
+function prewarmMrmsFrames() {
+  const product = activeMrmsProduct;
+  (async () => {
+    for (const idx of radarFrames) {
+      if (product !== activeMrmsProduct) return; // product switched mid-prefetch
+      await loadMrmsFrame(idx, product).catch(() => {});
+    }
+  })();
 }
 
 function updateRadarLabel() {
@@ -4587,7 +4666,9 @@ function updateRadarLabel() {
   if (mrmsIdx === 0) { labelEl.textContent = "Latest"; return; }
   const key = `${activeMrmsProduct}_${mrmsIdx}`;
   if (mrmsTimeCache[key]) { labelEl.textContent = mrmsTimeCache[key]; return; }
-  labelEl.textContent = `−${mrmsIdx * 10}min`;
+  // Placeholder until the frame's metadata arrives with its real valid time.
+  // Frames are not published on a fixed cadence, so don't guess minutes.
+  labelEl.textContent = `−${mrmsIdx} frame${mrmsIdx > 1 ? "s" : ""}`;
   // Lazily fetch time from metadata
   const cfg = MRMS_PRODUCTS[activeMrmsProduct];
   const capturedIdx = mrmsIdx;
@@ -4608,12 +4689,16 @@ function setRadarFrame(index) {
     const src = radarMap.getSource("mrms-source");
     if (src) {
       const mrmsIdx = radarFrames[radarFrameIndex];
-      const url = mrmsImgUrl(mrmsIdx);
-      // Preload to avoid blank flash, then update
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => src.updateImage({ url });
-      img.src = url;
+      const product = activeMrmsProduct;
+      // Load the bands first and only then swap them in, so a slow frame leaves
+      // the previous one on screen instead of flashing an empty map.
+      loadMrmsFrame(mrmsIdx, product)
+        .then(data => {
+          if (product !== activeMrmsProduct) return;          // product switched mid-load
+          if (radarFrames[radarFrameIndex] !== mrmsIdx) return; // scrubbed past this frame
+          radarMap.getSource("mrms-source")?.setData(data);
+        })
+        .catch(() => {});
     }
   }
   updateRadarLabel();
@@ -4623,7 +4708,7 @@ function setRainfallOpacity(pct) {
   radarOpacity = pct / 100;
   if (radarMap && mapLoaded) {
     if (radarMap.getLayer("mrms-layer"))
-      radarMap.setPaintProperty("mrms-layer", "raster-opacity", radarOpacity);
+      radarMap.setPaintProperty("mrms-layer", "fill-opacity", radarOpacity);
     if (radarMap.getLayer("satellite-layer"))
       radarMap.setPaintProperty("satellite-layer", "raster-opacity", radarOpacity);
   }
@@ -4734,39 +4819,46 @@ function initMap() {
 }
 
 async function addRadarLayer() {
-  // Fetch bounds once (all MRMS products share the same CONUS extent)
-  if (!mrmsImageBounds) {
-    try {
-      const meta = await fetch(`${MRMS_BASE}metadata_0.json?t=${Date.now()}`).then(r => r.json());
-      if (meta.bounds) {
-        const [[south, west], [north, east]] = meta.bounds;
-        mrmsImageBounds = { south, west, north, east };
-      }
-    } catch {}
-    // Fallback matches the live MRMS source extent, which now reaches 55°N to
-    // cover populated Canada (only used if the metadata fetch above fails).
-    if (!mrmsImageBounds) mrmsImageBounds = { south: 20, west: -130, north: 55, east: -60 };
-  }
+  const product = activeMrmsProduct;
+  const count = await detectMrmsFrameCount(product);
+  if (!radarMap || !radarMap.getStyle() || !radarActive) return; // bailed mid-await
+  if (product !== activeMrmsProduct) return;                     // product switched mid-await
 
-  radarFrames = mrmsFrameArray();
+  radarFrames = mrmsFrameArray(count);
   radarFrameIndex = radarFrames.length - 1; // latest = mrmsIdx 0
   const slider = document.querySelector("#radarTimeline");
-  if (slider) { slider.max = radarFrames.length - 1; slider.value = radarFrameIndex; }
+  if (slider) {
+    slider.max = Math.max(1, radarFrames.length - 1);
+    slider.value = radarFrameIndex;
+    // A single-frame buffer has nothing to scrub through; the row stays visible
+    // so the timestamp readout still shows, but the control goes inert.
+    slider.disabled = radarFrames.length < 2;
+  }
+  const playBtn = document.querySelector("#radarPlayButton");
+  if (playBtn) playBtn.disabled = radarFrames.length < 2;
 
   const mrmsIdx = radarFrames[radarFrameIndex]; // 0 = latest
-  const { west, east, north, south } = mrmsImageBounds;
-  const coords = [[west, north], [east, north], [east, south], [west, south]];
+  const data = await loadMrmsFrame(mrmsIdx, product).catch(() => null);
+  if (!data) return;
+  if (!radarMap || !radarMap.getStyle() || !radarActive) return;
+  if (product !== activeMrmsProduct) return;
+  if (radarMap.getSource("mrms-source")) return; // already mounted
 
-  radarMap.addSource("mrms-source", {
-    type: "image",
-    url: mrmsImgUrl(mrmsIdx),
-    coordinates: coords,
-  });
+  radarMap.addSource("mrms-source", { type: "geojson", data });
   addWeatherLayer({
     id: "mrms-layer",
-    type: "raster",
+    type: "fill",
     source: "mrms-source",
-    paint: { "raster-opacity": radarOpacity, "raster-fade-duration": 400, "raster-resampling": "nearest" },
+    paint: {
+      // Each band carries its own colour, so the fill is driven straight from
+      // the feature instead of a step expression that would have to duplicate
+      // the generator's colour tables here.
+      "fill-color": ["coalesce", ["get", "c"], "rgba(0,0,0,0)"],
+      "fill-opacity": radarOpacity,
+      // Bands butt directly against one another; outlining every polygon would
+      // draw a seam between neighbouring colours.
+      "fill-antialias": true,
+    },
   });
   updateRadarLabel();
   renderMrmsLegend();
@@ -5174,7 +5266,13 @@ async function addSatelliteLayer() {
   // Reflect satellite frames on the shared timeline when it owns the controls.
   if (satelliteActive) {
     const slider = document.querySelector("#radarTimeline");
-    if (slider) { slider.max = satFrames.length - 1; slider.value = satFrameIndex; }
+    if (slider) {
+      slider.max = satFrames.length - 1;
+      slider.value = satFrameIndex;
+      slider.disabled = satFrames.length < 2;
+    }
+    const playBtn = document.querySelector("#radarPlayButton");
+    if (playBtn) playBtn.disabled = satFrames.length < 2;
     updateRadarLabel();
   }
   prewarmSatFrames(); // warp the rest in the background for smooth animation
@@ -6068,8 +6166,46 @@ async function addDroughtLayer() {
   }
 }
 
+// The map stage fills everything from the bottom of the tab bar to the bottom
+// of the viewport. That offset can't be a constant — the header wraps at narrow
+// widths and iOS adds a safe-area inset — so measure it and hand it to CSS.
+function sizeMapStage() {
+  const stage = document.querySelector("#mapStage");
+  if (!stage || !document.querySelector("#maps")?.classList.contains("active")) return;
+  const top = stage.getBoundingClientRect().top + (window.scrollY || document.documentElement.scrollTop || 0);
+  document.documentElement.style.setProperty("--map-stage-top", `${Math.max(0, Math.round(top))}px`);
+}
+
+// Fullscreen lifts the map over the header and tab bar so it covers the entire
+// screen. It is a CSS state rather than the Fullscreen API because iOS Safari
+// doesn't support requestFullscreen outside of video.
+function setMapFullscreen(on) {
+  const btn = document.querySelector("#mapFullscreenBtn");
+  const labels = document.querySelectorAll("#mapFullscreenLabel, #mapFullscreenLabelShort");
+  const active = on ?? !document.body.classList.contains("map-fullscreen");
+  document.body.classList.toggle("map-fullscreen", active);
+  btn?.classList.toggle("active", active);
+  btn?.setAttribute("aria-pressed", String(active));
+  // Wide and narrow variants of the label are swapped by a media query.
+  labels.forEach(el => {
+    el.textContent = active ? "Exit" : (el.id === "mapFullscreenLabelShort" ? "Full" : "Fullscreen");
+  });
+  // The stage changed size; Mapbox only re-reads its container on demand.
+  requestAnimationFrame(() => radarMap?.resize());
+}
+
+// On a phone the layer panel covers most of the map, so the first visit to the
+// radar tab opens on the map itself; there is room for it on a wide screen.
+let mapPanelsInitialised = false;
+function initMapPanelDefaults() {
+  if (mapPanelsInitialised) return;
+  mapPanelsInitialised = true;
+  if (window.innerWidth <= 720) toggleMapPanel("#mapControlsPanel", "#mapLayersToggle", false);
+}
+
 function drawRadar(relocate = false) {
   if (!document.querySelector("#maps")?.classList.contains("active")) return;
+  sizeMapStage();
   initMap();
   if (!radarMap || !mapLoaded) return;
   clearWeatherLayers();
@@ -6100,6 +6236,9 @@ function animateRadarLayer() {
   if ((sat ? !satelliteActive : !radarActive) || !frames.length) return;
   const lbl = document.querySelector("#playLabel");
   if (lbl) lbl.textContent = "Pause";
+  // Contour frames are a couple of MB each, so they are only bulk-downloaded
+  // once the user asks for animation rather than on every visit to the tab.
+  if (!sat) prewarmMrmsFrames();
   radarAnimationTimer = setInterval(() => {
     // Animate oldest→newest, wrapping back to the oldest after the latest frame.
     if (sat) setSatelliteFrame((satFrameIndex + 1) % satFrames.length);
@@ -6473,7 +6612,7 @@ function renderMrmsLegend() {
   `;
 }
 
-// ─── Pixel value sampling ────────────────────────────────────────────────────
+// ─── Contour band sampling ───────────────────────────────────────────────────
 
 async function loadImgCors(url) {
   return new Promise((resolve, reject) => {
@@ -6485,112 +6624,50 @@ async function loadImgCors(url) {
   });
 }
 
-async function sampleMrmsValue(lng, lat) {
-  if (!mrmsImageBounds) return null;
-  const { west, east, north, south } = mrmsImageBounds;
-  const xFrac = (lng - west) / (east - west);
-  // MRMS images are generated on a Web Mercator-spaced latitude grid in the
-  // source radar repository, so vertical sampling must use Mercator Y instead
-  // of a linear latitude fraction.
-  const merc = latitude => Math.log(Math.tan(Math.PI / 4 + (latitude * Math.PI / 180) / 2));
-  const yFrac = (merc(north) - merc(lat)) / (merc(north) - merc(south));
-  if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return null;
+// Read the radar value under a click. The frames are vector contour bands, so
+// the band the user tapped is already on the map with its value range attached
+// — asking Mapbox which feature is under the point is exact and instant, where
+// the old raster path had to download a companion value PNG and decode a pixel.
+function sampleMrmsValue(point) {
+  if (!radarMap?.getLayer("mrms-layer")) return null;
+  const hits = radarMap.queryRenderedFeatures(point, { layers: ["mrms-layer"] });
+  if (!hits.length) return { noData: true };
 
-  const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
   const cfg = MRMS_PRODUCTS[activeMrmsProduct];
+  // Mapbox returns the topmost rendered feature first. Bands are emitted low
+  // value → high value (and, for the precip-type product, rain then snow then
+  // ice), so the first hit is the one actually visible at this point.
+  const props = hits[0].properties || {};
+  const color = String(props.c || "").toLowerCase();
+  const low   = Number(props.v0);
+  const high  = props.v1 === null || props.v1 === undefined || props.v1 === "" ? null : Number(props.v1);
 
-  // Try val image first (16-bit precision)
-  if (cfg.hasVal && cfg.getVal) {
-    const valKey = `${activeMrmsProduct}_val_${mrmsIdx}`;
-    let ve = mrmsCanvasCache[valKey];
-    if (!ve) {
-      try {
-        const img = await loadImgCors(MRMS_BASE + cfg.getVal(mrmsIdx));
-        const c = document.createElement("canvas");
-        c.width = img.naturalWidth; c.height = img.naturalHeight;
-        const cx = c.getContext("2d", { willReadFrequently: true });
-        cx.imageSmoothingEnabled = false;
-        cx.drawImage(img, 0, 0);
-        ve = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
-        mrmsCanvasCache[valKey] = ve;
-      } catch {}
-    }
-    if (ve) {
-      const x = Math.min(ve.width - 1, Math.max(0, Math.floor(xFrac * ve.width)));
-      const y = Math.min(ve.height - 1, Math.max(0, Math.floor(yFrac * ve.height)));
-      const i = (y * ve.width + x) * 4;
-      const [r, g, b, a] = [ve.imgData.data[i], ve.imgData.data[i+1], ve.imgData.data[i+2], ve.imgData.data[i+3]];
-      if (a < 20) return { noData: true };
-      const val = (((r << 8) | g) / 65535) * cfg.valMax;
-      return { hasVal: true, value: val, unit: cfg.valUnit, product: cfg.label };
-    }
-  }
-
-  // Fall back: sample main image for color-based label
-  const mainKey = `${activeMrmsProduct}_${mrmsIdx}`;
-  let me = mrmsCanvasCache[mainKey];
-  if (!me) {
-    try {
-      const img = await loadImgCors(MRMS_BASE + cfg.getImg(mrmsIdx));
-      const c = document.createElement("canvas");
-      c.width = img.naturalWidth; c.height = img.naturalHeight;
-      const cx = c.getContext("2d", { willReadFrequently: true });
-      cx.imageSmoothingEnabled = false;
-      cx.drawImage(img, 0, 0);
-      me = { imgData: cx.getImageData(0, 0, c.width, c.height), width: c.width, height: c.height };
-      mrmsCanvasCache[mainKey] = me;
-    } catch { return null; }
-  }
-  const x = Math.min(me.width - 1, Math.max(0, Math.floor(xFrac * me.width)));
-  const y = Math.min(me.height - 1, Math.max(0, Math.floor(yFrac * me.height)));
-  const i = (y * me.width + x) * 4;
-  const [r, g, b, a] = [me.imgData.data[i], me.imgData.data[i+1], me.imgData.data[i+2], me.imgData.data[i+3]];
-  if (a < 20) return { noData: true };
-  return { hasVal: false, r, g, b, product: cfg.label, label: interpretMrmsColor(r, g, b) };
+  return {
+    product: cfg.label,
+    unit: cfg.unit,
+    color: /^#[0-9a-f]{6}$/.test(color) ? color : null,
+    low: Number.isFinite(low) ? low : null,
+    high: Number.isFinite(high) ? high : null,
+    dec: cfg.dec,
+    // Only the precip-rate product mixes several colour tables into one file.
+    precipType: cfg.typed ? MRMS_RATE_TYPE_BY_COLOR[color] || null : null,
+  };
 }
 
-function interpretMrmsColor(r, g, b) {
-  const prod = activeMrmsProduct;
-  if (prod === "rate") {
-    if (r > 220 && g > 220 && b > 220) return "Heavy Snow";
-    if (b > 180 && b > r + 30 && b > g - 40) return "Snow";
-    if (r > 150 && b > 90 && g < 70) return "Freezing/Ice Mix";
-    if (g > 180 && g > r + 40 && g > b + 20) {
-      if (r > 160) return "Heavy Rain";
-      if (r > 80) return "Moderate Rain";
-      return "Light Rain";
-    }
-    if (r > 150 && g < 60 && b < 60) return "Heavy Rain";
-    return "Precipitation";
-  }
-  if (prod === "refl") {
-    if (r < 120 && g < 120 && b < 120) return "~5-10 dBZ";
-    if (b > 200 && g > 200 && r < 30) return "~15-20 dBZ";
-    if (b > 200 && r < 30) return "~25-30 dBZ";
-    if (g > 200 && r < 50 && b < 50) return "~35 dBZ";
-    if (g > 200 && r > 150 && b < 50) return "~40-45 dBZ";
-    if (r > 200 && g > 150 && b < 50) return "~50 dBZ";
-    if (r > 200 && g > 50 && g < 120 && b < 50) return "~55 dBZ";
-    if (r > 200 && g < 50 && b < 50) return "~60 dBZ";
-    if (r > 150 && b > 120 && g < 50) return "~65-70 dBZ";
-    return "Radar return";
-  }
-  return "Data detected";
+// "0.20 – 0.50 in/hr" for a closed band, "3.00+ in/hr" for the open-ended top.
+function mrmsBandLabel(data) {
+  const fmt = v => v.toFixed(data.dec);
+  if (data.low === null) return `Detected${data.unit ? ` (${data.unit})` : ""}`;
+  if (data.high === null) return `${fmt(data.low)}+ ${data.unit}`;
+  return `${fmt(data.low)} – ${fmt(data.high)} ${data.unit}`;
 }
 
 function buildRadarPixelHtml(data) {
-  let valueStr, iconBg;
-  if (data.hasVal) {
-    const dec = data.unit === "%" ? 0 : data.unit === "s⁻¹" ? 3 : 2;
-    valueStr = `${data.value.toFixed(dec)} ${data.unit}`;
-    iconBg = "background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4)";
-  } else {
-    valueStr = data.label || "Precipitation detected";
-    const hexR = data.r?.toString(16).padStart(2, "0") ?? "88";
-    const hexG = data.g?.toString(16).padStart(2, "0") ?? "cc";
-    const hexB = data.b?.toString(16).padStart(2, "0") ?? "ff";
-    iconBg = `background:#${hexR}${hexG}${hexB}22;border:1px solid #${hexR}${hexG}${hexB}66`;
-  }
+  const swatch = data.color || "#38bdf8";
+  const iconBg = `background:${swatch}33;border:1px solid ${swatch}88`;
+  const typeRow = data.precipType
+    ? `<div class="popup-stat"><span class="popup-key">Type</span><span class="popup-val">${safeText(data.precipType)}</span></div>`
+    : "";
   return `
     <div class="popup-header">
       <div class="popup-icon popup-mrms" style="${iconBg}">
@@ -6598,11 +6675,12 @@ function buildRadarPixelHtml(data) {
       </div>
       <div>
         <div class="popup-title">MRMS ${safeText(data.product)}</div>
-        <div class="popup-subtitle">Pixel Value</div>
+        <div class="popup-subtitle">Contour Band</div>
       </div>
     </div>
     [NAV_SLOT]
-    <div class="popup-stat"><span class="popup-key">Value</span><span class="popup-val">${safeText(valueStr)}</span></div>
+    ${typeRow}
+    <div class="popup-stat"><span class="popup-key">Value</span><span class="popup-val">${safeText(mrmsBandLabel(data))}</span></div>
     <div class="popup-note">NOAA/MRMS — EphrataWeather</div>`;
 }
 
@@ -6692,11 +6770,12 @@ async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
       .forEach(f => items.push({ type: "alert", feature: f }));
   }
 
-  // Collect radar pixel value (put first so it's the default view for map clicks)
-  if (radarActive && mrmsImageBounds && !preferredLsrFeature) {
+  // Collect the radar contour band under the click (put first so it's the
+  // default view for map clicks)
+  if (radarActive && !preferredLsrFeature) {
     try {
-      const px = await sampleMrmsValue(lngLat.lng, lngLat.lat);
-      if (px && !px.noData) items.unshift({ type: "radar", data: px });
+      const band = sampleMrmsValue(point);
+      if (band && !band.noData) items.unshift({ type: "radar", data: band });
     } catch {}
   }
 
@@ -6811,9 +6890,25 @@ tabs.forEach(tab => {
   tab.addEventListener("click", () => {
     tabs.forEach(item => item.classList.toggle("active", item === tab));
     screens.forEach(screen => screen.classList.toggle("active", screen.id === tab.dataset.tab));
-    if (tab.dataset.tab === "maps") setTimeout(() => drawRadar(true), 0);
+    document.body.classList.toggle("map-mode", tab.dataset.tab === "maps");
+    if (tab.dataset.tab !== "maps") setMapFullscreen(false);
+    if (tab.dataset.tab === "maps") {
+      // The map screen exactly fills the viewport below the tabs, so drop any
+      // scroll carried over from the tab the user came from before measuring.
+      window.scrollTo(0, 0);
+      initMapPanelDefaults();
+      setTimeout(() => drawRadar(true), 0);
+    }
   });
 });
+
+document.querySelector("#mapLayersToggle")?.addEventListener("click", () => {
+  toggleMapPanel("#mapControlsPanel", "#mapLayersToggle");
+});
+document.querySelector("#mapInfoToggle")?.addEventListener("click", () => {
+  toggleMapPanel("#mapSidebar", "#mapInfoToggle");
+});
+document.querySelector("#mapFullscreenBtn")?.addEventListener("click", () => setMapFullscreen());
 
 refreshButton.addEventListener("click", refreshLiveData);
 notifyButton?.addEventListener("click", toggleNotifications);
@@ -6887,7 +6982,9 @@ detailModal.addEventListener("click", event => {
   if (event.target.closest("[data-close-modal]")) closeDetails();
 });
 window.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !detailModal.hidden) closeDetails();
+  if (event.key !== "Escape") return;
+  if (!detailModal.hidden) closeDetails();
+  else if (document.body.classList.contains("map-fullscreen")) setMapFullscreen(false);
 });
 // climateForm removed — using calendar date picker
 document.querySelector("#locateMeBtn")?.addEventListener("click", async () => {
@@ -6957,8 +7054,8 @@ document.querySelector("#radarOpacitySlider")?.addEventListener("input", event =
 document.querySelector("#mrmsProductSelect")?.addEventListener("change", event => {
   activeMrmsProduct = event.target.value;
   localStorage.setItem("mrmsProduct", activeMrmsProduct);
-  mrmsCanvasCache = {}; // Clear pixel cache on product switch
-  mrmsImageBounds = null; // Re-fetch bounds for new product
+  mrmsGeoCache = {};        // Drop the previous product's contour frames
+  mrmsTimeCache = {};       // Frame timestamps are per product too
   drawRadar(false);
 });
 
@@ -6970,7 +7067,10 @@ document.querySelector("#hourlyMetricSwitcher")?.addEventListener("click", event
   renderHourlyChart();
 });
 
-window.addEventListener("resize", drawRadar);
+window.addEventListener("resize", () => {
+  sizeMapStage();
+  drawRadar();
+});
 
 renderLayers();
 registerAppWorker();
