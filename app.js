@@ -2213,6 +2213,8 @@ const COOPS_LISTS = {
 };
 const TIDE_GAUGE_MAX_MI = 45;     // beyond this a gauge no longer describes the local water
 const TIDE_PRED_MAX_MI = 25;      // prediction stations are dense, so hold them close
+const TIDE_OCEAN_REACH_MI = 6;    // how much further than the nearest an ocean station may sit
+const TIDE_OCEAN_MAX_MI = 15;     // hard ceiling on that reach
 const COASTAL_OBS_MAX_MI = 30;    // how far a shore station may be and still beat inland
 
 function milesBetween(lat1, lon1, lat2, lon2) {
@@ -2268,6 +2270,37 @@ async function nearestCoopsStation(kind, lat, lon, maxMiles) {
   return (await nearestCoopsStations(kind, lat, lon, maxMiles))[0] || null;
 }
 
+/* The tide a beach town cares about is the one breaking on its ocean side, but
+   the nearest prediction station is very often a back-bay one a mile behind the
+   dunes, running up to an hour late. CO-OPS has no exposure flag, and the wave
+   model's grid is far too coarse to tell a bay cell from a surf cell, so the
+   water body is read off the station name — which CO-OPS names consistently
+   after exactly that. */
+const TIDE_OCEAN_WORDS = /\b(OCEAN|BEACH|SURF|SEASIDE|OCEANSIDE|INLET|CAPE|FISHING PIER|OCEAN PIER|COAST ?GUARD|USCG|JETT(?:Y|IES)|BREAKWATER|LIGHTHOUSE|LIGHT STATION|SEA BUOY|OFFSHORE|STRAND|HEADLAND)\b/;
+const TIDE_INLAND_WORDS = /\b(BAY|BAYOU|BAYSIDE|RIVER|CREEK|CR\.|THOROFARE|CHANNEL|CHAN|SOUND|SND|HARBOU?R|COVE|CANAL|SLOUGH|SL\.|LAGOON|MARSH|LAKE|POND|BASIN|SWAMP|NECK|INTRACOASTAL|ICW|YACHT|MARINA|BRIDGE|FERRY|DITCH|NARROWS|SHOAL|WHARF|DOCK|SLIP|BRANCH|FORK|LANDING|ESTUARY|REACH|GUT)\b/;
+
+// An inland word always wins: "OCEAN GATE, BARNEGAT BAY" is a bay station, and
+// "THOMAS POINT SHOAL LIGHTHOUSE" sits well inside the Chesapeake.
+function classifyTideStation(name = "") {
+  const upper = name.toUpperCase();
+  if (TIDE_INLAND_WORDS.test(upper)) return "inland";
+  return TIDE_OCEAN_WORDS.test(upper) ? "ocean" : "unknown";
+}
+
+// Ocean-facing by default. The nearest station is kept unless it is plainly a
+// back-bay one, and the swap only reaches a few miles further out — otherwise a
+// town that genuinely sits on a bay or a sound (Annapolis, Seattle, Half Moon
+// Bay) would be dragged to an ocean station that describes nothing local.
+function pickOceanFacingStation(candidates = []) {
+  const nearest = candidates[0];
+  if (!nearest || nearest.water !== "inland") return nearest || null;
+  const cap = Math.min(nearest.distance + TIDE_OCEAN_REACH_MI, TIDE_OCEAN_MAX_MI);
+  const within = candidates.filter(item => item.distance <= cap);
+  return within.find(item => item.water === "ocean")
+    || within.find(item => item.water === "unknown")
+    || nearest;
+}
+
 function coopsDate(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -2301,12 +2334,9 @@ function parseCoopsTime(value = "") {
 // test, so inland locations never pull the large prediction list.
 async function tidePayload(lat, lon, gauge, preferredStationId = null) {
   if (!gauge) return null;
-  // The nearest prediction station is the default, but on a barrier island the
-  // nearest one is often in the back bay while the user is on the ocean side —
-  // where the tide runs an hour or so earlier — so the alternatives ride along
-  // for the picker.
-  const nearby = await nearestCoopsStations("predicted", lat, lon, TIDE_PRED_MAX_MI, 8).catch(() => []);
-  const station = nearby.find(item => item.id === preferredStationId) || nearby[0] || gauge;
+  const nearby = (await nearestCoopsStations("predicted", lat, lon, TIDE_PRED_MAX_MI, 10).catch(() => []))
+    .map(item => ({ ...item, water: classifyTideStation(item.name) }));
+  const station = nearby.find(item => item.id === preferredStationId) || pickOceanFacingStation(nearby) || gauge;
 
   const today = new Date();
   const begin = coopsDate(today);
@@ -4948,12 +4978,12 @@ function renderTidePanel() {
           <h3>Tides</h3>
         </div>
         ${tides.nearby.length > 1 ? `<select id="coastalTideSelect" class="mrms-select" aria-label="Tide prediction station">
-          ${tides.nearby.map(item => `<option value="${safeText(item.id)}"${item.id === tides.station.id ? " selected" : ""}>${safeText(item.name)} — ${item.distance.toFixed(1)} mi</option>`).join("")}
+          ${tides.nearby.map(item => `<option value="${safeText(item.id)}"${item.id === tides.station.id ? " selected" : ""}>${safeText(item.name)} — ${item.distance.toFixed(1)} mi${item.water === "ocean" ? " · ocean" : item.water === "inland" ? " · bay" : ""}</option>`).join("")}
         </select>` : `<span>Station ${safeText(tides.station.id)}, ${tides.station.distance.toFixed(1)} mi away</span>`}
       </div>
       <div class="tide-chips">${chips || "<p>No further tide predictions in the next three days.</p>"}</div>
       ${tideCurveSvg(tides)}
-      <p class="coastal-footnote">Predictions from ${safeText(tides.station.name)}, ${tides.station.distance.toFixed(1)} mi away, above ${tides.datum}${tides.nearby.length > 1 ? " — switch stations above if the ocean side or the back bay suits you better" : ""}.${tides.observed ? ` Live level ${fmtHeight(tides.observed.heightFt, 1)} at the ${safeText(tides.gauge.name)} gauge, ${safeText(tides.observed.label)}${tides.waterTempF == null ? "" : `, water ${fmtTemp(tides.waterTempF)}`}.` : ""} Predictions are astronomical only — wind and surge shift the real water level.</p>
+      <p class="coastal-footnote">Predictions from ${safeText(tides.station.name)}, ${tides.station.distance.toFixed(1)} mi away, above ${tides.datum}${tideStationNote(tides)}.${tides.observed ? ` Live level ${fmtHeight(tides.observed.heightFt, 1)} at the ${safeText(tides.gauge.name)} gauge, ${safeText(tides.observed.label)}${tides.waterTempF == null ? "" : `, water ${fmtTemp(tides.waterTempF)}`}.` : ""} Predictions are astronomical only — wind and surge shift the real water level.</p>
     </section>
   `;
 }
@@ -4975,6 +5005,17 @@ function chartLabel(x, y, text, color, { size = 11, anchor = "middle", weight = 
   return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" fill="${color}"
     stroke="rgba(2,6,23,0.72)" stroke-width="${halo}" stroke-linejoin="round" paint-order="stroke"
     font-size="${size}" font-weight="${weight}" font-family="Inter,system-ui,sans-serif">${text}</text>`;
+}
+
+// Explains the default when it skipped a closer station, so the choice never
+// looks like a bug.
+function tideStationNote(tides) {
+  if (tides.nearby.length < 2) return "";
+  const nearest = tides.nearby[0];
+  if (nearest.id !== tides.station.id && nearest.water === "inland") {
+    return `, chosen as the ocean-facing station over ${safeText(nearest.name)} ${nearest.distance.toFixed(1)} mi away in the back bay — switch above if you want the bay tide`;
+  }
+  return " — switch stations above for the ocean side or the back bay";
 }
 
 // 24-hour tide trace (6 h behind, 18 h ahead) with high/low callouts and a
