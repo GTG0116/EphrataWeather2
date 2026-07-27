@@ -58,6 +58,10 @@
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><rect x="3.4" y="4.8" width="17.2" height="15.8" rx="3.2"/><path d="M3.4 9.6h17.2M8.2 2.9v3.4M15.8 2.9v3.4"/></svg>
           7 Days
         </button>
+        <button class="tab" type="button" data-tab="coastal">
+          <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 7.4c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 13c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 18.6c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/></svg>
+          Coast
+        </button>
         <button class="tab" type="button" data-tab="maps">
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.6"/><path d="M12 12l6.2-4.8"/></svg>
           Radar
@@ -142,6 +146,18 @@
             <span>Daily outlook with fair weather scoring</span>
           </div>
           <div class="daily-grid" id="dailyGrid"></div>
+        </section>
+
+        <!-- COASTAL: RIP CURRENTS, TIDES & WAVES -->
+        <section class="screen" id="coastal" aria-labelledby="coastal-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Surf, Sea &amp; Tide</p>
+              <h2 id="coastal-title">Coastal Forecast</h2>
+            </div>
+            <span id="coastalStatus">Checking for marine data…</span>
+          </div>
+          <div class="coastal-body" id="coastalBody"></div>
         </section>
 
         <!-- RADAR & MAPS -->
