@@ -391,6 +391,21 @@ const themePalettes = {
   },
 };
 
+// Nine-bucket sky gradients for the animated canvas background — one clean
+// linear-gradient (top to bottom) per real condition bucket, independent of
+// the coarser 4-way accent theme above.
+const SKY = {
+  clearDay: ["#0a5fae", "#2f8fd4", "#7fc2e8", "#bfe2f2"],
+  clearNight: ["#03060f", "#071229", "#0d1e3d", "#16304f"],
+  partly: ["#0d63aa", "#3b90cd", "#84bfdd", "#c3ddea"],
+  overcast: ["#3b4551", "#556270", "#75818d", "#939da8"],
+  rain: ["#1a2530", "#2b3946", "#3d4c5a", "#4d5c6a"],
+  storm: ["#0b1119", "#161f2b", "#232f3d", "#2c3a49"],
+  snow: ["#4a5764", "#66727f", "#8c96a1", "#b4bcc4"],
+  fog: ["#5d6670", "#7c848d", "#9aa1a8", "#b6bcc1"],
+  sunset: ["#2a1a4a", "#8b3d63", "#e0713f", "#f8b064"],
+};
+
 const tabs = document.querySelectorAll(".tab");
 const screens = document.querySelectorAll(".screen");
 const refreshButton = document.querySelector("#refreshButton");
@@ -412,9 +427,11 @@ const canvas = document.querySelector("#atmosphereCanvas");
 const ctx = canvas.getContext("2d");
 
 let activeTheme = "sunny";
+let skyBucket = "clearDay";
+let skyT = 0; // seconds, drives the animated canvas sky
 
 // Keep the <meta name="theme-color"> in step with the top color of the active
-// animated gradient. On iOS standalone web apps the system can paint the
+// animated sky gradient. On iOS standalone web apps the system can paint the
 // status-bar buffer itself from theme-color; matching the gradient keeps that
 // strip blended with the scene instead of reading as a flat dark band.
 // Also mirror the palette onto the root element's --sky-* custom properties:
@@ -422,12 +439,74 @@ let activeTheme = "sunny";
 // the safe-area bands when the canvas's compositing layer drops out of them.
 function syncThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
-  const palette = themePalettes[activeTheme] || themePalettes.sunny;
-  if (meta && palette.gradient?.length) meta.setAttribute("content", palette.gradient[0]);
-  palette.gradient.forEach((color, i) =>
+  const stops = SKY[skyBucket] || SKY.clearDay;
+  if (meta && stops.length) meta.setAttribute("content", stops[0]);
+  stops.forEach((color, i) =>
     document.documentElement.style.setProperty(`--sky-${i}`, color));
 }
 syncThemeColor();
+
+// Determine which of the nine animated-sky buckets a real observation maps
+// to: precipitation/fog/storm text wins outright, otherwise clear/cloudy
+// conditions are split further by day, night, or near-sunset/sunrise light.
+function computeSkyBucket(current) {
+  const text = `${current.condition || ""}`.toLowerCase();
+  if (text.includes("thunder") || text.includes("storm")) return "storm";
+  if (text.includes("snow") || text.includes("sleet") || text.includes("ice") || text.includes("wintry")) return "snow";
+  if (text.includes("fog") || text.includes("mist") || text.includes("haze")) return "fog";
+  if (text.includes("rain") || text.includes("shower") || text.includes("drizzle")) return "rain";
+
+  const now = new Date();
+  let night = false, sunset = false;
+  if (currentSunrise && currentSunset) {
+    const nowMs = now.getTime(), riseMs = currentSunrise.getTime(), setMs = currentSunset.getTime();
+    night = nowMs < riseMs || nowMs > setMs;
+    sunset = !night && (nowMs > setMs - 60 * 60 * 1000 || nowMs < riseMs + 30 * 60 * 1000);
+  } else {
+    const hour = localHour(now);
+    night = hour >= 20 || hour <= 5;
+    sunset = !night && hour >= 17;
+  }
+
+  if (text.includes("overcast") || (text.includes("cloud") && !text.includes("partly"))) return "overcast";
+  if (sunset) return "sunset";
+  if (night) return "clearNight";
+  if (text.includes("partly") || text.includes("mostly clear") || text.includes("mostly sunny")) return "partly";
+  return "clearDay";
+}
+
+// Per-bucket particle/scene state for the animated sky canvas — rebuilt only
+// when the bucket changes (not every frame).
+let skyScene = { drops: [], flakes: [], stars: [], clouds: [], fogBanks: [], flash: { next: 0, on: 0, x: 0.5 } };
+function skyRnd(a, b) { return a + Math.random() * (b - a); }
+function buildSkyScene(bucket) {
+  const heavy = bucket === "storm";
+  const rainN = bucket === "rain" ? 380 : heavy ? 560 : bucket === "fog" ? 40 : 0;
+  const drops = Array.from({ length: rainN }, () => ({
+    x: Math.random(), y: Math.random(), l: skyRnd(0.03, 0.085), s: skyRnd(0.55, 1.05),
+    w: skyRnd(0.7, 1.7), a: skyRnd(0.22, 0.6),
+  }));
+  const flakes = bucket === "snow" ? Array.from({ length: 280 }, () => ({
+    x: Math.random(), y: Math.random(), r: skyRnd(0.9, 3.1), s: skyRnd(0.03, 0.09),
+    ph: Math.random() * 9, sw: skyRnd(0.004, 0.016), a: skyRnd(0.35, 0.95),
+  })) : [];
+  const stars = bucket === "clearNight" ? Array.from({ length: 240 }, () => ({
+    x: Math.random(), y: Math.random() * 0.82, r: skyRnd(0.4, 1.5), ph: Math.random() * 9, a: skyRnd(0.3, 1),
+  })) : [];
+  const n = { clearDay: 3, partly: 7, overcast: 11, rain: 9, storm: 10, snow: 8, fog: 5, sunset: 6, clearNight: 3 }[bucket] || 0;
+  const lowDeck = bucket === "overcast" || bucket === "storm" || bucket === "rain";
+  const clouds = Array.from({ length: n }, () => ({
+    x: Math.random(), y: skyRnd(0.05, lowDeck ? 0.5 : 0.42), w: skyRnd(0.28, 0.72), h: skyRnd(0.07, 0.19),
+    s: skyRnd(0.004, 0.016) * (bucket === "storm" ? 2.2 : 1), a: skyRnd(0.1, 0.34),
+  }));
+  const fogBanks = (bucket === "fog" || bucket === "snow" || bucket === "overcast")
+    ? Array.from({ length: bucket === "fog" ? 7 : 3 }, () => ({
+        y: skyRnd(0.3, 1), h: skyRnd(0.14, 0.4), s: skyRnd(0.006, 0.022), a: skyRnd(0.1, 0.3), x: Math.random(),
+      }))
+    : [];
+  skyScene = { drops, flakes, stars, clouds, fogBanks, flash: { next: skyT + skyRnd(1.5, 5), on: 0, x: 0.5 } };
+}
+buildSkyScene(skyBucket);
 let radarActive = true;
 let activeOverlays = new Set();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
@@ -2498,6 +2577,57 @@ function fwiNote(score) {
   return "Unpleasant outdoor conditions — take precautions.";
 }
 
+// Plain-English, threshold-based one-liners for the Today metric cards —
+// generated from the live value rather than a canned string per condition,
+// so they stay accurate no matter what the real reading is.
+function uvNote(uv) {
+  if (uv == null || Number.isNaN(uv)) return "Estimated daylight exposure.";
+  if (uv < 3) return "Low. No real precaution needed.";
+  if (uv < 6) return "Moderate. Sunscreen if you're out for a while.";
+  if (uv < 8) return "High. Sunscreen if you're out past noon.";
+  if (uv < 11) return "Very high. Limit midday sun and cover up.";
+  return "Extreme. Avoid direct sun between 10 and 4.";
+}
+
+function humidityNote(rh) {
+  if (rh == null || Number.isNaN(rh)) return "Relative humidity.";
+  if (rh < 30) return "Quite dry — you may notice static or dry skin.";
+  if (rh < 45) return "Comfortably dry — barely noticeable.";
+  if (rh < 60) return "Middle of the road — feels natural.";
+  if (rh < 75) return "A bit muggy — the air feels heavier than it is.";
+  return "Very humid — expect that sticky, heavy feeling.";
+}
+
+function windNote(windMph, gustMph) {
+  if (windMph == null || Number.isNaN(windMph)) return "Estimated surface wind.";
+  const gusty = gustMph != null && gustMph - windMph > 10;
+  if (windMph < 5) return "Calm — barely enough to notice.";
+  if (windMph < 12) return gusty ? "Light, with gustier moments." : "A light, steady breeze.";
+  if (windMph < 20) return gusty ? "Breezy, gusting higher at times." : "Breezy — loose items may shift.";
+  if (windMph < 30) return "Windy — secure anything lightweight outside.";
+  return "Strong wind — exercise caution outdoors.";
+}
+
+function airQualityNote(label) {
+  const t = `${label || ""}`.toLowerCase();
+  if (!t || t.includes("not reported")) return "Open-Meteo air quality.";
+  if (t.includes("hazardous")) return "Hazardous — stay indoors if possible.";
+  if (t.includes("very unhealthy")) return "Very unhealthy — avoid outdoor exertion.";
+  if (t.includes("unhealthy for sensitive")) return "Unhealthy for sensitive groups — they should limit exertion.";
+  if (t.includes("unhealthy")) return "Unhealthy — everyone should reduce time outdoors.";
+  if (t.includes("moderate")) return "Moderate — sensitive groups may notice.";
+  return "Good — fine for everyone, including runners.";
+}
+
+function dewPointNote(dewF) {
+  if (dewF == null || Number.isNaN(dewF)) return "Observation.";
+  if (dewF < 50) return "Crisp and dry — comfortable all day.";
+  if (dewF < 60) return "Comfortable, with a little moisture in the air.";
+  if (dewF < 65) return "A little sticky by afternoon.";
+  if (dewF < 70) return "Muggy — expect that heavy, humid feel.";
+  return "Oppressive — as humid as it gets.";
+}
+
 function comfortIndex(weather) {
   const month = new Date().getMonth();
   const center = SEASONAL_CENTER[month];
@@ -2670,12 +2800,19 @@ function renderCurrent() {
   activeTheme = chooseTheme(current);
   setLocationBrand();
   document.body.dataset.theme = activeTheme;
-  syncThemeColor();
   document.body.dataset.condition = conditionClass(current);
+
+  const nextSkyBucket = computeSkyBucket(current);
+  if (nextSkyBucket !== skyBucket) {
+    skyBucket = nextSkyBucket;
+    buildSkyScene(skyBucket);
+  }
+  syncThemeColor();
+
   locationName.textContent = selectedLocation.name;
   document.querySelector("#current-title").textContent = current.headline;
   document.querySelector("#weatherSummary").textContent = current.summary;
-  document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight");
+  document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight", { animated: true, sunset: skyBucket === "sunset" });
   document.querySelector("#currentTemp").textContent = uTempNum(current.temp);
   updateUnitToggleLabel();
   document.querySelector("#currentCondition").textContent = current.condition || "Observed conditions";
@@ -2692,12 +2829,12 @@ function renderCurrent() {
   }
 
   const metrics = [
-    ["air", "Air Quality", current.airQuality || "Not reported", current.airQualityDetail || "Open-Meteo air quality"],
+    ["air", "Air Quality", current.airQuality || "Not reported", current.airQualityDetail || airQualityNote(current.airQuality)],
     current.pollen ? ["pollen", "Pollen", current.pollen, current.pollenDetail || "Google Pollen API"] : null,
-    ["uv", "UV Index", f(current.uv), current.uv >= 6 ? "High exposure" : "Estimated daylight exposure"],
-    ["dew", "Dew Point", `${uTempNum(current.dewPoint)}°`, `${current.source || "NWS"} observation`],
-    ["humidity", "Relative Humidity", `${f(current.humidity)}%`, "Relative humidity"],
-    ["wind", "Wind", fmtWind(current.wind), `Gusts ${fmtWind(current.gust)}`],
+    ["uv", "UV Index", f(current.uv), uvNote(current.uv)],
+    ["dew", "Dew Point", `${uTempNum(current.dewPoint)}°`, dewPointNote(current.dewPoint)],
+    ["humidity", "Relative Humidity", `${f(current.humidity)}%`, humidityNote(current.humidity)],
+    ["wind", "Wind", fmtWind(current.wind), windNote(current.wind, current.gust)],
   ].filter(Boolean);
 
   metricGrid.innerHTML = metrics.map(([icon, name, value, detail]) => `
@@ -4161,95 +4298,167 @@ function hexToTransparent(hex) {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 0)`;
 }
 
-function drawAtmosphere() {
-  const palette = themePalettes[activeTheme] || themePalettes.sunny;
-  const dpr = window.devicePixelRatio || 1;
+// The sky is the app: a live per-frame canvas painter keyed off the current
+// bucket (see computeSkyBucket / SKY above) — rotating sun haze, drifting
+// cloud banks, slanted rain, lightning flashes, swaying snow, drifting fog,
+// warm sunset bands, or twinkling stars, depending on real conditions.
+function drawAtmosphere(ts) {
+  skyT = (ts || 0) / 1000;
+  const stops = SKY[skyBucket] || SKY.clearDay;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   // Measure the canvas's actual rendered size so its buffer matches the CSS
   // overshoot. iOS standalone can still clip fixed elements out of safe-area
   // bands, so the body::before gradient mirrors this palette as the reliable fallback.
-  const width = canvas.clientWidth || window.innerWidth;
-  const height = canvas.clientHeight || window.innerHeight;
-  const bufferW = Math.round(width * dpr);
-  const bufferH = Math.round(height * dpr);
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
+  const bufferW = Math.round(w * dpr);
+  const bufferH = Math.round(h * dpr);
   if (canvas.width !== bufferW || canvas.height !== bufferH) {
     canvas.width = bufferW;
     canvas.height = bufferH;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
+  const t = skyT;
+  ctx.clearRect(0, 0, w, h);
 
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  palette.gradient.forEach((color, index) => grad.addColorStop(index / (palette.gradient.length - 1), color));
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  stops.forEach((color, i) => grad.addColorStop(i / (stops.length - 1), color));
   ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(0, 0, w, h);
 
-  for (let i = 0; i < 58; i++) {
-    const x = (Math.sin(frame * 0.004 + i * 12.7) * 0.5 + 0.5) * width;
-    const y = (Math.cos(frame * 0.003 + i * 5.4) * 0.5 + 0.5) * height;
-    const radius = 1.2 + (i % 6);
-    ctx.beginPath();
-    ctx.fillStyle = i % 3 ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.38)";
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
+  if (skyBucket === "clearNight") {
+    skyScene.stars.forEach((s) => {
+      ctx.globalAlpha = s.a * (0.55 + 0.45 * Math.sin(t * 1.7 + s.ph));
+      ctx.fillStyle = "#eaf3ff";
+      ctx.beginPath(); ctx.arc(s.x * w, s.y * h, s.r, 0, 6.284); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    const mx = w * 0.82, my = h * 0.17;
+    const mg = ctx.createRadialGradient(mx, my, 0, mx, my, h * 0.45);
+    mg.addColorStop(0, "rgba(226,238,255,.45)"); mg.addColorStop(0.12, "rgba(190,214,255,.14)"); mg.addColorStop(1, "rgba(190,214,255,0)");
+    ctx.fillStyle = mg; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(238,245,255,.92)";
+    ctx.beginPath(); ctx.arc(mx, my, Math.max(16, h * 0.034), 0, 6.284); ctx.fill();
   }
 
-  const condition = document.body.dataset.condition || "clear";
-  if (condition === "rain" || condition === "drizzle" || activeTheme === "storm") {
-    ctx.strokeStyle = condition === "drizzle" ? "rgba(191, 219, 254, 0.22)" : "rgba(125, 211, 252, 0.34)";
-    ctx.lineWidth = condition === "drizzle" ? 1 : 1.6;
-    for (let i = 0; i < 72; i++) {
-      const x = ((i * 73 + frame * 5.2) % (width + 120)) - 60;
-      const y = (i * 47 + frame * 8.5) % (height + 120);
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - 18, y + 42);
-      ctx.stroke();
+  if (skyBucket === "clearDay" || skyBucket === "partly") {
+    const sx = w * 0.82, sy = h * (skyBucket === "clearDay" ? 0.14 : 0.18), pulse = 0.9 + 0.1 * Math.sin(t * 0.8);
+    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.85 * pulse);
+    sg.addColorStop(0, "rgba(255,247,214,.95)"); sg.addColorStop(0.055, "rgba(255,240,190,.5)");
+    sg.addColorStop(0.26, "rgba(255,232,170,.15)"); sg.addColorStop(1, "rgba(255,232,170,0)");
+    ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(t * 0.05); ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 12; i++) {
+      ctx.rotate(Math.PI / 6);
+      const len = h * (0.55 + 0.06 * Math.sin(t * 1.1 + i));
+      const rg = ctx.createLinearGradient(0, 0, 0, -len);
+      rg.addColorStop(0, "rgba(255,246,208,.14)"); rg.addColorStop(1, "rgba(255,246,208,0)");
+      ctx.fillStyle = rg;
+      ctx.beginPath(); ctx.moveTo(-h * 0.022, 0); ctx.lineTo(0, -len); ctx.lineTo(h * 0.022, 0); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (skyBucket === "sunset") {
+    const sx = w * 0.68, sy = h * 0.72;
+    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.95);
+    sg.addColorStop(0, "rgba(255,236,190,.95)"); sg.addColorStop(0.045, "rgba(255,197,120,.58)");
+    sg.addColorStop(0.28, "rgba(255,140,90,.19)"); sg.addColorStop(1, "rgba(255,120,80,0)");
+    ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 5; i++) {
+      const y = sy - h * (0.06 + i * 0.07) + Math.sin(t * 0.25 + i) * h * 0.01;
+      const bg = ctx.createLinearGradient(0, y, w, y + h * 0.04);
+      bg.addColorStop(0, "rgba(255,180,120,0)"); bg.addColorStop(0.5, `rgba(255,190,130,${0.09 - i * 0.012})`); bg.addColorStop(1, "rgba(255,180,120,0)");
+      ctx.fillStyle = bg; ctx.fillRect(0, y, w, h * 0.035);
+    }
+    ctx.restore();
+  }
+
+  const tint = { overcast: "245,248,252", storm: "150,165,182", rain: "180,195,210", snow: "235,242,250", fog: "240,244,248", sunset: "255,205,170", clearNight: "160,185,220" }[skyBucket] || "255,255,255";
+  skyScene.clouds.forEach((cl) => {
+    const x = ((cl.x + t * cl.s) % 1.4 - 0.2) * w, y = cl.y * h, cw = cl.w * w, ch = cl.h * h;
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, cw * 0.5);
+    cg.addColorStop(0, `rgba(${tint},${cl.a})`); cg.addColorStop(0.55, `rgba(${tint},${cl.a * 0.45})`); cg.addColorStop(1, `rgba(${tint},0)`);
+    ctx.fillStyle = cg;
+    ctx.save(); ctx.translate(x, y); ctx.scale(1, ch / (cw * 0.5));
+    ctx.beginPath(); ctx.arc(0, 0, cw * 0.5, 0, 6.284); ctx.fill(); ctx.restore();
+  });
+
+  skyScene.fogBanks.forEach((f) => {
+    const y = f.y * h + Math.sin(t * 0.2 + f.x * 6) * h * 0.015;
+    const fg = ctx.createLinearGradient(0, y - f.h * h * 0.5, 0, y + f.h * h * 0.5);
+    fg.addColorStop(0, "rgba(226,232,238,0)"); fg.addColorStop(0.5, `rgba(226,232,238,${f.a})`); fg.addColorStop(1, "rgba(226,232,238,0)");
+    ctx.fillStyle = fg;
+    const off = ((f.x + t * f.s) % 1.4 - 0.2) * w;
+    ctx.fillRect(off - w, y - f.h * h * 0.5, w * 2.4, f.h * h);
+  });
+
+  if (skyScene.drops.length) {
+    const slant = skyBucket === "storm" ? 0.34 : 0.18;
+    ctx.lineCap = "round";
+    skyScene.drops.forEach((d) => {
+      const y = ((d.y + t * d.s) % 1.15) * h - h * 0.08;
+      const x = ((d.x + (y / h) * slant) % 1) * w, len = d.l * h;
+      ctx.strokeStyle = `rgba(214,236,255,${d.a})`; ctx.lineWidth = d.w;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - len * slant, y + len); ctx.stroke();
+    });
+  }
+
+  if (skyScene.flakes.length) {
+    skyScene.flakes.forEach((f) => {
+      const y = ((f.y + t * f.s) % 1.12) * h - h * 0.06;
+      const x = (f.x + Math.sin(t * 0.8 + f.ph) * f.sw) * w;
+      ctx.globalAlpha = f.a; ctx.fillStyle = "#f7fbff";
+      ctx.beginPath(); ctx.arc(x, y, f.r, 0, 6.284); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    const ag = ctx.createLinearGradient(0, h * 0.84, 0, h);
+    ag.addColorStop(0, "rgba(232,240,250,0)"); ag.addColorStop(1, "rgba(236,244,252,.26)");
+    ctx.fillStyle = ag; ctx.fillRect(0, h * 0.84, w, h * 0.16);
+  }
+
+  if (skyBucket === "storm") {
+    const flash = skyScene.flash;
+    if (t > flash.next) { flash.on = 1; flash.next = t + skyRnd(2.2, 6.5); flash.x = skyRnd(0.15, 0.85); }
+    if (flash.on > 0) {
+      flash.on = Math.max(0, flash.on - 0.055);
+      const e = flash.on * flash.on, fx = flash.x * w;
+      const fg = ctx.createRadialGradient(fx, h * 0.1, 0, fx, h * 0.1, h * 1.1);
+      fg.addColorStop(0, `rgba(226,238,255,${0.5 * e})`); fg.addColorStop(0.4, `rgba(190,214,255,${0.16 * e})`); fg.addColorStop(1, "rgba(190,214,255,0)");
+      ctx.fillStyle = fg; ctx.fillRect(0, 0, w, h);
+      if (flash.on > 0.72) {
+        ctx.strokeStyle = `rgba(238,246,255,${0.85 * e})`; ctx.lineWidth = 1.8; ctx.beginPath();
+        let bx = fx, by = h * 0.05; ctx.moveTo(bx, by);
+        for (let i = 0; i < 7; i++) { bx += (Math.random() - 0.5) * w * 0.04; by += h * 0.07; ctx.lineTo(bx, by); }
+        ctx.stroke();
+      }
     }
   }
 
-  if (condition === "cloudy" || condition === "fog" || condition === "partly") {
-    for (let i = 0; i < 7; i++) {
-      const x = ((frame * (0.22 + i * 0.03) + i * width * 0.21) % (width + 260)) - 130;
-      const y = height * (0.18 + (i % 4) * 0.12);
-      const radius = 90 + (i % 3) * 35;
-      const cloud = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      cloud.addColorStop(0, condition === "fog" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.12)");
-      cloud.addColorStop(1, "rgba(255,255,255,0)");
-      ctx.fillStyle = cloud;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  if (activeTheme === "storm" && frame % 180 < 18) {
-    ctx.strokeStyle = "rgba(125, 249, 255, 0.8)";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(width * 0.72, 0);
-    ctx.lineTo(width * 0.66, height * 0.26);
-    ctx.lineTo(width * 0.71, height * 0.26);
-    ctx.lineTo(width * 0.59, height * 0.58);
-    ctx.stroke();
+  if (skyBucket === "fog") {
+    const vg = ctx.createRadialGradient(w * 0.5, h * 0.5, h * 0.1, w * 0.5, h * 0.5, h * 0.95);
+    vg.addColorStop(0, "rgba(190,197,204,0)"); vg.addColorStop(1, "rgba(174,182,190,.4)");
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
   }
 
   // iOS standalone web apps clip every fixed-position layer out of the
   // status-bar safe-area band, which only ever paints the flat html
-  // background-color (--sky-0 = gradient[0]). The diagonal gradient (and the
-  // particles) vary across that line, so the band met the scene with a
-  // visible seam just below the Dynamic Island. Painting the top of the
-  // finished scene (220px offscreen bleed + the safe-area strip) back to
-  // that same flat color — over the stars/rain too, hence drawn last —
-  // makes the band and the scene meet seamlessly; body::before and the
-  // body::after mask mirror this same blend geometry in CSS.
+  // background-color (--sky-0 = stops[0]). The scene varies across that
+  // line, so the band met the scene with a visible seam just below the
+  // Dynamic Island. Painting the top of the finished scene (220px offscreen
+  // bleed + the safe-area strip) back to that same flat color — over the
+  // stars/rain too, hence drawn last — makes the band and the scene meet
+  // seamlessly; body::before and the body::after mask mirror this same
+  // blend geometry in CSS.
   const blendEnd = 600;
   const topBlend = ctx.createLinearGradient(0, 0, 0, blendEnd);
-  topBlend.addColorStop(0, palette.gradient[0]);
-  topBlend.addColorStop(340 / blendEnd, palette.gradient[0]);
-  topBlend.addColorStop(1, hexToTransparent(palette.gradient[0]));
+  topBlend.addColorStop(0, stops[0]);
+  topBlend.addColorStop(340 / blendEnd, stops[0]);
+  topBlend.addColorStop(1, hexToTransparent(stops[0]));
   ctx.fillStyle = topBlend;
-  ctx.fillRect(0, 0, width, blendEnd);
+  ctx.fillRect(0, 0, w, blendEnd);
 
-  frame += 1;
   requestAnimationFrame(drawAtmosphere);
 }
 
