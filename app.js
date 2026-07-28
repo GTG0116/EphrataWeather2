@@ -5952,20 +5952,32 @@ function prewarmMrmsFrames() {
   })();
 }
 
+// The timeline exists twice: the full row inside the Layers panel and the bare
+// slider docked at the bottom of the map. Both are driven from the same state,
+// so every update goes through here to keep them in lockstep.
+function syncFrameSliders({ value, max, disabled } = {}) {
+  ["#radarTimeline", "#mapFrameSlider"].forEach(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    if (max      !== undefined) el.max      = String(max);
+    if (value    !== undefined) el.value    = String(value);
+    if (disabled !== undefined) el.disabled = disabled;
+  });
+}
+
 function updateRadarLabel() {
   const labelEl = document.querySelector("#radarTimeLabel");
   if (!labelEl) return;
-  const slider = document.querySelector("#radarTimeline");
 
   // Satellite owns the timeline whenever it is active.
   if (satelliteActive) {
-    if (slider) slider.value = String(satFrameIndex);
+    syncFrameSliders({ value: satFrameIndex });
     const frame = satFrames.length ? satFrames[satFrameIndex] : 0;
     labelEl.textContent = frame === 0 ? "Latest" : `−${frame} frame${frame > 1 ? "s" : ""}`;
     return;
   }
 
-  if (slider) slider.value = String(radarFrameIndex);
+  syncFrameSliders({ value: radarFrameIndex });
   const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
   if (mrmsIdx === 0) { labelEl.textContent = "Latest"; return; }
   const key = `${activeMrmsProduct}_${mrmsIdx}`;
@@ -6130,14 +6142,13 @@ async function addRadarLayer() {
 
   radarFrames = mrmsFrameArray(count);
   radarFrameIndex = radarFrames.length - 1; // latest = mrmsIdx 0
-  const slider = document.querySelector("#radarTimeline");
-  if (slider) {
-    slider.max = Math.max(1, radarFrames.length - 1);
-    slider.value = radarFrameIndex;
-    // A single-frame buffer has nothing to scrub through; the row stays visible
-    // so the timestamp readout still shows, but the control goes inert.
-    slider.disabled = radarFrames.length < 2;
-  }
+  // A single-frame buffer has nothing to scrub through; the row stays visible
+  // so the timestamp readout still shows, but the control goes inert.
+  syncFrameSliders({
+    max: Math.max(1, radarFrames.length - 1),
+    value: radarFrameIndex,
+    disabled: radarFrames.length < 2,
+  });
   const playBtn = document.querySelector("#radarPlayButton");
   if (playBtn) playBtn.disabled = radarFrames.length < 2;
 
@@ -6575,12 +6586,11 @@ async function addSatelliteLayer() {
 
   // Reflect satellite frames on the shared timeline when it owns the controls.
   if (satelliteActive) {
-    const slider = document.querySelector("#radarTimeline");
-    if (slider) {
-      slider.max = satFrames.length - 1;
-      slider.value = satFrameIndex;
-      slider.disabled = satFrames.length < 2;
-    }
+    syncFrameSliders({
+      max: satFrames.length - 1,
+      value: satFrameIndex,
+      disabled: satFrames.length < 2,
+    });
     const playBtn = document.querySelector("#radarPlayButton");
     if (playBtn) playBtn.disabled = satFrames.length < 2;
     updateRadarLabel();
@@ -7640,6 +7650,10 @@ function renderLayers() {
   // Timeline controls are shared: shown for radar and/or satellite. The MRMS
   // product picker is radar-only and hidden when only satellite is animating.
   const radCtrl = document.querySelector("#radarSubControls");
+  // The bottom-docked scrubber follows the same rule: visible only while a
+  // frame-based layer (radar or satellite) is on the map.
+  const scrubber = document.querySelector("#mapFrameScrubber");
+  if (scrubber) scrubber.hidden = !(radarActive || satelliteActive);
   if (radCtrl) {
     radCtrl.hidden = !(radarActive || satelliteActive);
     const prodRow = document.querySelector("#mrmsProductRow");
@@ -8359,10 +8373,12 @@ document.querySelector("#metarClearBtn")?.addEventListener("click", async () => 
     renderMetar(null);
   }
 });
-document.querySelector("#radarTimeline")?.addEventListener("input", event => {
-  stopRadarAnimation();
-  if (satelliteActive) setSatelliteFrame(event.target.value);
-  else                 setRadarFrame(event.target.value);
+["#radarTimeline", "#mapFrameSlider"].forEach(sel => {
+  document.querySelector(sel)?.addEventListener("input", event => {
+    stopRadarAnimation();
+    if (satelliteActive) setSatelliteFrame(event.target.value);
+    else                 setRadarFrame(event.target.value);
+  });
 });
 document.querySelector("#radarPlayButton")?.addEventListener("click", () => {
   if (radarAnimationTimer) stopRadarAnimation();
