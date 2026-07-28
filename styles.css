@@ -3303,6 +3303,52 @@ body.modal-open {
 }
 
 /* ═══════════════════════════════════════════════
+   BOTTOM FRAME SCRUBBER (overlay on map)
+   Nothing but the slider — play/pause, timestamp and product controls stay
+   in the Layers panel.
+═══════════════════════════════════════════════ */
+.map-frame-scrubber {
+  position: absolute;
+  bottom: 26px; /* clears the Mapbox attribution strip */
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  padding: 2px 16px;
+  background: rgba(6, 12, 30, 0.86);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+
+.map-frame-scrubber[hidden] { display: none; }
+
+.map-frame-scrubber .timeline-slider {
+  width: 100%;
+  margin: 0;
+}
+
+/* Lift the legends clear of the scrubber while it's on screen. */
+.map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
+.map-stage:has(.map-frame-scrubber:not([hidden])) .mrms-legend-box {
+  bottom: 84px;
+}
+
+@media (max-width: 600px) {
+  .map-frame-scrubber {
+    left: 6px;
+    right: 6px;
+    bottom: 22px;
+    padding: 2px 12px;
+  }
+  .map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
+  .map-stage:has(.map-frame-scrubber:not([hidden])) .mrms-legend-box {
+    bottom: 70px;
+  }
+}
+
+/* ═══════════════════════════════════════════════
    SPC LEGEND BOX (overlay on map)
 ═══════════════════════════════════════════════ */
 .spc-legend-box {
