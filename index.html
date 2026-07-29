@@ -262,17 +262,42 @@
 
                   <!-- Radar / satellite timeline controls -->
                   <div class="sub-controls" id="radarSubControls" hidden>
+                    <div class="ctrl-row">
+                      <span class="ctrl-label">Radar</span>
+                      <div class="ctrl-btn-group" id="radarModeBtns">
+                        <button type="button" data-radar-mode="mrms">MRMS</button>
+                        <button type="button" data-radar-mode="single">Single site</button>
+                      </div>
+                    </div>
                     <div class="ctrl-row" id="mrmsProductRow">
                       <span class="ctrl-label">Product</span>
-                      <select id="mrmsProductSelect" class="mrms-select" aria-label="MRMS data product">
-                        <option value="rate">Precip Type</option>
-                        <option value="refl">Reflectivity</option>
-                        <option value="mesh">Hail (MESH)</option>
-                        <option value="qpe6h">6-Hr Precip</option>
-                        <option value="qpe24h">24-Hr Precip</option>
-                        <option value="lightning">Lightning Prob</option>
-                        <option value="rotation">Azimuthal Shear</option>
+                      <select id="mrmsProductSelect" class="mrms-select" aria-label="Radar data product">
+                        <optgroup label="MRMS · decoded on this device" data-radar-products="mrms">
+                          <option value="refl">Composite Reflectivity</option>
+                          <option value="rate">Precipitation Rate</option>
+                          <option value="mesh">Hail (MESH)</option>
+                          <option value="qpe6h">6-Hr Precip</option>
+                          <option value="qpe24h">24-Hr Precip</option>
+                          <option value="lightning">Lightning Probability</option>
+                          <option value="rotation">Azimuthal Shear</option>
+                        </optgroup>
+                        <optgroup label="Single-site NEXRAD Level II · decoded on this device" data-radar-products="single">
+                          <option value="nexrad_ref">Reflectivity</option>
+                          <option value="nexrad_vel">Velocity</option>
+                          <option value="nexrad_sw">Spectrum Width</option>
+                          <option value="nexrad_rho">Correlation Coeff.</option>
+                          <option value="nexrad_zdr">Differential Reflectivity</option>
+                          <option value="nexrad_phi">Differential Phase</option>
+                          <option value="nexrad_kdp">Specific Differential Phase</option>
+                        </optgroup>
                       </select>
+                    </div>
+                    <div class="ctrl-row radar-palette-row">
+                      <span class="ctrl-label">Colors</span>
+                      <label class="palette-file-btn" for="radarPaletteInput">Add .pal</label>
+                      <input id="radarPaletteInput" type="file" accept=".pal,.txt,text/plain" hidden>
+                      <button type="button" id="radarPaletteReset" class="palette-reset-btn">Reset</button>
+                      <span id="radarPaletteName" class="palette-file-name">Default</span>
                     </div>
                     <div class="ctrl-row radar-timeline-row">
                       <button type="button" id="radarPlayButton" class="play-btn">

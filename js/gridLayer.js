@@ -1,0 +1,366 @@
+// gridLayer.js — a Mapbox GL custom WebGL layer for a regular lat/lon (plate-
+// carrée) grid, used for the MRMS products decoded by grib2.js/mrms.js. Same idea
+// as the radar/satellite layers: a fragment shader inverts web-mercator to
+// lon/lat per screen pixel, finds the grid cell, and looks up its colour with
+// NEAREST sampling — so the grid stays pixel-exact at any zoom.
+//
+// The decoded MRMS grid is huge (7000×3500 ≈ 24.5 M cells). We max-pool it down
+// to a GPU-friendly texture before upload (max-pool, not average, so peak hail /
+// rotation / rainfall values survive the reduction). Each cell is stored as a
+// 16-bit normalised code in the R,G bytes; 0 means "missing" (transparent).
+
+// A 3600×1800 RGBA upload is about 25 MB on both the CPU and GPU. That is fine
+// on desktop, but can overlap other WebGL buffers on phones and terminate the
+// tab. Keep the higher cap where resources allow.
+const constrained = typeof window !== 'undefined' && (
+  window.matchMedia('(max-width: 759.98px)').matches ||
+  (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0 &&
+    Math.min(window.innerWidth, window.innerHeight) <= 1024) ||
+  (typeof navigator !== 'undefined' && Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4)
+);
+const MAX_DIM = constrained ? 1400 : 3600;
+
+const VERT_SRC = `
+attribute vec2 a_pos;
+uniform mat4 u_matrix;
+varying vec2 v_merc;
+void main() { v_merc = a_pos; gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0); }`;
+
+const FRAG_SRC = `
+precision highp float;
+varying vec2 v_merc;
+uniform sampler2D u_data;
+uniform sampler2D u_lut;
+uniform float u_ni, u_nj;
+uniform float u_lon1, u_lat1, u_di, u_dj;
+uniform float u_steps, u_opacity;
+uniform float u_smooth;          // 0 = none, 1 = low, 2 = medium, 3 = high (Gaussian)
+const float PI = 3.141592653589793;
+
+// Decode one grid cell to vec2(t, valid), t in [0,1]. Missing cells (code 0)
+// report valid = 0 so the smoothing blend can skip them.
+vec2 cellValue(float ci, float cj) {
+  if (ci < 0.0 || ci >= u_ni || cj < 0.0 || cj >= u_nj) return vec2(0.0, 0.0);
+  vec4 d = texture2D(u_data, vec2((ci + 0.5) / u_ni, (cj + 0.5) / u_nj));
+  float code = floor(d.r * 255.0 + 0.5) + floor(d.g * 255.0 + 0.5) * 256.0;
+  if (code < 1.0) return vec2(0.0, 0.0);
+  return vec2((code - 1.0) / 65534.0, 1.0);
+}
+
+// Gaussian sigma (in cell widths) for each smoothing level. Level 0 is nearest;
+// 1/2/3 (low/medium/high) widen the blur so a single slider spans crisp pixels
+// → a heavy wash that dissolves even coarse model cells.
+float smoothSigma(float level) {
+  return level < 1.5 ? 0.6 : (level < 2.5 ? 1.1 : 1.8);
+}
+
+void main() {
+  float lon = v_merc.x * 360.0 - 180.0;
+  float lat = degrees(2.0 * atan(exp((1.0 - 2.0 * v_merc.y) * PI)) - PI * 0.5);
+  // (u_lon1, u_lat1) is the *center* of cell (0,0) — GRIB grids anchor on the
+  // first data point, not a cell edge — so offset by half a cell before
+  // flooring; otherwise the whole raster paints half a cell east/south of
+  // where the data actually is.
+  float fi = (lon - u_lon1) / u_di + 0.5;
+  float fj = (u_lat1 - lat) / u_dj + 0.5;  // row 0 is the northernmost
+  if (fi < 0.0 || fi >= u_ni || fj < 0.0 || fj >= u_nj) discard;
+
+  float t;
+  float fade = 1.0;   // edge feather from the smoothing blend (1 = fully inside)
+  if (u_smooth < 0.5) {
+    vec2 cv = cellValue(floor(fi), floor(fj));   // NEAREST: crisp cell
+    if (cv.y < 0.5) discard;                      // missing
+    t = cv.x;
+  } else {
+    // Gaussian low-pass over a 7x7 cell neighbourhood. Cell centres sit at
+    // integer indices in (fi-0.5, fj-0.5) space; each tap is weighted by a
+    // Gaussian of its continuous distance from the sample point.
+    //
+    // Missing cells are NOT renormalised away: they blend in as a value a bit
+    // below the colour floor (MISS). That makes the smoothed field a single
+    // continuous surface that ramps DOWN through the low end of the scale as
+    // an echo edge approaches, then sinks below the floor and alpha-fades out
+    // — so edges read as "lower values leading up to" the echo instead of
+    // stopping in a hard, blocky wall at the last valid cell (and a lone valid
+    // cell becomes a small soft blob rather than a raw square). Sub-threshold
+    // holes inside a solid echo are pulled back up by their valid neighbours,
+    // so interior gaps still fill smoothly.
+    float sigma = smoothSigma(u_smooth);
+    float pc = fi - 0.5, pr = fj - 0.5;
+    float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    float st = 0.0, sw = 0.0, wfull = 0.0;
+    for (int m = -3; m <= 3; m++) {
+      for (int n = -3; n <= 3; n++) {
+        float ci = cn + float(n), cj = rn + float(m);
+        vec2 cv = cellValue(ci, cj);
+        float dx = ci - pc, dy = cj - pr;
+        float w = exp(-(dx * dx + dy * dy) * inv2s2);
+        if (ci >= 0.0 && ci < u_ni && cj >= 0.0 && cj < u_nj) wfull += w;
+        st += cv.x * w * cv.y;
+        sw += w * cv.y;
+      }
+    }
+    if (sw < 1e-4) discard;                       // no valid cell nearby
+    // Blend in-bounds missing cells at MISS; out-of-grid taps are excluded (the
+    // domain edge stays sharp). tRaw < 0 means the point sits past the echo
+    // edge: fade it out smoothly over the below-floor range.
+    const float MISS = -0.6;
+    float tRaw = (st + MISS * (wfull - sw)) / max(wfull, 1e-4);
+    fade = smoothstep(MISS, 0.0, tRaw);
+    if (fade <= 0.004) discard;
+    t = clamp(tRaw, 0.0, 1.0);
+  }
+
+  float li = clamp(floor(t * (u_steps - 1.0) + 0.5), 0.0, u_steps - 1.0);
+  vec4 col = texture2D(u_lut, vec2((li + 0.5) / u_steps, 0.5));
+  if (col.a == 0.0) discard;
+  float a = col.a * u_opacity * fade;
+  gl_FragColor = vec4(col.rgb * a, a);
+}`;
+
+function compile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+    throw new Error('grid shader: ' + gl.getShaderInfoLog(sh));
+  return sh;
+}
+
+function mercX(lon) { return (lon + 180) / 360; }
+function mercY(lat) {
+  const s = Math.sin((lat * Math.PI) / 180);
+  return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+}
+
+// Max-pool the grid down and encode each surviving cell as a 16-bit code.
+// `packed: true` stores the codes as a bare Uint16Array (2 bytes/cell) instead
+// of the RGBA upload buffer (4 bytes/cell) — used by model playback, which
+// keeps every forecast hour of a run resident, so halving each frame matters.
+// Packed textures are expanded into a shared scratch RGBA buffer at upload time
+// (see expandPackedTexture), costing one transient copy per displayed frame.
+function buildTexture(grid, product, packed = false) {
+  const { ni, nj, values, lon1, lat1, di, dj } = grid;
+  const factor = Math.max(1, Math.ceil(Math.max(ni, nj) / MAX_DIM));
+  const W = Math.ceil(ni / factor);
+  const H = Math.ceil(nj / factor);
+  const codes = packed ? new Uint16Array(W * H) : null;
+  const data = packed ? null : new Uint8Array(W * H * 4);
+  const { lo, hi, floor } = product;
+  const span = hi - lo || 1;
+
+  for (let oy = 0; oy < H; oy++) {
+    for (let ox = 0; ox < W; ox++) {
+      let best = -Infinity;
+      for (let r = 0; r < factor; r++) {
+        const sy = oy * factor + r;
+        if (sy >= nj) break;
+        const base = sy * ni + ox * factor;
+        for (let c = 0; c < factor; c++) {
+          const sx = ox * factor + c;
+          if (sx >= ni) break;
+          const v = values[base + c];
+          if (v > best) best = v;
+        }
+      }
+      if (!(best >= floor) || Number.isNaN(best)) continue; // leave code 0 (missing)
+      let t = (best - lo) / span;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const code = 1 + Math.round(t * 65534);
+      if (packed) {
+        codes[oy * W + ox] = code;
+      } else {
+        const o = (oy * W + ox) * 4;
+        data[o] = code & 255;
+        data[o + 1] = (code >> 8) & 255;
+      }
+    }
+  }
+  // A pooled cell aggregates `factor` source cells, so its center sits half the
+  // extra span east/south of the source origin — shift lon1/lat1 to match, or
+  // pooling drags the raster toward the north-west.
+  return {
+    data, packed: codes, W, H,
+    lon1: lon1 + ((factor - 1) / 2) * di,
+    lat1: lat1 - ((factor - 1) / 2) * dj,
+    di: di * factor, dj: dj * factor,
+  };
+}
+
+// Shared scratch for expanding packed 16-bit codes into the RGBA layout
+// texImage2D wants. One buffer serves every grid layer: expansion happens
+// synchronously inside _upload and the GL driver copies the pixels out before
+// returning, so reuse is safe.
+let expandScratch = null;
+function expandPackedTexture(tex) {
+  const n = tex.W * tex.H;
+  if (!expandScratch || expandScratch.length < n * 4) expandScratch = new Uint8Array(n * 4);
+  const out = expandScratch;
+  const codes = tex.packed;
+  out.fill(0, 0, n * 4);
+  for (let i = 0; i < n; i++) {
+    const c = codes[i];
+    if (!c) continue;
+    const o = i * 4;
+    out[o] = c & 255;
+    out[o + 1] = (c >> 8) & 255;
+  }
+  return out.subarray(0, n * 4);
+}
+
+// Build the GPU-ready payload for a grid (max-pooled texture + quad geometry +
+// color LUT) without touching any GL context. Pulling this out of the layer lets
+// playback precompute and cache the lightweight payload per frame — crucial
+// because a raw MRMS grid is ~100 MB, far too big to hold many of.
+export function prepareGridTexture(grid, product, { packed = false } = {}) {
+  const tex = buildTexture(grid, product, packed);
+  const sc = product.scale;
+  // The quad must cover the cell *footprints*: (lon1, lat1) is the center of
+  // cell (0,0), so extend half a cell beyond the first/last centers.
+  const w = mercX(tex.lon1 - tex.di / 2);
+  const e = mercX(tex.lon1 + (tex.W - 0.5) * tex.di);
+  const n = mercY(tex.lat1 + tex.dj / 2);
+  const s = mercY(tex.lat1 - (tex.H - 0.5) * tex.dj);
+  const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
+  return {
+    tex, verts, lut: sc.rgba, steps: sc.steps,
+    uni: { ni: tex.W, nj: tex.H, lon1: tex.lon1, lat1: tex.lat1, di: tex.di, dj: tex.dj },
+  };
+}
+
+export function createGridLayer(id = 'mrms') {
+  return {
+    id,
+    type: 'custom',
+    renderingMode: '2d',
+
+    map: null, gl: null, program: null, quad: null, dataTex: null, lutTex: null,
+    has: false, pending: null, uni: null, quadVerts: null, steps: 1024, opacity: 0.9,
+    // Smoothing level: 0 none, 1 low, 2 medium, 3 high (Gaussian sigma in shader).
+    smooth: 0,
+
+    onAdd(map, gl) {
+      this.map = map;
+      this.gl = gl;
+      const vs = compile(gl, gl.VERTEX_SHADER, VERT_SRC);
+      const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+      const p = gl.createProgram();
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+        throw new Error('grid program: ' + gl.getProgramInfoLog(p));
+      this.program = p;
+      this.aPos = gl.getAttribLocation(p, 'a_pos');
+      this.u = {};
+      for (const n of ['u_matrix', 'u_data', 'u_lut', 'u_ni', 'u_nj', 'u_lon1',
+        'u_lat1', 'u_di', 'u_dj', 'u_steps', 'u_opacity', 'u_smooth'])
+        this.u[n] = gl.getUniformLocation(p, n);
+      this.quad = gl.createBuffer();
+      this.dataTex = gl.createTexture();
+      this.lutTex = gl.createTexture();
+      if (this.pending) {
+        const pending = this.pending;
+        this.pending = null;
+        this._upload(pending);
+      }
+    },
+
+    setGrid(grid, product) {
+      this.showPrepared(prepareGridTexture(grid, product));
+    },
+
+    // Display an already-prepared payload (from prepareGridTexture). Playback
+    // uses this to swap cached frames without rebuilding the texture each time.
+    showPrepared(payload) {
+      // WebGL copies texels synchronously. Retain a CPU payload only while the
+      // layer is waiting for onAdd; once GL exists, keeping it here duplicates
+      // every large MRMS/model texture in resident memory.
+      if (this.gl) {
+        this._upload(payload);
+        this.pending = null;
+      } else {
+        this.pending = payload;
+      }
+      this.has = true;
+      if (this.map) this.map.triggerRepaint();
+    },
+
+    _upload(payload) {
+      const gl = this.gl;
+      const { tex, verts, lut, steps, uni } = payload;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+      this.quadVerts = verts;
+
+      gl.bindTexture(gl.TEXTURE_2D, this.dataTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      const pixels = tex.packed ? expandPackedTexture(tex) : tex.data;
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+      gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, steps, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+
+      this.uni = uni;
+      this.steps = steps;
+    },
+
+    setOpacity(o) { this.opacity = o; if (this.map) this.map.triggerRepaint(); },
+
+    setSmooth(level) { this.smooth = +level || 0; if (this.map) this.map.triggerRepaint(); },
+
+    clear() { this.has = false; this.pending = null; if (this.map) this.map.triggerRepaint(); },
+
+    render(gl, matrix) {
+      if (!this.has || !this.uni || !this.quadVerts) return;
+      const mat = matrix && matrix.length === 16 ? matrix
+        : matrix && matrix.defaultProjectionData ? matrix.defaultProjectionData.mainMatrix : matrix;
+      gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.u.u_matrix, false, mat);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+      gl.enableVertexAttribArray(this.aPos);
+      gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dataTex);
+      gl.uniform1i(this.u.u_data, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+      gl.uniform1i(this.u.u_lut, 1);
+      const U = this.uni;
+      gl.uniform1f(this.u.u_ni, U.ni);
+      gl.uniform1f(this.u.u_nj, U.nj);
+      gl.uniform1f(this.u.u_lon1, U.lon1);
+      gl.uniform1f(this.u.u_lat1, U.lat1);
+      gl.uniform1f(this.u.u_di, U.di);
+      gl.uniform1f(this.u.u_dj, U.dj);
+      gl.uniform1f(this.u.u_steps, this.steps);
+      gl.uniform1f(this.u.u_opacity, this.opacity);
+      gl.uniform1f(this.u.u_smooth, this.smooth);
+      gl.enable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.depthMask(false);
+      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    },
+
+    onRemove(map, gl) {
+      if (this.program) gl.deleteProgram(this.program);
+      if (this.quad) gl.deleteBuffer(this.quad);
+      if (this.dataTex) gl.deleteTexture(this.dataTex);
+      if (this.lutTex) gl.deleteTexture(this.lutTex);
+      this.program = this.quad = this.dataTex = this.lutTex = null;
+      this.gl = null;
+    },
+  };
+}

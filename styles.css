@@ -1366,6 +1366,35 @@ body.map-mode .shell {
   overflow: hidden;
 }
 
+.radar-site-pill {
+  min-width: 46px;
+  height: 23px;
+  padding: 0 8px;
+  border: 1px solid rgba(125, 211, 252, 0.68);
+  border-radius: 999px;
+  background: rgba(8, 18, 35, 0.9);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
+  color: #d9f3ff;
+  cursor: pointer;
+  font: 700 10px/1 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.03em;
+  pointer-events: auto;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.radar-site-pill:hover {
+  transform: scale(1.08);
+  border-color: #67e8f9;
+  background: rgba(14, 42, 67, 0.96);
+}
+
+.radar-site-pill.active {
+  border-color: #22d3ee;
+  background: #22d3ee;
+  box-shadow: 0 0 0 2px rgba(8, 18, 35, 0.86), 0 0 16px rgba(34, 211, 238, 0.58);
+  color: #04121a;
+}
+
 /* Everything that floats over the map lives in one column pinned to the top of
    the stage: the control bar, then the panels beneath it. Laying the panels
    out *below* the bar in normal flow (rather than pinning them at a guessed
@@ -3616,6 +3645,40 @@ body.modal-open {
 .mrms-select option {
   background: #0f172a;
   color: #e8f0ff;
+}
+
+.radar-palette-row {
+  align-items: center;
+}
+
+.palette-file-btn,
+.palette-reset-btn {
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.palette-file-btn:hover,
+.palette-reset-btn:hover {
+  border-color: rgba(56, 189, 248, 0.56);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.palette-file-name {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .popup-mrms {
