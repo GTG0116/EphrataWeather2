@@ -313,10 +313,17 @@
             <div class="spc-legend-box" id="spcLegendBox" hidden></div>
             <!-- MRMS Legend -->
             <div class="mrms-legend-box" id="mrmsLegendBox" hidden></div>
-            <!-- Frame scrubber docked to the bottom of the map: just the slider,
-                 mirroring the timeline in the Layers panel. -->
+            <!-- Frame scrubber docked to the bottom of the map. Mirrors the
+                 timeline in the Layers panel — play/pause, scrubber and the
+                 valid time of the frame on screen — so the map can be animated
+                 without opening the panel over it. -->
             <div class="map-frame-scrubber" id="mapFrameScrubber" hidden>
+              <button type="button" id="mapFramePlayButton" class="play-btn play-btn-icon" aria-label="Play frame animation">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true" class="play-glyph"><polygon points="5,3 19,12 5,21"/></svg>
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true" class="pause-glyph"><rect x="5" y="3" width="4.5" height="18" rx="1"/><rect x="14.5" y="3" width="4.5" height="18" rx="1"/></svg>
+              </button>
               <input id="mapFrameSlider" type="range" min="0" max="14" value="14" class="timeline-slider" aria-label="Frame timeline">
+              <span id="mapFrameTimeLabel" class="timeline-label">Latest</span>
             </div>
           </div>
         </section>
@@ -341,9 +348,10 @@
               <h2>Space Weather Monitor</h2>
               <div class="space-readouts" id="spaceReadouts"></div>
               <div class="aurora-bar">
-                <span style="width: 42%"></span>
+                <span style="width: 0%"></span>
               </div>
-              <p>Minor geomagnetic activity may enhance auroral propagation at high latitudes, with visibility dependent on latitude, cloud cover, and light pollution.</p>
+              <p id="spaceNote">Loading live space weather from NOAA SWPC…</p>
+              <p class="space-updated" id="spaceUpdated">NOAA SWPC</p>
             </article>
           </div>
         </section>

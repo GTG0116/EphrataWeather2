@@ -254,6 +254,56 @@ body[data-condition="fog"]::after {
     radial-gradient(circle at 72% 20%, var(--glow), transparent 28rem);
 }
 
+/* ── Night ──────────────────────────────────────
+   `data-theme="midnight"` means "it is dark out where you are", whatever the
+   weather is doing — so it combines with, rather than replaces, the condition
+   accents above. The condition keeps its hue (rain stays blue, snow stays
+   pale) at a lower intensity, and the overlay gets appreciably darker so the
+   whole app reads as night rather than as a daytime scene with a dim sky. */
+body[data-theme="midnight"]::after {
+  background:
+    radial-gradient(circle at 80% 12%, var(--glow), transparent 26rem),
+    radial-gradient(circle at 14% 85%, rgba(45, 212, 191, 0.12), transparent 24rem),
+    linear-gradient(rgba(2, 5, 14, 0.32), rgba(2, 5, 14, 0.66));
+}
+
+body[data-theme="midnight"][data-condition="rain"],
+body[data-theme="midnight"][data-condition="drizzle"] {
+  --accent: #93c5fd;
+  --accent-2: #a5b4fc;
+  --glow: rgba(96, 165, 250, 0.2);
+}
+
+body[data-theme="midnight"][data-condition="fog"] {
+  --accent: #cbd5e1;
+  --accent-2: #94a3b8;
+  --glow: rgba(148, 163, 184, 0.16);
+}
+
+body[data-theme="midnight"][data-condition="winter"] {
+  --accent: #bfdbfe;
+  --accent-2: #93c5fd;
+  --glow: rgba(191, 219, 254, 0.2);
+}
+
+body[data-theme="midnight"][data-condition="storm"] {
+  --accent: #c4b5fd;
+  --accent-2: #67e8f9;
+  --glow: rgba(167, 139, 250, 0.22);
+}
+
+/* Precipitation and fog after dark: the scrim goes darker still, because the
+   night sky bucket behind it is already close to black and the daytime
+   version of this overlay washed it back out to grey. */
+body[data-theme="midnight"][data-condition="rain"]::after,
+body[data-theme="midnight"][data-condition="drizzle"]::after,
+body[data-theme="midnight"][data-condition="fog"]::after,
+body[data-theme="midnight"][data-condition="storm"]::after {
+  background:
+    linear-gradient(rgba(2, 5, 14, 0.4), rgba(2, 5, 14, 0.72)),
+    radial-gradient(circle at 72% 18%, var(--glow), transparent 26rem);
+}
+
 .shell {
   /* Raised above the fixed canvas (0) and glow overlay (1) so the page reads
      normally while both background layers stay at non-negative z-index. */
@@ -543,6 +593,13 @@ button:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 0 16px;
+}
+
+/* `display: inline-flex` above outranks the browser's default `[hidden]` rule,
+   so a tab hidden from script (the Coast tab away from the coast) needs this
+   to actually disappear. */
+.tab[hidden] {
+  display: none;
 }
 
 .tab-icon {
@@ -987,6 +1044,13 @@ dd {
   gap: 10px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
+  /* A horizontal scroller clips vertically too — `overflow-y` resolves to
+     `auto` the moment `overflow-x` is not `visible`, and there is no way to
+     opt out. Hovering or keyboard-focusing an hour lifts the card 2px and
+     paints a focus ring around it, both of which were being sliced off at the
+     top edge of the strip. The padding is the scroll container's own space, so
+     the lifted card has somewhere to go. */
+  padding-top: 6px;
   padding-bottom: 8px;
 }
 
@@ -1641,8 +1705,19 @@ dd {
   display: block;
   height: 100%;
   border-radius: inherit;
+  /* The gradient is sized to the full bar so a given Kp always lands on the
+     same colour, instead of every reading being stretched across green→red. */
   background: linear-gradient(90deg, #22c55e, #facc15, #fb7185);
+  background-size: var(--aurora-track, 100%) 100%;
   box-shadow: 0 0 24px var(--glow);
+  transition: width 420ms ease;
+}
+
+.space-updated {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .climate-search {
@@ -3343,8 +3418,9 @@ body.modal-open {
 
 /* ═══════════════════════════════════════════════
    BOTTOM FRAME SCRUBBER (overlay on map)
-   Nothing but the slider — play/pause, timestamp and product controls stay
-   in the Layers panel.
+   Play/pause, the scrubber and the frame's valid time, so the animation is
+   usable without opening the Layers panel over the map. The MRMS product
+   picker stays in the panel.
 ═══════════════════════════════════════════════ */
 .map-frame-scrubber {
   position: absolute;
@@ -3354,7 +3430,8 @@ body.modal-open {
   z-index: 5;
   display: flex;
   align-items: center;
-  padding: 2px 16px;
+  gap: 10px;
+  padding: 6px 14px;
   background: rgba(6, 12, 30, 0.86);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -3364,9 +3441,35 @@ body.modal-open {
 .map-frame-scrubber[hidden] { display: none; }
 
 .map-frame-scrubber .timeline-slider {
-  width: 100%;
+  flex: 1;
+  min-width: 60px;
   margin: 0;
 }
+
+.map-frame-scrubber .timeline-label {
+  min-width: 68px;
+  color: rgba(232, 240, 255, 0.82);
+  font-size: 0.72rem;
+  /* The MRMS valid time can be long ("03:20 UTC 07/29"); it truncates rather
+     than squeezing the scrubber on a phone. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Square icon-only play button for the scrubber; the panel's copy keeps its
+   text label. */
+.play-btn-icon {
+  gap: 0;
+  min-height: 28px;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.play-btn .pause-glyph { display: none; }
+.play-btn.playing .play-glyph { display: none; }
+.play-btn.playing .pause-glyph { display: block; }
 
 /* Lift the legends clear of the scrubber while it's on screen. */
 .map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
@@ -3379,7 +3482,13 @@ body.modal-open {
     left: 6px;
     right: 6px;
     bottom: 22px;
-    padding: 2px 12px;
+    padding: 5px 10px;
+    gap: 8px;
+  }
+  .map-frame-scrubber .timeline-label {
+    min-width: 0;
+    max-width: 84px;
+    font-size: 0.68rem;
   }
   .map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
   .map-stage:has(.map-frame-scrubber:not([hidden])) .mrms-legend-box {
