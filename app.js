@@ -356,7 +356,74 @@ const FWI = (() => {
     return { pts: clamp(pts, 0, 25), max: 25 };
   }
 
-  function calculate({ temp, humidity, wind, gust, cloudCover, precipChance, month }) {
+  // The band label alone made for sentences that argued with the forecast next
+  // to them — a 95°F afternoon can still score "Excellent" on the numbers, and
+  // "a great day to be outside" is not what anyone wants to read under
+  // "dangerously hot". So the sentence names whichever factor is actually
+  // dragging the score down, and only falls back to the band when nothing in
+  // particular stands out.
+  const CAVEATS = {
+    heat:     ["Warm out, but nothing a shady spot won't fix.", "The heat is the catch — pace yourself and find shade.", "Too hot to be out in for long."],
+    cold:     ["Pleasant, as long as you dress for the cold.", "Bundle up properly and it's fine out.", "Cold enough that outside is a chore."],
+    precip:   ["Mostly fine, though rain could interrupt.", "Worth having a rain backup for outdoor plans.", "Wet enough to move plans indoors."],
+    snow:     ["Fine out, though there's snow to deal with.", "Snow will complicate anything outdoors.", "Snow is reason enough to stay in."],
+    wind:     ["Nice out, just breezy.", "The wind is the nuisance here.", "The wind will make outside unpleasant."],
+    cloud:    ["Comfortable, if a little grey.", "Grey, but otherwise fine out.", "Grey and gloomy all day."],
+    humidity: ["Comfortable, though the air is heavy.", "Muggy enough to slow you down.", "Oppressively muggy — take it easy."],
+  };
+
+  // Ranked by points lost outright, not by share of each factor's own maximum:
+  // humidity can only ever cost 10 points, so a merely muggy day would
+  // otherwise out-rank a genuinely dangerous 95°F one that cost 14. A factor
+  // has to cost real points before it's worth naming; below that the band's own
+  // sentence describes the day better.
+  // Each factor's own bar, set where the summary beside it would start
+  // mentioning the same thing — the precipitation bar sits at 15 because that's
+  // a >20% chance, the point where the day's blurb starts naming rain. Without
+  // that alignment the card could read "Sunny and hot" next to "rain could
+  // interrupt".
+  const CAVEAT_MIN_POINTS = { temp: 8, precip: 15, wind: 8, cloud: 7, humidity: 6 };
+  // Tiebreak order for equal point losses — cloud and humidity can each cost at
+  // most 10, so they tie often, and "a little grey" belongs on a cloudy day
+  // ahead of "the air is heavy".
+  const CAVEAT_PRIORITY = ["precip", "temp", "wind", "cloud", "humidity"];
+
+  // `wet` is null, "precip" or "snow" — see wetKindOf.
+  function caveatFor(breakdown, feelsLike, month, wet) {
+    // A period whose own weather code says rain or storms gets the rain caveat
+    // regardless of the probability — Open-Meteo can report scattered
+    // convection with a low areal chance, and "a little grey" under
+    // "Thunderstorms from 3 PM to 6 PM" reads as a contradiction.
+    if (wet) return { lines: CAVEATS[wet] || CAVEATS.precip, floor: 0 };
+    const ranked = Object.keys(breakdown)
+      .map(key => ({ key, lost: breakdown[key].max - breakdown[key].pts }))
+      .filter(f => f.lost >= CAVEAT_MIN_POINTS[f.key])
+      .sort((a, b) => (b.lost - a.lost) || (CAVEAT_PRIORITY.indexOf(a.key) - CAVEAT_PRIORITY.indexOf(b.key)));
+
+    for (const factor of ranked) {
+      if (factor.key !== "temp") {
+        return CAVEATS[factor.key] ? { lines: CAVEATS[factor.key], floor: 0 } : null;
+      }
+      // The temperature score is seasonal, so a 65°F July day in Fairbanks
+      // scores as far below normal — true, but "dress for the cold" next to
+      // "mild" is not. Talking about heat or cold requires actual heat or cold;
+      // otherwise the next factor gets its turn.
+      if (feelsLike == null) continue;
+      const hot = feelsLike >= SEASONAL_CENTER[month];
+      // `floor` keeps the wording honest when the rest of the day is lovely:
+      // 94°F scores well enough to earn the gentlest line, but "warm out" is
+      // not what 94°F deserves.
+      if (hot && feelsLike >= 85) {
+        return { lines: CAVEATS.heat, floor: feelsLike >= 100 ? 2 : feelsLike >= 92 ? 1 : 0 };
+      }
+      if (!hot && feelsLike <= 45) {
+        return { lines: CAVEATS.cold, floor: feelsLike <= 15 ? 2 : feelsLike <= 32 ? 1 : 0 };
+      }
+    }
+    return null;
+  }
+
+  function calculate({ temp, humidity, wind, gust, cloudCover, precipChance, month, weatherCode, condition }) {
     const m = month ?? new Date().getMonth();
     const t = scoreTemp(temp, m);
     const h = scoreHumidity(humidity);
@@ -367,7 +434,17 @@ const FWI = (() => {
     const max   = t.max + h.max + w.max + c.max + p.max;
     const score100 = clamp(Math.round((total / max) * 100), 0, 100);
     const rating = RATINGS.find(r => score100 >= r.min) ?? RATINGS[RATINGS.length - 1];
-    return { score100, ...rating, breakdown: { temp: t, humidity: h, wind: w, cloud: c, precip: p } };
+    const breakdown = { temp: t, humidity: h, wind: w, cloud: c, precip: p };
+
+    const caveat = caveatFor(breakdown, temp, m, wetKindOf(weatherCode, condition));
+    // Pick the caveat's severity from the score, so the same limiting factor
+    // reads gently at 80 and bluntly at 30 — but never softer than the factor
+    // itself demands.
+    const sentence = caveat
+      ? caveat.lines[Math.max(caveat.floor, score100 >= 65 ? 0 : score100 >= 40 ? 1 : 2)]
+      : rating.sentence;
+
+    return { score100, ...rating, sentence, breakdown };
   }
 
   return { calculate, RATINGS };
@@ -978,6 +1055,7 @@ function hourFwi(hour) {
     gust: numericWind(hour.windGust),
     cloudCover: hourCloudCover(hour),
     precipChance: hour.probabilityOfPrecipitation?.value,
+    weatherCode: hour.weatherCode,
     month: hour.startTime ? new Date(hour.startTime).getMonth() : new Date().getMonth(),
   });
 }
@@ -1714,14 +1792,68 @@ function skyAdjective(code, isDaytime = true) {
   if (code == null) return null;
   if (code >= 45 && code <= 48) return "Foggy";
   if (code === 3) return "Cloudy";
-  if (code === 2) return isDaytime ? "Partly cloudy" : "Partly clear";
+  // "Partly cloudy" is the idiomatic term after dark too — "partly clear" is not.
+  if (code === 2) return "Partly cloudy";
   if (code === 1) return isDaytime ? "Mostly sunny" : "Mostly clear";
   if (code === 0) return isDaytime ? "Sunny" : "Clear";
   return null;
 }
 
+// Sky cover the station actually reported, as a percentage. METAR cloud layers
+// are given in oktas by category, and the observation lists one entry per
+// layer, so the densest layer sets the total cover.
+const CLOUD_AMOUNT_PERCENT = {
+  SKC: 0, CLR: 0, NCD: 0, NSC: 0,
+  FEW: 19, SCT: 44, BKN: 75, OVC: 100, VV: 100, OVX: 100,
+};
+
+function observedCloudCover(observation) {
+  const layers = observation?.properties?.cloudLayers;
+  if (!Array.isArray(layers) || !layers.length) return null;
+  let cover = null;
+  for (const layer of layers) {
+    const pct = CLOUD_AMOUNT_PERCENT[String(layer?.amount || "").toUpperCase()];
+    if (pct == null) continue;
+    cover = cover == null ? pct : Math.max(cover, pct);
+  }
+  return cover;
+}
+
+// Sky cover on a 0 (clear) to 3 (overcast) scale, so the station's plain-text
+// report and the model's WMO code can be compared directly.
+function skyCoverRank(code) {
+  return code != null && code >= 0 && code <= 3 ? code : null;
+}
+
+function observedSkyRank(text) {
+  if (!text) return null;
+  if (/mostly cloudy|overcast|^cloudy/i.test(text)) return 3;
+  if (/partly cloudy|partly sunny|scattered clouds/i.test(text)) return 2;
+  if (/mostly clear|mostly sunny|few clouds/i.test(text)) return 1;
+  if (/^(clear|fair|sunny)/i.test(text)) return 0;
+  return null;
+}
+
+// Which CAVEATS entry a period's precipitation calls for: snow reads
+// differently from rain, and "wet enough to move plans indoors" is the wrong
+// sentence for a snowy day.
+function wetKindOf(weatherCode, condition) {
+  if (isWetCode(weatherCode)) return precipNoun(weatherCode) === "snow" ? "snow" : "precip";
+  if (isWetCondition(condition)) return /snow|sleet|ice pellet/i.test(condition) ? "snow" : "precip";
+  return null;
+}
+
+// Whether a plain-text condition report describes falling precipitation.
+function isWetCondition(text) {
+  return /rain|shower|drizzle|snow|sleet|thunder|storm|freezing|ice pellet/i.test(text || "");
+}
+
+// Codes 51 and up are falling precipitation. Fog (45) and freezing fog (48) sit
+// below that on purpose: they obscure rather than fall, and treating them as
+// wet had foggy days rendering as "Rain, with a high near…" — they belong on
+// the sky branch, which calls them foggy.
 function isWetCode(code) {
-  return code != null && code >= 45 && code !== 48;
+  return code != null && code >= 51;
 }
 
 // Which part of the day an hour falls in, for "rain moves in by late afternoon".
@@ -1762,7 +1894,7 @@ function precipPhrase(pop, noun = "rain") {
 // Returns null when the series can't support it (an ECCC feed carries its own
 // hand-written prose, which is better than anything assembled here), so callers
 // can fall back.
-function nowSummary(hours, tz = selectedLocation.timezone) {
+function nowSummary(hours, tz = selectedLocation.timezone, observed = null) {
   const all = hours || [];
   // At night, stop at sunrise rather than running twelve hours into tomorrow —
   // "clear overnight, climbing to 88°" describes two different days at once.
@@ -1778,19 +1910,54 @@ function nowSummary(hours, tz = selectedLocation.timezone) {
   const nowTemp = temps[0];
   const peak = temps.length ? Math.max(...temps) : null;
   const trough = temps.length ? Math.min(...temps) : null;
+  const window = next[0].isDaytime ? "through the rest of the day" : "through the night";
 
   const parts = [];
-  const wet = next.find(h => isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= 30);
-  if (wet) {
-    const when = dayPartLabel(new Date(wet.startTime), tz);
+  const wetAt = next.findIndex(h => isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= PRECIP_HOUR_THRESHOLD);
+  const wet = wetAt >= 0 ? next[wetAt] : null;
+  // The station's own report wins for what is happening right now; the model
+  // only gets to say what happens next.
+  const observedWet = isWetCondition(observed);
+  const observedObscured = /fog|mist|haze|smoke/i.test(observed || "");
+
+  if (observedWet) {
+    const noun = (observed || "precipitation").toLowerCase();
+    // How long the wet stretch that's already underway lasts.
+    let lastWet = -1;
+    for (let i = 0; i < next.length; i++) {
+      if (isWetCode(next[i].weatherCode) && (next[i].probabilityOfPrecipitation?.value ?? 0) >= PRECIP_HOUR_THRESHOLD) lastWet = i;
+      else break;
+    }
+    const easesAt = lastWet >= 0 && lastWet < next.length - 1 ? clockLabel(next[lastWet].startTime, tz) : null;
+    parts.push(easesAt
+      ? `${noun[0].toUpperCase()}${noun.slice(1)} right now, easing off around ${easesAt}`
+      : `${noun[0].toUpperCase()}${noun.slice(1)} right now and sticking around a while`);
+  } else if (wet) {
     const noun = precipNoun(wet.weatherCode);
-    parts.push(wet === next[0]
-      ? `${noun[0].toUpperCase()}${noun.slice(1)} is falling now and sticks around a while`
-      : `${noun[0].toUpperCase()}${noun.slice(1)} moves in ${when}`);
+    const when = clockLabel(wet.startTime, tz) || dayPartLabel(new Date(wet.startTime), tz);
+    parts.push(wetAt === 0
+      ? `${noun[0].toUpperCase()}${noun.slice(1)} starting up now`
+      : `${noun[0].toUpperCase()}${noun.slice(1)} moving in around ${when}`);
+  } else if (observedObscured) {
+    parts.push(`${observed} right now, and quiet otherwise ${window}`);
   } else {
-    const sky = skyPhrase(dominantWmoCode(next.map(h => h.weatherCode)), next[0].isDaytime);
-    const window = next[0].isDaytime ? "through the rest of the day" : "through the night";
-    parts.push(sky ? `Look for ${sky} ${window}` : `Quiet conditions ${window}`);
+    // Describe the sky as a change from what the station is actually reporting,
+    // so the hero never says "clear skies" while the observation says cloudy.
+    const code = dominantWmoCode(next.map(h => h.weatherCode));
+    const modelRank = skyCoverRank(code);
+    const observedRank = observedSkyRank(observed);
+    // Reworded from the rank rather than echoed verbatim, so a station's
+    // "Partly Cloudy" and Open-Meteo's "Clear sky" both come out in the same
+    // voice as everything else on the page.
+    const observedAdjective = observedRank == null ? null : skyAdjective(observedRank, next[0].isDaytime);
+    if (observedAdjective && modelRank != null && observedRank !== modelRank) {
+      parts.push(`${observedAdjective} now, ${modelRank < observedRank ? "clearing out" : "clouding over"} ${window}`);
+    } else if (observedAdjective) {
+      parts.push(`${observedAdjective} ${window}`);
+    } else {
+      const sky = skyPhrase(code, next[0].isDaytime);
+      parts.push(sky ? `Look for ${sky} ${window}` : `Quiet conditions ${window}`);
+    }
   }
 
   if (peak != null && nowTemp != null) {
@@ -1970,6 +2137,37 @@ function meanWindDirection(degrees) {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+// When, inside a forecast period, precipitation is actually expected. Hours
+// already in the past are skipped — the question a daily card answers is when
+// the rain is coming, not when it went. Returns the first and last wet hour so
+// the wording can be a point in time ("around 3 PM") or a span ("2 PM to 7 PM").
+const PRECIP_HOUR_THRESHOLD = 30;
+function precipWindowFor(idxs, hi, times, nowSec) {
+  const ahead = idxs.filter(i => times[i] + 3600 > nowSec);
+  // A day that only ever reaches 25% still has a most-likely stretch worth
+  // naming, so the bar drops to meet the day's own peak rather than hiding the
+  // timing entirely.
+  const peak = Math.max(0, ...ahead.map(i => hi.precipitation_probability?.[i] ?? 0));
+  const bar = Math.min(PRECIP_HOUR_THRESHOLD, Math.max(15, peak * 0.7));
+  const wet = ahead.filter(i => {
+    const pop = hi.precipitation_probability?.[i];
+    const amount = hi.precipitation?.[i] ?? 0;
+    return (pop != null && pop >= bar) || amount >= 0.01;
+  });
+  if (!wet.length) return null;
+  const pops = wet.map(i => hi.precipitation_probability?.[i]).filter(v => v != null);
+  return {
+    start: new Date(times[wet[0]] * 1000).toISOString(),
+    // The last wet hour covers the hour that follows it, so the window closes
+    // an hour after that reading.
+    end: new Date((times[wet[wet.length - 1]] + 3600) * 1000).toISOString(),
+    hours: wet.length,
+    periodHours: idxs.length,
+    peakPop: pops.length ? Math.max(...pops) : null,
+    code: dominantWmoCode(wet.map(i => hi.weather_code?.[i])),
+  };
+}
+
 // Reshape an Open-Meteo response into the NWS-style { hourly, daily,
 // dailyExtras } trio every renderer already understands. Daily periods are
 // aggregated from the hourly series rather than read off the daily block, so a
@@ -2067,6 +2265,10 @@ function buildForecastSeries(data, tzHint) {
         cloudCover: idxs.length ? pick(idxs, hi.cloud_cover, vals => vals.reduce((a, b) => a + b, 0) / vals.length) : di.cloud_cover_mean?.[index],
         humidity: idxs.length ? pick(idxs, hi.relative_humidity_2m, vals => vals.reduce((a, b) => a + b, 0) / vals.length) : di.relative_humidity_2m_mean?.[index],
         hourIndexes: idxs.map(i => i - startIdx).filter(i => i >= 0 && i < hourly.length),
+        // Computed here, against the full 8-day hourly arrays, rather than at
+        // render time against the 48-hour slice — otherwise days 3–7 could
+        // never say when their rain arrives.
+        precipWindow: precipWindowFor(idxs, hi, times, nowSec),
       });
     });
   });
@@ -2124,6 +2326,11 @@ async function weatherPayload() {
   const visibility = metersToMiles(propertyValue(observation, "visibility"));
   let humidity = propertyValue(observation, "relativeHumidity");
   let condition = p.textDescription || firstHour.shortForecast || firstDay.shortForecast;
+  // The station reports its own cloud layers; the model run is only the
+  // fallback for stations that publish no sky condition.
+  let cloudCover = observedCloudCover(observation) ?? openMeteo?.current?.cloud_cover ?? null;
+  // No surface station measures UV, so this one genuinely has to come from the
+  // model (a Tempest station overrides it further down).
   let uv = openMeteo?.current?.uv_index ?? null;
   let updated = p.timestamp;
   let currentSource = "NWS";
@@ -2179,13 +2386,13 @@ async function weatherPayload() {
       temp,
       condition,
       headline: headlineFor(condition, firstDay),
-      summary: nowSummary(series.hourly, series.tz) || firstDay.shortForecast || condition,
+      summary: nowSummary(series.hourly, series.tz, condition) || firstDay.shortForecast || condition,
       humidity: humidity == null ? null : Math.round(humidity),
       dewPoint,
       wind,
       gust,
       uv,
-      cloudCover: openMeteo?.current?.cloud_cover ?? null,
+      cloudCover,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
       airQuality: airQuality?.label || "Unavailable",
@@ -2243,7 +2450,7 @@ async function openMeteoWeatherPayload() {
       temp: cur.temperature_2m != null ? Math.round(cur.temperature_2m) : null,
       condition,
       headline: headlineFor(condition, firstDay),
-      summary: nowSummary(series.hourly, series.tz) || firstDay.shortForecast || condition,
+      summary: nowSummary(series.hourly, series.tz, condition) || firstDay.shortForecast || condition,
       humidity: cur.relative_humidity_2m == null ? null : Math.round(cur.relative_humidity_2m),
       dewPoint: cur.dew_point_2m != null ? Math.round(cur.dew_point_2m) : null,
       wind: cur.wind_speed_10m != null ? Math.round(cur.wind_speed_10m) : null,
@@ -3694,6 +3901,7 @@ function renderCurrent() {
     gust:        current.gust,
     cloudCover:  current.cloudCover,
     precipChance: null,
+    condition:   current.condition,
     month,
   });
   const alertCount = weatherState.alerts?.length || 0;
@@ -3715,7 +3923,7 @@ function renderCurrent() {
   // Recomputed here rather than read off the payload so switching units
   // rewrites the numbers inside the sentence too.
   document.querySelector("#weatherSummary").textContent =
-    nowSummary(weatherState.hourly, selectedLocation.timezone) || current.summary;
+    nowSummary(weatherState.hourly, selectedLocation.timezone, current.condition) || current.summary;
   document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight", { animated: true, sunset: skyBucket === "sunset" });
   document.querySelector("#currentTemp").textContent = uTempNum(current.temp);
   updateUnitToggleLabel();
@@ -4512,18 +4720,32 @@ function generateNightSummary(night, precip) {
   return `${bits.join(" ")}.`;
 }
 
-// When the wet weather actually shows up during a period — "by late afternoon",
-// "on and off all day" — read off the hourly series backing that period.
+function clockLabel(iso, tz) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  // Drop ":00" so the common on-the-hour case reads "3 PM", not "3:00 PM".
+  return date.toLocaleTimeString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" })
+    .replace(":00", "");
+}
+
+// When the wet weather actually shows up during a period. Prefers a real clock
+// time — "around 3 PM", "from 2 PM to 7 PM" — and only falls back to a vague
+// part of the day when the window is too ragged to pin down.
 function wetSpellTiming(period, tz) {
-  const hours = weatherState?.hourly || [];
-  const idxs = period.hourIndexes || [];
-  const wet = idxs
-    .map(i => hours[i])
-    .filter(h => h && isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= 30);
-  if (!wet.length) return null;
-  if (wet.length >= Math.max(6, idxs.length * 0.6)) return "on and off through the day";
-  const label = dayPartLabel(new Date(wet[0].startTime), tz);
-  return wet[0] === hours[idxs[0]] ? `to start the day` : `moving in ${label}`;
+  const window = period?.precipWindow;
+  if (!window) return null;
+
+  // Wet for most of the period: no single time worth naming.
+  if (window.hours >= Math.max(6, (window.periodHours || 12) * 0.6)) {
+    return period.isDaytime === false ? "on and off overnight" : "on and off through the day";
+  }
+
+  const start = clockLabel(window.start, tz);
+  if (!start) return `moving in ${dayPartLabel(new Date(window.start), tz)}`;
+  if (window.hours <= 2) return `around ${start}`;
+
+  const end = clockLabel(window.end, tz);
+  return end ? `from ${start} to ${end}` : `starting around ${start}`;
 }
 
 function renderDaily() {
@@ -4550,6 +4772,7 @@ function renderDaily() {
       gust:        dailyGust(extras, index),
       cloudCover:  dayCloud,
       precipChance: precip,
+      weatherCode: day.weatherCode,
       month:       dayMonth,
     });
 
@@ -4697,6 +4920,7 @@ function showDailyDetails(index) {
     gust: dayGust,
     cloudCover: dayCloud,
     precipChance: precip,
+    weatherCode: day.weatherCode,
     month: periodDate.getMonth(),
   });
 
@@ -6289,6 +6513,7 @@ function renderMapSidebar() {
     temp: current.temp, humidity: current.humidity,
     wind: current.wind, gust: current.gust,
     cloudCover: current.cloudCover,
+    condition: current.condition,
     month: new Date().getMonth(),
   });
   const astronomy = weatherState.astronomy;
