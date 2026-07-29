@@ -284,12 +284,28 @@ const SEASONAL_CENTER = [45, 48, 55, 63, 70, 76, 82, 80, 72, 62, 51, 45];
 // humidity, wind, cloud cover, and precipitation probability.
 const FWI = (() => {
   const COMFORT_WINDOW = 8;
+  // Each band carries several readings of the same verdict. The daily cards
+  // print this sentence directly after the day's blurb, so a settled week of
+  // identical scores used to end every card with the same five words. The
+  // caller passes `variant` (the card's index) to walk the list — see
+  // pickPhrase; a missing variant just takes the first, which is the wording
+  // these bands have always used.
   const RATINGS = [
-    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   sentence: "A great day to be outside." },
-    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)",  sentence: "Pleasant enough for most outdoor plans." },
-    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)",   sentence: "Workable outside, but you'll notice it." },
-    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)",   sentence: "Rough going outside — plan around it." },
-    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)",   sentence: "Best day to stay indoors." },
+    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)",
+      sentences: ["A great day to be outside.", "Hard to ask for better weather than this.", "Take the long way home — it's lovely out.", "About as good as the outdoors gets.",
+                  "Weather worth rearranging your day for.", "Nothing here to keep you indoors.", "A day that rewards being outside."] },
+    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)",
+      sentences: ["Pleasant enough for most outdoor plans.", "Good weather for anything you had in mind.", "Comfortable out, with nothing to work around.", "An easy day to spend outside.",
+                  "Agreeable weather, whatever you're up to.", "Solid conditions for being out and about.", "Outdoors holds up nicely today."] },
+    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)",
+      sentences: ["Workable outside, but you'll notice it.", "Fine out, with a few compromises.", "Passable weather — not the day you'd pick.", "Outdoor plans hold up, just barely.",
+                  "Serviceable, if unremarkable.", "You can work with this, within reason.", "Middling out — nothing you can't manage."] },
+    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)",
+      sentences: ["Rough going outside — plan around it.", "An unpleasant one to be out in for long.", "Outdoor plans are fighting the weather today.", "Not a day the outdoors is doing you any favours.",
+                  "Hard work to be out in this.", "The weather is working against you today.", "Grim enough to shorten any outdoor plans."] },
+    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)",
+      sentences: ["Best day to stay indoors.", "Give this one a miss if you can.", "Nothing out there worth going out for.", "A day to let pass from behind a window.",
+                  "Stay in — this one isn't worth it.", "There is no good reason to be outside today.", "Write this one off and stay put."] },
   ];
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -362,14 +378,45 @@ const FWI = (() => {
   // "dangerously hot". So the sentence names whichever factor is actually
   // dragging the score down, and only falls back to the band when nothing in
   // particular stands out.
+  // Three severities per factor — gentle, pointed, blunt — and several
+  // phrasings of each, so a week-long heat wave doesn't caption every card
+  // with the identical warning.
   const CAVEATS = {
-    heat:     ["Warm out, but nothing a shady spot won't fix.", "The heat is the catch — pace yourself and find shade.", "Too hot to be out in for long."],
-    cold:     ["Pleasant, as long as you dress for the cold.", "Bundle up properly and it's fine out.", "Cold enough that outside is a chore."],
-    precip:   ["Mostly fine, though rain could interrupt.", "Worth having a rain backup for outdoor plans.", "Wet enough to move plans indoors."],
-    snow:     ["Fine out, though there's snow to deal with.", "Snow will complicate anything outdoors.", "Snow is reason enough to stay in."],
-    wind:     ["Nice out, just breezy.", "The wind is the nuisance here.", "The wind will make outside unpleasant."],
-    cloud:    ["Comfortable, if a little grey.", "Grey, but otherwise fine out.", "Grey and gloomy all day."],
-    humidity: ["Comfortable, though the air is heavy.", "Muggy enough to slow you down.", "Oppressively muggy — take it easy."],
+    heat: [
+      ["Warm out, but nothing a shady spot won't fix.", "Hot, though a bit of shade sorts it out.", "The warmth is the only real catch.", "Toasty, but perfectly manageable."],
+      ["The heat is the catch — pace yourself and find shade.", "Hot enough to plan around; go early or late.", "The heat will set the pace of your day.", "Keep water handy and the heat is workable."],
+      ["Too hot to be out in for long.", "Dangerous heat — keep outdoor time short.", "The heat alone is reason to stay in.", "Punishing heat; limit what you do outside."],
+    ],
+    cold: [
+      ["Pleasant, as long as you dress for the cold.", "Fine out with the right layers on.", "Nice enough, once you're dressed for it.", "Good out, provided you're not underdressed."],
+      ["Bundle up properly and it's fine out.", "Cold enough that layers aren't optional.", "The cold is the thing to plan around.", "Dress seriously and the cold is survivable."],
+      ["Cold enough that outside is a chore.", "Bitter out — keep it brief.", "The cold makes anything outdoors hard work.", "Brutally cold; there's no dressing around it."],
+    ],
+    precip: [
+      ["Mostly fine, though rain could interrupt.", "Decent out, with rain the one question mark.", "Fine apart from the chance of getting rained on.", "Good out, if you don't mind a shower."],
+      ["Worth having a rain backup for outdoor plans.", "Rain is likely enough to need a plan B.", "Keep something indoors in reserve.", "Rain is likely — carry a jacket at minimum."],
+      ["Wet enough to move plans indoors.", "The rain wins this one — head inside.", "Too wet to be worth the trouble.", "Soaking weather; save it for another day."],
+    ],
+    snow: [
+      ["Fine out, though there's snow to deal with.", "Workable, snow aside.", "Not bad out — the snow is the catch.", "Decent enough, once you account for the snow."],
+      ["Snow will complicate anything outdoors.", "The snow is what you'll be working around.", "Expect the snow to slow everything down.", "Allow extra time; the snow will cost you some."],
+      ["Snow is reason enough to stay in.", "Let the snow pass before heading out.", "The snow makes this one a write-off.", "Heavy enough snow to stay off the roads."],
+    ],
+    wind: [
+      ["Nice out, just breezy.", "Pleasant, if a touch windy.", "Good out — bring something windproof.", "Lovely, with a bit of a breeze on it."],
+      ["The wind is the nuisance here.", "Windy enough to be annoying.", "The wind is what you'll notice.", "Expect the wind to be the story of the day."],
+      ["The wind will make outside unpleasant.", "Wind strong enough to keep you in.", "Too windy to enjoy being out.", "The wind alone makes this one rough."],
+    ],
+    cloud: [
+      ["Comfortable, if a little grey.", "Pleasant enough under the cloud.", "Fine out, just short on sun.", "Agreeable, sunshine aside."],
+      ["Grey, but otherwise fine out.", "Overcast, though nothing worse than that.", "Dull overhead and nothing more.", "Flat grey skies, and little else to report."],
+      ["Grey and gloomy all day.", "Relentlessly overcast.", "No sign of the sun today.", "Solid cloud, start to finish."],
+    ],
+    humidity: [
+      ["Comfortable, though the air is heavy.", "Pleasant, if a bit close.", "Fine out — the air just sits on you.", "Nice enough, with a bit of weight to the air."],
+      ["Muggy enough to slow you down.", "The humidity is what you'll feel first.", "Sticky enough to be work.", "The mugginess takes the edge off an otherwise fine day."],
+      ["Oppressively muggy — take it easy.", "The air is thick; go easy out there.", "Humidity heavy enough to stay in for.", "Swampy out; don't push it."],
+    ],
   };
 
   // Ranked by points lost outright, not by share of each factor's own maximum:
@@ -423,7 +470,7 @@ const FWI = (() => {
     return null;
   }
 
-  function calculate({ temp, humidity, wind, gust, cloudCover, precipChance, month, weatherCode, condition }) {
+  function calculate({ temp, humidity, wind, gust, cloudCover, precipChance, month, weatherCode, condition, variant = 0 }) {
     const m = month ?? new Date().getMonth();
     const t = scoreTemp(temp, m);
     const h = scoreHumidity(humidity);
@@ -441,8 +488,8 @@ const FWI = (() => {
     // reads gently at 80 and bluntly at 30 — but never softer than the factor
     // itself demands.
     const sentence = caveat
-      ? caveat.lines[Math.max(caveat.floor, score100 >= 65 ? 0 : score100 >= 40 ? 1 : 2)]
-      : rating.sentence;
+      ? pickPhrase(caveat.lines[Math.max(caveat.floor, score100 >= 65 ? 0 : score100 >= 40 ? 1 : 2)], "fwiCaveat", variant)
+      : pickPhrase(rating.sentences, "fwiBand", variant);
 
     return { score100, ...rating, sentence, breakdown };
   }
@@ -495,9 +542,17 @@ const themePalettes = {
   },
 };
 
-// Nine-bucket sky gradients for the animated canvas background — one clean
-// linear-gradient (top to bottom) per real condition bucket, independent of
-// the coarser 4-way accent theme above.
+// Sky gradients for the animated canvas background — one clean linear-gradient
+// (top to bottom) per real condition bucket, independent of the coarser 4-way
+// accent theme above.
+//
+// Every cloud-bearing bucket also gets a "…Night" twin. Rain at 2 a.m. is not
+// the same scene as rain at 2 p.m., and painting the daytime overcast grey
+// after dark left the whole app looking washed out and lit-from-nowhere while
+// the icons had already switched to their night glyphs. The night twins keep
+// the same hue relationship as their daytime siblings — just carried down into
+// near-black — so the scene stays recognisably "rain" or "fog" while reading
+// unambiguously as night.
 const SKY = {
   clearDay: ["#0a5fae", "#2f8fd4", "#7fc2e8", "#bfe2f2"],
   clearNight: ["#03060f", "#071229", "#0d1e3d", "#16304f"],
@@ -508,7 +563,22 @@ const SKY = {
   snow: ["#4a5764", "#66727f", "#8c96a1", "#b4bcc4"],
   fog: ["#5d6670", "#7c848d", "#9aa1a8", "#b6bcc1"],
   sunset: ["#2a1a4a", "#8b3d63", "#e0713f", "#f8b064"],
+  overcastNight: ["#05080e", "#0c111a", "#151c27", "#1e2734"],
+  rainNight: ["#04070d", "#0a1018", "#111a24", "#18232f"],
+  stormNight: ["#02040a", "#070b13", "#0d131d", "#131b26"],
+  snowNight: ["#080d16", "#111927", "#1c2637", "#2a3549"],
+  fogNight: ["#080b10", "#12161d", "#1c222a", "#272e38"],
 };
+
+// "rainNight" → "rain". Particle counts, cloud tints and every per-bucket
+// special case reason about the weather; only the palette knows about the hour.
+const SKY_NIGHT_BUCKETS = ["overcast", "rain", "storm", "snow", "fog"];
+function baseSky(bucket) {
+  return bucket === "clearNight" ? bucket : String(bucket || "").replace(/Night$/, "");
+}
+function isNightSky(bucket) {
+  return bucket === "clearNight" || /Night$/.test(String(bucket || ""));
+}
 
 const tabs = document.querySelectorAll(".tab");
 const screens = document.querySelectorAll(".screen");
@@ -550,29 +620,37 @@ function syncThemeColor() {
 }
 syncThemeColor();
 
-// Determine which of the nine animated-sky buckets a real observation maps
-// to: precipitation/fog/storm text wins outright, otherwise clear/cloudy
+// Is it currently night / near-twilight where the selected location is?
+// Both the sky bucket and the accent theme need the answer, and they used to
+// work it out separately — which is how the app ended up in "sunny" mode at
+// midnight whenever it happened to be raining.
+function skyDaylight() {
+  const now = new Date();
+  if (currentSunrise && currentSunset) {
+    const nowMs = now.getTime(), riseMs = currentSunrise.getTime(), setMs = currentSunset.getTime();
+    const night = nowMs < riseMs || nowMs > setMs;
+    return { night, sunset: !night && (nowMs > setMs - 60 * 60 * 1000 || nowMs < riseMs + 30 * 60 * 1000) };
+  }
+  const hour = localHour(now);
+  const night = hour >= 20 || hour <= 5;
+  return { night, sunset: !night && hour >= 17 };
+}
+
+// Determine which animated-sky bucket a real observation maps to:
+// precipitation/fog/storm text wins outright, otherwise clear/cloudy
 // conditions are split further by day, night, or near-sunset/sunrise light.
 function computeSkyBucket(current) {
   const text = `${current.condition || ""}`.toLowerCase();
-  if (text.includes("thunder") || text.includes("storm")) return "storm";
-  if (text.includes("snow") || text.includes("sleet") || text.includes("ice") || text.includes("wintry")) return "snow";
-  if (text.includes("fog") || text.includes("mist") || text.includes("haze")) return "fog";
-  if (text.includes("rain") || text.includes("shower") || text.includes("drizzle")) return "rain";
+  const { night, sunset } = skyDaylight();
+  // Weather buckets keep their identity after dark and pick up the night
+  // palette instead of being replaced by a generic dark sky.
+  const shade = bucket => (night && SKY_NIGHT_BUCKETS.includes(bucket)) ? `${bucket}Night` : bucket;
 
-  const now = new Date();
-  let night = false, sunset = false;
-  if (currentSunrise && currentSunset) {
-    const nowMs = now.getTime(), riseMs = currentSunrise.getTime(), setMs = currentSunset.getTime();
-    night = nowMs < riseMs || nowMs > setMs;
-    sunset = !night && (nowMs > setMs - 60 * 60 * 1000 || nowMs < riseMs + 30 * 60 * 1000);
-  } else {
-    const hour = localHour(now);
-    night = hour >= 20 || hour <= 5;
-    sunset = !night && hour >= 17;
-  }
-
-  if (text.includes("overcast") || (text.includes("cloud") && !text.includes("partly"))) return "overcast";
+  if (text.includes("thunder") || text.includes("storm")) return shade("storm");
+  if (text.includes("snow") || text.includes("sleet") || text.includes("ice") || text.includes("wintry")) return shade("snow");
+  if (text.includes("fog") || text.includes("mist") || text.includes("haze")) return shade("fog");
+  if (text.includes("rain") || text.includes("shower") || text.includes("drizzle")) return shade("rain");
+  if (text.includes("overcast") || (text.includes("cloud") && !text.includes("partly"))) return shade("overcast");
   if (sunset) return "sunset";
   if (night) return "clearNight";
   if (text.includes("partly") || text.includes("mostly clear") || text.includes("mostly sunny")) return "partly";
@@ -583,7 +661,9 @@ function computeSkyBucket(current) {
 // when the bucket changes (not every frame).
 let skyScene = { drops: [], flakes: [], stars: [], clouds: [], fogBanks: [], flash: { next: 0, on: 0, x: 0.5 } };
 function skyRnd(a, b) { return a + Math.random() * (b - a); }
-function buildSkyScene(bucket) {
+function buildSkyScene(rawBucket) {
+  const bucket = baseSky(rawBucket);
+  const night = isNightSky(rawBucket);
   const heavy = bucket === "storm";
   const rainN = bucket === "rain" ? 380 : heavy ? 560 : bucket === "fog" ? 40 : 0;
   const drops = Array.from({ length: rainN }, () => ({
@@ -594,9 +674,14 @@ function buildSkyScene(bucket) {
     x: Math.random(), y: Math.random(), r: skyRnd(0.9, 3.1), s: skyRnd(0.03, 0.09),
     ph: Math.random() * 9, sw: skyRnd(0.004, 0.016), a: skyRnd(0.35, 0.95),
   })) : [];
-  const stars = bucket === "clearNight" ? Array.from({ length: 240 }, () => ({
-    x: Math.random(), y: Math.random() * 0.82, r: skyRnd(0.4, 1.5), ph: Math.random() * 9, a: skyRnd(0.3, 1),
-  })) : [];
+  // A clear night is all stars; a broken/foggy night gets a sparse, dim field
+  // that the cloud and fog layers largely cover, which keeps the scene dark
+  // without looking like the sky was simply switched off.
+  const starN = bucket === "clearNight" ? 240 : (night && (bucket === "rain" || bucket === "snow" || bucket === "fog") ? 70 : 0);
+  const starDim = bucket === "clearNight" ? 1 : 0.45;
+  const stars = Array.from({ length: starN }, () => ({
+    x: Math.random(), y: Math.random() * 0.82, r: skyRnd(0.4, 1.5), ph: Math.random() * 9, a: skyRnd(0.3, 1) * starDim,
+  }));
   const n = { clearDay: 3, partly: 7, overcast: 11, rain: 9, storm: 10, snow: 8, fog: 5, sunset: 6, clearNight: 3 }[bucket] || 0;
   const lowDeck = bucket === "overcast" || bucket === "storm" || bucket === "rain";
   const clouds = Array.from({ length: n }, () => ({
@@ -1754,6 +1839,35 @@ function headlineFor(condition, forecast) {
   return `${text} over ${name} right now.`;
 }
 
+/* ============================================================================
+   PHRASE VARIETY
+   ----------------------------------------------------------------------------
+   The forecast blurbs are assembled from a handful of sentence frames, so a
+   settled week printed the same sentence seven times over — "Sunny and warm,
+   topping out near 84°. Lows near 62°." on every card. Each frame now has
+   several phrasings and picks between them here.
+
+   The choice has to be deterministic: a unit toggle, a tab switch or a refresh
+   re-renders every card, and wording that reshuffled on each pass would read as
+   a glitch. It is keyed off the card's position in the list plus a hash of the
+   frame's name, which gives two useful properties — consecutive days can never
+   land on the same variant of the same frame (the index advances by one, the
+   list is walked in order), and different frames within one summary start at
+   different offsets instead of moving in lockstep.
+   ========================================================================== */
+function phraseHash(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (Math.imul(h, 31) + text.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function pickPhrase(list, salt, index = 0) {
+  if (!list || !list.length) return null;
+  return list[(phraseHash(salt) + (Number(index) || 0)) % list.length];
+}
+
+const capitalize = str => str ? `${str[0].toUpperCase()}${str.slice(1)}` : str;
+
 // A word for how a temperature actually feels, used to open a sentence.
 function temperatureFeel(tempF) {
   if (tempF == null) return null;
@@ -2673,22 +2787,62 @@ async function aviationPayload() {
   };
 }
 
+// SWPC retired the /products/solar-wind/plasma-1-day.json and mag-1-day.json
+// feeds — both now 404. Because all three requests were awaited with
+// Promise.all, those two 404s rejected the whole payload and the Space Weather
+// card showed "--" for every field, Kp included. The DSCOVR summary products
+// carry the same two numbers (latest sample only, which is all this card
+// shows), and each source is now settled independently so one outage can't
+// blank the rest of the panel.
+const SWPC_SOURCES = {
+  kp:    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
+  wind:  "https://services.swpc.noaa.gov/products/summary/solar-wind-speed.json",
+  mag:   "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json",
+  scales: "https://services.swpc.noaa.gov/products/noaa-scales.json",
+};
+
 async function spacePayload() {
-  const [kpRows, plasmaRows, magRows] = await Promise.all([
-    getJson("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"),
-    getJson("https://services.swpc.noaa.gov/products/solar-wind/plasma-1-day.json"),
-    getJson("https://services.swpc.noaa.gov/products/solar-wind/mag-1-day.json"),
+  const [kpRes, windRes, magRes, scalesRes] = await Promise.allSettled([
+    getJson(SWPC_SOURCES.kp),
+    getJson(SWPC_SOURCES.wind),
+    getJson(SWPC_SOURCES.mag),
+    getJson(SWPC_SOURCES.scales),
   ]);
-  const latestKp = Array.isArray(kpRows) ? kpRows.slice().reverse().find(row => row.Kp != null || row[1] != null) || {} : {};
-  const latestPlasma = plasmaRows.slice(1).reverse().find(row => row[2]) || [];
-  const latestMag = magRows.slice(1).reverse().find(row => row[3]) || [];
-  const kp = Number(latestKp.Kp ?? latestKp[1]);
-  return {
+  const value = res => res.status === "fulfilled" ? res.value : null;
+
+  // The Kp product is an array of objects, newest last, and occasionally ends
+  // with rows whose Kp is still null while the period is being estimated.
+  const kpRows = value(kpRes);
+  const latestKp = Array.isArray(kpRows)
+    ? kpRows.slice().reverse().find(row => Number.isFinite(Number(row?.Kp ?? row?.kp_index ?? row?.[1])))
+    : null;
+  const kp = latestKp ? Number(latestKp.Kp ?? latestKp.kp_index ?? latestKp[1]) : NaN;
+
+  const windRow = value(windRes)?.[0];
+  const magRow  = value(magRes)?.[0];
+  const speed = Number(windRow?.proton_speed ?? windRow?.speed);
+  const bz    = Number(magRow?.bz_gsm ?? magRow?.bz);
+
+  // NOAA publishes the observed G scale directly; derive it from Kp only when
+  // that feed is the one that is down.
+  const observedG = value(scalesRes)?.["0"]?.G?.Scale;
+  const gScale = observedG != null
+    ? `G${observedG}`
+    : (Number.isFinite(kp) && kp >= 5 ? `G${Math.min(5, Math.floor(kp - 4))}` : "G0");
+
+  const payload = {
     kp: Number.isFinite(kp) ? kp.toFixed(1) : null,
-    gScale: kp >= 5 ? `G${Math.min(5, Math.floor(kp - 4))}` : "G0",
-    solarWind: latestPlasma[2] ? Math.round(Number(latestPlasma[2])) : null,
-    bz: latestMag[3] ? Number(latestMag[3]).toFixed(1) : null,
+    gScale,
+    solarWind: Number.isFinite(speed) ? Math.round(speed) : null,
+    bz: Number.isFinite(bz) ? bz.toFixed(1) : null,
+    updated: windRow?.time_tag || magRow?.time_tag || latestKp?.time_tag || null,
   };
+  // Everything failing means SWPC itself is unreachable — say so rather than
+  // drawing a full card of dashes that looks like a quiet sun.
+  if (payload.kp == null && payload.solarWind == null && payload.bz == null) {
+    throw new Error("SWPC space weather feeds unavailable");
+  }
+  return payload;
 }
 
 /* ============================================================================
@@ -3779,29 +3933,19 @@ function localDateISO(date = new Date(), timezone = selectedLocation.timezone ||
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+// The accent theme (`data-theme`) and the condition class (`data-condition`)
+// are applied together, so night wins outright here: rain after dark is
+// `theme="midnight" condition="rain"`, and the stylesheet layers the rain
+// accents over the night palette. Previously the condition tests ran first and
+// returned "sunny", which is how a rainy or foggy midnight got the daytime
+// theme — and, because `isNightPeriod` keys off `theme === "midnight"`, the
+// daytime icons to go with it.
 function chooseTheme(current) {
   const text = `${current.condition || ""}`.toLowerCase();
+  const { night, sunset } = skyDaylight();
+  if (night) return "midnight";
   if (text.includes("thunder") || text.includes("storm") || text.includes("heavy rain")) return "storm";
-  if (text.includes("rain") || text.includes("drizzle") || text.includes("shower")) return "sunny";
-  if (text.includes("fog") || text.includes("mist") || text.includes("haze")) return "sunny";
-
-  const now = new Date();
-
-  // Use actual sunrise/sunset data when available
-  if (currentSunrise && currentSunset) {
-    const nowMs = now.getTime();
-    const riseMs = currentSunrise.getTime();
-    const setMs  = currentSunset.getTime();
-    if (nowMs < riseMs || nowMs > setMs) return "midnight";           // night
-    if (nowMs > setMs - 60 * 60 * 1000) return "sunset";             // within 1h of sunset
-    if (nowMs < riseMs + 30 * 60 * 1000) return "sunset";            // within 30m of sunrise
-    return "sunny";
-  }
-
-  // Fallback to hour-based
-  const hour = localHour(now);
-  if (hour >= 20 || hour <= 5) return "midnight";
-  if (hour >= 17) return "sunset";
+  if (sunset) return "sunset";
   return "sunny";
 }
 
@@ -4014,7 +4158,17 @@ function renderHourlyChart() {
   // Use actual pixel dimensions so text/dots render correctly at all screen sizes
   const W = Math.max(300, wrap.offsetWidth || 600);
   const H = Math.max(130, wrap.offsetHeight || 175);
-  const padL = 10, padR = 10, padT = 30, padB = 26;
+  const fs   = Math.max(10, Math.min(13, W / 68));  // value label size
+  const tfs  = Math.max(9,  Math.min(11, W / 92));  // time label size
+  // The padding is derived from the type sizes rather than fixed, because
+  // everything that used to spill out of the chart spilled out of a corner:
+  // the first and last value labels ran past the left/right edges, a label on
+  // the highest point clipped against the top, and a label under the lowest
+  // point landed in the row of hour labels. Reserve a gutter wide enough for
+  // half a value label on each side, and a band tall enough for a full one
+  // above the plot and below it.
+  const padL = Math.round(fs * 1.8), padR = Math.round(fs * 1.8);
+  const padT = Math.round(fs + 20), padB = Math.round(fs + tfs + 15);
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
@@ -4039,19 +4193,48 @@ function renderHourlyChart() {
 
   const gId  = `hcg_${hourlyChartMetric}`;
   const col  = cfg.color;
-  const fs   = Math.max(10, Math.min(13, W / 68));  // value label size
-  const tfs  = Math.max(9,  Math.min(11, W / 92));  // time label size
   const step = W < 450 ? 4 : 3;                     // label every Nth hour
 
+  // Rough advance width for the 800-weight UI font. Good enough to keep labels
+  // inside the frame and off each other without measuring text in the DOM.
+  const textW = str => str.length * fs * 0.6;
+
+  // Value labels sit above their point by default. On a valley — a point lower
+  // than both neighbours — "above" is the inside of the dip, where the label
+  // lands right on the curve, so those flip underneath. Either placement is
+  // then clamped into the plot's padding band rather than being allowed to run
+  // off the top of the chart or down into the hour labels.
+  const labelY = (y, i) => {
+    const prevY = i > 0 ? pts[i - 1][1] : y;
+    const nextY = i < pts.length - 1 ? pts[i + 1][1] : y;
+    const valley = y > prevY && y > nextY;          // larger y = lower value
+    const above = y - 9;
+    const below = y + fs + 7;
+    if (valley && below <= H - padB + fs + 6) return below;
+    if (above >= fs + 3) return above;
+    return below;
+  };
+
+  // Walk left to right and drop any label that would collide with the last one
+  // kept. The FWI metric prints "62 Pleasant" rather than a bare number, so on
+  // a narrow screen consecutive labels used to overprint each other.
+  let labelRight = -Infinity;
   const dotsSvg = pts.map(([x, y], i) => {
     const show = (i % step === 0 || i === pts.length - 1);
     const vStr = cfg.formatValue ? cfg.formatValue(vals[i], hourly[i]) : `${vals[i]}${cfg.unit}`;
+    const half = textW(vStr) / 2;
+    // Nudge end labels inward so they stay inside the viewBox instead of being
+    // clipped in half by the chart's rounded frame.
+    const lx = Math.min(W - 3 - half, Math.max(3 + half, x));
+    const fits = show && lx - half > labelRight + 6;
+    if (fits) labelRight = lx + half;
     return `
       <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${show ? 3.5 : 2}"
         fill="${col}" stroke="rgba(2,6,23,0.85)" stroke-width="${show ? 1.8 : 1.2}"
         opacity="${show ? 1 : 0.5}" data-hour-index="${i}"/>
-      ${show ? `<text x="${x.toFixed(1)}" y="${(y - 8).toFixed(1)}" text-anchor="middle"
-        fill="${col}" font-size="${fs}" font-weight="800"
+      ${fits ? `<text x="${lx.toFixed(1)}" y="${labelY(y, i).toFixed(1)}" text-anchor="middle"
+        fill="${col}" font-size="${fs}" font-weight="800" paint-order="stroke"
+        stroke="rgba(2,6,23,0.55)" stroke-width="2.6" stroke-linejoin="round"
         font-family="Inter,system-ui,sans-serif">${safeText(vStr)}</text>` : ""}`;
   }).join("");
 
@@ -4059,7 +4242,9 @@ function renderHourlyChart() {
     if (i % step !== 0 && i !== hourly.length - 1) return "";
     const t = new Date(h.startTime);
     const lbl = i === 0 ? "Now" : t.toLocaleTimeString([], { hour: "numeric" });
-    return `<text x="${xFor(i).toFixed(1)}" y="${(H - 5).toFixed(1)}" text-anchor="middle"
+    const half = lbl.length * tfs * 0.55 / 2;
+    const lx = Math.min(W - 3 - half, Math.max(3 + half, xFor(i)));
+    return `<text x="${lx.toFixed(1)}" y="${(H - 5).toFixed(1)}" text-anchor="middle"
       fill="rgba(232,240,255,0.45)" font-size="${tfs}" font-weight="600"
       font-family="Inter,system-ui,sans-serif">${lbl}</text>`;
   }).join("");
@@ -4122,8 +4307,11 @@ function renderHourlyChart() {
     cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx); cursor.setAttribute("visibility", "visible");
     hdot.setAttribute("cx", cx); hdot.setAttribute("cy", cy); hdot.setAttribute("visibility", "visible");
     tipVal.textContent = vStr; tipTime.textContent = lbl;
-    let tx = Math.max(padL, Math.min(W - padR - tipW, cx - tipW / 2));
-    const ty = Math.max(2, cy - tipH - 12);
+    // Keep the card inside the frame horizontally, and flip it below the point
+    // when there is no room above — clamping it to the top edge instead used to
+    // park it on top of the value labels and the start of the line.
+    const tx = Math.max(3, Math.min(W - 3 - tipW, cx - tipW / 2));
+    const ty = cy - tipH - 12 >= 3 ? cy - tipH - 12 : Math.min(H - tipH - 3, cy + 14);
     tipG.setAttribute("transform", `translate(${tx},${ty})`); tipG.setAttribute("visibility", "visible");
     if (fromTouch) hideTimer = setTimeout(hideTip, 2800);
   }
@@ -4615,10 +4803,84 @@ function condenseProviderText(detailed, fallback) {
   return (parts.join(". ") + (parts.length ? "." : "")).trim() || fallback;
 }
 
+/* ── Daily summary sentence frames ────────────────────────────────────────────
+   Every list below is interchangeable within itself: the pieces they take are
+   already-formed clauses ("topping out near 84°"), so any frame can pair with
+   any set of numbers without the grammar coming apart. Sky adjectives are the
+   one thing to watch — they are used both capitalised at the head of a sentence
+   ("Foggy and cool …") and lowercased mid-sentence ("Cool and foggy …"), so no
+   frame may follow one with a noun. "Foggy skies" is not a thing anyone says.
+*/
+
+// "…, topping out near 84°." — the clause that carries the day's high.
+const HIGH_CLAUSES = [
+  t => `topping out near ${t}`,
+  t => `with a high near ${t}`,
+  t => `climbing to about ${t}`,
+  t => `peaking around ${t}`,
+  t => `reaching ${t} at the warmest`,
+  t => `with ${t} at the top of the day`,
+];
+
+// Dry-day openers. `adj` arrives capitalised.
+const DRY_OPENERS = [
+  ({ adj, feel, highClause }) => `${adj} and ${feel}, ${highClause}.`,
+  ({ adj, feel, highClause }) => `${capitalize(feel)} and ${adj.toLowerCase()}, ${highClause}.`,
+  ({ adj, feel, highClause }) => `${adj}, ${feel}, ${highClause}.`,
+  ({ adj, feel, highClause }) => `A ${feel}, ${adj.toLowerCase()} day, ${highClause}.`,
+];
+
+// The same, when there is no temperature to hang the sentence on.
+const DRY_OPENERS_NO_TEMP = [
+  ({ adj }) => `${adj} through the day.`,
+  ({ adj }) => `${adj} for most of the day.`,
+  ({ adj }) => `${adj}, start to finish.`,
+];
+
+// Wet-day openers. `lead` is the precipitation and its timing, already
+// capitalised — "Rain from 2 PM to 7 PM", "Thunderstorms around 4 PM".
+const WET_OPENERS = [
+  ({ lead, highClause }) => `${lead}, ${highClause}.`,
+  ({ lead, highClause }) => `${lead} — ${highClause}.`,
+  ({ lead, highClause }) => `Expect ${lead.toLowerCase()}, ${highClause}.`,
+];
+
+// "Watch for scattered rain and winds gusting to 35 mph."
+const WATCH_FRAMES = [
+  joined => `Watch for ${joined}`,
+  joined => `Keep an eye out for ${joined}`,
+  joined => `Worth planning around ${joined}`,
+  joined => `The wrinkle: ${joined}`,
+  joined => `Also in the mix: ${joined}`,
+];
+
+// The overnight low appears in two positions — trailing a "Watch for …"
+// sentence ("…, with lows near 62°.") and standing alone as its own sentence
+// ("Dipping to 62° after dark."). A gerund reads well in the second and not at
+// all in the first ("with dipping to 62°"), so each entry carries both forms
+// rather than one string being bent into both jobs.
+const LOW_CLAUSES = [
+  { after: t => `lows near ${t}`,            solo: t => `Lows near ${t}.` },
+  { after: t => `a low of ${t} after dark`,  solo: t => `Dipping to ${t} after dark.` },
+  { after: t => `${t} overnight`,            solo: t => `Settling back to ${t} overnight.` },
+  { after: t => `${t} by morning`,           solo: t => `${t} by morning.` },
+];
+
+const FREEZING_LOW_CLAUSES = [
+  { after: t => `a freezing ${t} overnight`,          solo: t => `A freezing ${t} overnight.` },
+  { after: t => `a hard freeze at ${t} after dark`,   solo: t => `A hard freeze at ${t} after dark.` },
+  { after: t => `${t} and freezing by morning`,       solo: t => `Down to a freezing ${t} by morning.` },
+];
+
 // Writes the one-or-two-sentence blurb on a daily card. Composed from the
 // numbers rather than lifted from a forecast product, so it reads like a person
 // describing the day: what the sky does, how warm it gets, whether you'll get
 // rained on and roughly when, and the overnight low to plan around.
+//
+// `options.variant` is the card's position in the list; it selects between the
+// sentence frames above so a settled week doesn't print one sentence seven
+// times. Pass the same value for a given day everywhere it is rendered (card
+// and modal) so the two agree.
 function generateDailySummary(day, precip, night, options = {}) {
   if (!day) return "Forecast details unavailable.";
   // Providers that publish genuinely readable prose (Environment Canada) keep it.
@@ -4626,6 +4888,7 @@ function generateDailySummary(day, precip, night, options = {}) {
   if (detailed) return condenseProviderText(detailed, day.shortForecast || "");
   if (day.weatherCode == null) return day.shortForecast || "Forecast details unavailable.";
 
+  const v = options.variant || 0;
   const tz = selectedLocation.timezone || "America/New_York";
   const high = day.temperature;
   const low = night?.temperature;
@@ -4633,6 +4896,9 @@ function generateDailySummary(day, precip, night, options = {}) {
   const sky = skyPhrase(day.weatherCode, true);
   const adjective = skyAdjective(day.weatherCode, true);
   const feel = temperatureFeel(high);
+  const highClause = high != null
+    ? pickPhrase(HIGH_CLAUSES, "high", v)(`${uTempNum(high)}${tempUnit()}`)
+    : null;
 
   const sentences = [];
 
@@ -4640,20 +4906,18 @@ function generateDailySummary(day, precip, night, options = {}) {
   if (isWetCode(day.weatherCode)) {
     const noun = precipNoun(day.weatherCode);
     const timing = wetSpellTiming(day, tz);
-    const lead = day.weatherCode >= 95
-      ? `Thunderstorms${timing ? ` ${timing}` : ""}`
-      : `${noun[0].toUpperCase()}${noun.slice(1)}${timing ? ` ${timing}` : ""}`;
-    sentences.push(high != null
-      ? `${lead}, with a high near ${uTempNum(high)}${tempUnit()}.`
+    const lead = capitalize(day.weatherCode >= 95 ? "thunderstorms" : noun) + (timing ? ` ${timing}` : "");
+    sentences.push(highClause
+      ? pickPhrase(WET_OPENERS, "wet", v)({ lead, highClause })
       : `${lead}.`);
-  } else if (adjective && high != null) {
-    sentences.push(feel
-      ? `${adjective} and ${feel}, topping out near ${uTempNum(high)}${tempUnit()}.`
-      : `${adjective}, topping out near ${uTempNum(high)}${tempUnit()}.`);
+  } else if (adjective && feel && highClause) {
+    sentences.push(pickPhrase(DRY_OPENERS, "dry", v)({ adj: adjective, feel, highClause }));
+  } else if (adjective && highClause) {
+    sentences.push(`${adjective}, ${highClause}.`);
   } else if (adjective) {
-    sentences.push(`${adjective} through the day.`);
+    sentences.push(pickPhrase(DRY_OPENERS_NO_TEMP, "dryflat", v)({ adj: adjective }));
   } else if (sky) {
-    sentences.push(`${sky[0].toUpperCase()}${sky.slice(1)} through the day.`);
+    sentences.push(`${capitalize(sky)} through the day.`);
   }
 
   // Second line: the things that would change your plans. Everything here is a
@@ -4677,45 +4941,71 @@ function generateDailySummary(day, precip, night, options = {}) {
 
   // The day modal prints a dedicated overnight line right below, so the low is
   // dropped there rather than said twice.
+  const lowText = `${uTempNum(low)}${tempUnit()}`;
   const lowClause = low != null && options.includeOvernight !== false
-    ? (low <= 32 ? `a freezing ${uTempNum(low)}${tempUnit()} overnight` : `lows near ${uTempNum(low)}${tempUnit()}`)
+    ? pickPhrase(low <= 32 ? FREEZING_LOW_CLAUSES : LOW_CLAUSES, "low", v)
     : null;
 
   if (watchFor.length) {
     const joined = watchFor.length > 1
       ? `${watchFor.slice(0, -1).join(", ")} and ${watchFor[watchFor.length - 1]}`
       : watchFor[0];
-    sentences.push(`Watch for ${joined}${lowClause ? `, with ${lowClause}` : ""}.`);
+    sentences.push(`${pickPhrase(WATCH_FRAMES, "watch", v)(joined)}${lowClause ? `, with ${lowClause.after(lowText)}` : ""}.`);
   } else if (lowClause) {
-    sentences.push(`${lowClause[0].toUpperCase()}${lowClause.slice(1)}.`);
+    sentences.push(lowClause.solo(lowText));
   }
 
   return sentences.join(" ") || day.shortForecast || "Forecast details unavailable.";
 }
 
+// Overnight frames. `sky` is a clause ("clear skies", "passing clouds"),
+// `lowText` the formatted temperature, `late` an optional trailing chance.
+const NIGHT_DRY_FRAMES = [
+  ({ sky, lowText }) => `${capitalize(sky)} overnight, with a low around ${lowText}`,
+  ({ sky, lowText }) => `${capitalize(sky)} after dark, bottoming out near ${lowText}`,
+  ({ sky, lowText }) => `Expect ${sky} overnight and a low of about ${lowText}`,
+  ({ sky, lowText }) => `${capitalize(sky)} through the night, down to ${lowText}`,
+];
+
+const NIGHT_WET_FRAMES = [
+  ({ noun, lowText }) => `Overnight ${noun}, with a low around ${lowText}`,
+  ({ noun, lowText }) => `${capitalize(noun)} after dark, bottoming out near ${lowText}`,
+  ({ noun, lowText }) => `${capitalize(noun)} continuing overnight, down to about ${lowText}`,
+];
+
+const NIGHT_LATE_FRAMES = [
+  phrase => `and ${phrase} possible late`,
+  phrase => `with ${phrase} not out of the question`,
+  phrase => `and an outside chance of ${phrase}`,
+];
+
 // The overnight companion to generateDailySummary: a low, not a high, and no
 // talk of sun.
-function generateNightSummary(night, precip) {
+function generateNightSummary(night, precip, variant = 0) {
   if (!night) return "";
+  const v = Number(variant) || 0;
   const low = night.temperature;
   const pop = precip ?? night.probabilityOfPrecipitation?.value;
+  const wet = isWetCode(night.weatherCode);
+  const lowText = low != null ? `${uTempNum(low)}${tempUnit()}` : null;
   const bits = [];
 
-  if (isWetCode(night.weatherCode)) {
+  if (wet) {
     const noun = precipNoun(night.weatherCode);
-    bits.push(`Overnight ${noun}`);
+    bits.push(lowText
+      ? pickPhrase(NIGHT_WET_FRAMES, "nightwet", v)({ noun, lowText })
+      : `Overnight ${noun}`);
   } else {
     const sky = skyPhrase(night.weatherCode, false);
-    bits.push(sky ? `${sky[0].toUpperCase()}${sky.slice(1)} overnight` : "Quiet overnight");
+    if (sky && lowText)   bits.push(pickPhrase(NIGHT_DRY_FRAMES, "nightdry", v)({ sky, lowText }));
+    else if (sky)         bits.push(`${capitalize(sky)} overnight`);
+    else if (lowText)     bits.push(`A quiet night, down to about ${lowText}`);
+    else                  bits.push("Quiet overnight");
   }
-  if (low != null) {
-    bits.push(low <= 32
-      ? `with a cold low of ${uTempNum(low)}${tempUnit()}`
-      : `with a low around ${uTempNum(low)}${tempUnit()}`);
-  }
-  if (!isWetCode(night.weatherCode)) {
+
+  if (!wet) {
     const phrase = precipPhrase(pop, precipNoun(night.weatherCode));
-    if (phrase) bits.push(`and ${phrase} possible late`);
+    if (phrase) bits.push(pickPhrase(NIGHT_LATE_FRAMES, "nightlate", v)(phrase));
   }
   return `${bits.join(" ")}.`;
 }
@@ -4774,6 +5064,7 @@ function renderDaily() {
       precipChance: precip,
       weatherCode: day.weatherCode,
       month:       dayMonth,
+      variant:     index,
     });
 
     const spcDay = index < 2 ? (weatherState.spcDays?.[index] || null) : null;
@@ -4800,7 +5091,7 @@ function renderDaily() {
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
       <div class="daily-range">${uTempNum(day.temperature)}°<span class="daily-range-low"> / ${night ? uTempNum(night.temperature) : "--"}°</span></div>
-      <p class="daily-summary">${safeText(generateDailySummary(day, precip, night))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
+      <p class="daily-summary">${safeText(generateDailySummary(day, precip, night, { variant: index }))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
       <div class="daily-chip-row">
         <span class="chip-precip">${uiIcon("precip")}${f(precip)}%</span>
         <span>${uiIcon("temp")}Feels ${uTempNum(feelsHigh)}°/${uTempNum(feelsLow)}°</span>
@@ -4922,6 +5213,7 @@ function showDailyDetails(index) {
     precipChance: precip,
     weatherCode: day.weatherCode,
     month: periodDate.getMonth(),
+    variant: index,
   });
 
   const periodCard = (label, icon, period, wind, precipPct) => `
@@ -4967,9 +5259,9 @@ function showDailyDetails(index) {
   // With the forecast coming from model output rather than a written product,
   // the narrative is composed from the day's own numbers.
   const nightBlurb = night && night.weatherCode != null
-    ? generateNightSummary(night, precipNight)
+    ? generateNightSummary(night, precipNight, index)
     : (night?.detailedForecast ? `Night: ${night.detailedForecast}` : "");
-  const discussion = [generateDailySummary(day, precipDay, night, { includeOvernight: !nightBlurb }), nightBlurb].filter(Boolean);
+  const discussion = [generateDailySummary(day, precipDay, night, { includeOvernight: !nightBlurb, variant: index }), nightBlurb].filter(Boolean);
 
   modalEyebrow.textContent = "Daily Forecast";
   modalTitle.innerHTML = `${weatherIcon(iconForCondition(day.shortForecast), true)}<span>${safeText(day.name || "Forecast")}</span>`;
@@ -5328,12 +5620,26 @@ function renderMetar(aviation) {
   document.querySelector("#metarDecoded").innerHTML = decoded.map(([term, desc]) => `<div><dt>${term}</dt><dd>${desc}</dd></div>`).join("");
 }
 
+// Kp runs 0-9; the descriptions are NOAA's own wording for the G scale.
+function auroraNote(space) {
+  if (!space) return "Live space weather data from NOAA SWPC is unavailable right now.";
+  const kp = Number(space.kp);
+  if (!Number.isFinite(kp)) return "Solar wind is being observed, but the planetary K index has not been published for this period yet.";
+  const bzNote = Number(space.bz) <= -5
+    ? " The interplanetary field is tilted southward, which couples the solar wind into Earth's magnetosphere more efficiently."
+    : "";
+  if (kp >= 7) return `Severe geomagnetic storming (Kp ${space.kp}). Aurora may be visible well into the mid-latitudes.${bzNote}`;
+  if (kp >= 5) return `Geomagnetic storm conditions (Kp ${space.kp}). Aurora is possible at northern-tier latitudes given clear, dark skies.${bzNote}`;
+  if (kp >= 4) return `Unsettled to active field (Kp ${space.kp}). Aurora is largely confined to high latitudes.${bzNote}`;
+  return `Quiet geomagnetic field (Kp ${space.kp}). Aurora is unlikely outside the polar regions.${bzNote}`;
+}
+
 function renderSpace(space) {
   const values = [
     ["Kp Index", space?.kp ?? "--"],
-    ["NOAA G-Scale", space?.gScale || "G0"],
-    ["Solar Wind", space?.solarWind ? `${space.solarWind} km/s` : "--"],
-    ["Bz Field", space?.bz ? `${space.bz} nT` : "--"],
+    ["NOAA G-Scale", space?.gScale || "--"],
+    ["Solar Wind", space?.solarWind != null ? `${space.solarWind} km/s` : "--"],
+    ["Bz Field", space?.bz != null ? `${space.bz} nT` : "--"],
   ];
   document.querySelector("#spaceReadouts").innerHTML = values.map(([label, value]) => `
     <div class="space-item">
@@ -5341,8 +5647,29 @@ function renderSpace(space) {
       <span class="space-value">${value}</span>
     </div>
   `).join("");
-  const kp = Number(space?.kp || 0);
-  document.querySelector(".aurora-bar span").style.width = `${Math.min(100, Math.max(8, kp * 12))}%`;
+
+  const kp = Number(space?.kp);
+  const bar = document.querySelector(".aurora-bar span");
+  // Kp 0-9 across the bar, with a visible stub at Kp 0 so the meter still
+  // reads as a meter. An unavailable feed empties it rather than parking it
+  // at the same width a quiet sun would produce.
+  if (bar) {
+    const pct = Number.isFinite(kp) ? Math.min(100, Math.max(6, (kp / 9) * 100)) : 0;
+    bar.style.width = `${pct}%`;
+    // Paint the gradient at full-track scale so Kp 3 is always the same colour
+    // whether or not the fill happens to end there.
+    bar.style.setProperty("--aurora-track", pct ? `${(100 / pct) * 100}%` : "100%");
+  }
+
+  const note = document.querySelector("#spaceNote");
+  if (note) note.textContent = auroraNote(space);
+  const stamp = document.querySelector("#spaceUpdated");
+  if (stamp) {
+    stamp.textContent = space?.updated
+      ? `NOAA SWPC · ${new Date(/Z$|[+-]\d\d:?\d\d$/.test(space.updated) ? space.updated : `${space.updated}Z`)
+          .toLocaleTimeString([], { timeZone: selectedLocation.timezone || "America/New_York", hour: "numeric", minute: "2-digit" })}`
+      : "NOAA SWPC";
+  }
 }
 
 /* ============================================================================
@@ -6044,6 +6371,22 @@ async function selectTideStation(stationId) {
   renderCoastal();
 }
 
+// The Coast tab is only meaningful where there is a coastline. It starts
+// visible and is taken away once the marine check comes back negative — rather
+// than being hidden on every refresh and re-shown a second later, which made
+// the whole tab bar jump. A failed check leaves the tab in place so the error
+// is reachable instead of silently swallowing a genuinely coastal location.
+let coastalTabVisible = true;
+function updateCoastalTabVisibility() {
+  const tab = document.querySelector('.tab[data-tab="coastal"]');
+  if (!tab) return;
+  tab.hidden = !coastalTabVisible;
+  // Don't strand the user on a screen that just disappeared out from under them.
+  if (!coastalTabVisible && tab.classList.contains("active")) {
+    document.querySelector('.tab[data-tab="current"]')?.click();
+  }
+}
+
 function refreshCoastal() {
   coastalState = null;
   coastalError = null;
@@ -6056,9 +6399,13 @@ function refreshCoastal() {
     const segments = data.surf?.segments || [];
     const matched = segments.findIndex(segment => segment.zones.includes(data.zoneId));
     coastalSegmentIndex = matched === -1 ? 0 : matched;
+    coastalTabVisible = data.isCoastal === true;
+    updateCoastalTabVisibility();
     renderCoastal();
   }).catch(error => {
     coastalError = error.message;
+    coastalTabVisible = true;
+    updateCoastalTabVisibility();
     renderCoastal();
   });
 }
@@ -6292,6 +6639,10 @@ function hexToTransparent(hex) {
 function drawAtmosphere(ts) {
   skyT = (ts || 0) / 1000;
   const stops = SKY[skyBucket] || SKY.clearDay;
+  // Everything below reasons about the weather, not the hour: "rainNight"
+  // slants and flashes exactly like "rain", it is just painted after dark.
+  const bucket = baseSky(skyBucket);
+  const night = isNightSky(skyBucket);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   // Measure the canvas's actual rendered size so its buffer matches the CSS
   // overshoot. iOS standalone can still clip fixed elements out of safe-area
@@ -6313,13 +6664,20 @@ function drawAtmosphere(ts) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
 
-  if (skyBucket === "clearNight") {
+  if (skyScene.stars.length) {
     skyScene.stars.forEach((s) => {
       ctx.globalAlpha = s.a * (0.55 + 0.45 * Math.sin(t * 1.7 + s.ph));
       ctx.fillStyle = "#eaf3ff";
       ctx.beginPath(); ctx.arc(s.x * w, s.y * h, s.r, 0, 6.284); ctx.fill();
     });
     ctx.globalAlpha = 1;
+  }
+
+  // The moon disc belongs to a clear night only. A rainy or foggy night keeps
+  // its dim star field (mostly hidden behind the cloud deck) but no moon —
+  // a bright disc punched through an overcast sky was the giveaway that the
+  // night scene was just the clear-night scene wearing a different gradient.
+  if (skyBucket === "clearNight") {
     const mx = w * 0.82, my = h * 0.17;
     const mg = ctx.createRadialGradient(mx, my, 0, mx, my, h * 0.45);
     mg.addColorStop(0, "rgba(226,238,255,.45)"); mg.addColorStop(0.12, "rgba(190,214,255,.14)"); mg.addColorStop(1, "rgba(190,214,255,0)");
@@ -6328,8 +6686,8 @@ function drawAtmosphere(ts) {
     ctx.beginPath(); ctx.arc(mx, my, Math.max(16, h * 0.034), 0, 6.284); ctx.fill();
   }
 
-  if (skyBucket === "clearDay" || skyBucket === "partly") {
-    const sx = w * 0.82, sy = h * (skyBucket === "clearDay" ? 0.14 : 0.18), pulse = 0.9 + 0.1 * Math.sin(t * 0.8);
+  if (bucket === "clearDay" || bucket === "partly") {
+    const sx = w * 0.82, sy = h * (bucket === "clearDay" ? 0.14 : 0.18), pulse = 0.9 + 0.1 * Math.sin(t * 0.8);
     const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.85 * pulse);
     sg.addColorStop(0, "rgba(255,247,214,.95)"); sg.addColorStop(0.055, "rgba(255,240,190,.5)");
     sg.addColorStop(0.26, "rgba(255,232,170,.15)"); sg.addColorStop(1, "rgba(255,232,170,0)");
@@ -6346,7 +6704,7 @@ function drawAtmosphere(ts) {
     ctx.restore();
   }
 
-  if (skyBucket === "sunset") {
+  if (bucket === "sunset") {
     const sx = w * 0.68, sy = h * 0.72;
     const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.95);
     sg.addColorStop(0, "rgba(255,236,190,.95)"); sg.addColorStop(0.045, "rgba(255,197,120,.58)");
@@ -6362,7 +6720,9 @@ function drawAtmosphere(ts) {
     ctx.restore();
   }
 
-  const tint = { overcast: "245,248,252", storm: "150,165,182", rain: "180,195,210", snow: "235,242,250", fog: "240,244,248", sunset: "255,205,170", clearNight: "160,185,220" }[skyBucket] || "255,255,255";
+  const tint = night
+    ? ({ overcast: "96,110,128", storm: "70,84,102", rain: "84,100,120", snow: "126,142,166", fog: "104,116,132", clearNight: "160,185,220" }[bucket] || "150,170,196")
+    : ({ overcast: "245,248,252", storm: "150,165,182", rain: "180,195,210", snow: "235,242,250", fog: "240,244,248", sunset: "255,205,170" }[bucket] || "255,255,255");
   skyScene.clouds.forEach((cl) => {
     const x = ((cl.x + t * cl.s) % 1.4 - 0.2) * w, y = cl.y * h, cw = cl.w * w, ch = cl.h * h;
     const cg = ctx.createRadialGradient(x, y, 0, x, y, cw * 0.5);
@@ -6375,19 +6735,21 @@ function drawAtmosphere(ts) {
   skyScene.fogBanks.forEach((f) => {
     const y = f.y * h + Math.sin(t * 0.2 + f.x * 6) * h * 0.015;
     const fg = ctx.createLinearGradient(0, y - f.h * h * 0.5, 0, y + f.h * h * 0.5);
-    fg.addColorStop(0, "rgba(226,232,238,0)"); fg.addColorStop(0.5, `rgba(226,232,238,${f.a})`); fg.addColorStop(1, "rgba(226,232,238,0)");
+    const fogRgb = night ? "104,116,132" : "226,232,238";
+    fg.addColorStop(0, `rgba(${fogRgb},0)`); fg.addColorStop(0.5, `rgba(${fogRgb},${f.a})`); fg.addColorStop(1, `rgba(${fogRgb},0)`);
     ctx.fillStyle = fg;
     const off = ((f.x + t * f.s) % 1.4 - 0.2) * w;
     ctx.fillRect(off - w, y - f.h * h * 0.5, w * 2.4, f.h * h);
   });
 
   if (skyScene.drops.length) {
-    const slant = skyBucket === "storm" ? 0.34 : 0.18;
+    const slant = bucket === "storm" ? 0.34 : 0.18;
     ctx.lineCap = "round";
     skyScene.drops.forEach((d) => {
       const y = ((d.y + t * d.s) % 1.15) * h - h * 0.08;
       const x = ((d.x + (y / h) * slant) % 1) * w, len = d.l * h;
-      ctx.strokeStyle = `rgba(214,236,255,${d.a})`; ctx.lineWidth = d.w;
+      ctx.strokeStyle = night ? `rgba(150,186,220,${d.a * 0.8})` : `rgba(214,236,255,${d.a})`;
+      ctx.lineWidth = d.w;
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - len * slant, y + len); ctx.stroke();
     });
   }
@@ -6396,16 +6758,17 @@ function drawAtmosphere(ts) {
     skyScene.flakes.forEach((f) => {
       const y = ((f.y + t * f.s) % 1.12) * h - h * 0.06;
       const x = (f.x + Math.sin(t * 0.8 + f.ph) * f.sw) * w;
-      ctx.globalAlpha = f.a; ctx.fillStyle = "#f7fbff";
+      ctx.globalAlpha = night ? f.a * 0.75 : f.a; ctx.fillStyle = night ? "#c8d8ec" : "#f7fbff";
       ctx.beginPath(); ctx.arc(x, y, f.r, 0, 6.284); ctx.fill();
     });
     ctx.globalAlpha = 1;
     const ag = ctx.createLinearGradient(0, h * 0.84, 0, h);
-    ag.addColorStop(0, "rgba(232,240,250,0)"); ag.addColorStop(1, "rgba(236,244,252,.26)");
+    const agRgb = night ? "150,170,196" : "236,244,252";
+    ag.addColorStop(0, `rgba(${agRgb},0)`); ag.addColorStop(1, `rgba(${agRgb},${night ? 0.16 : 0.26})`);
     ctx.fillStyle = ag; ctx.fillRect(0, h * 0.84, w, h * 0.16);
   }
 
-  if (skyBucket === "storm") {
+  if (bucket === "storm") {
     const flash = skyScene.flash;
     if (t > flash.next) { flash.on = 1; flash.next = t + skyRnd(2.2, 6.5); flash.x = skyRnd(0.15, 0.85); }
     if (flash.on > 0) {
@@ -6423,9 +6786,10 @@ function drawAtmosphere(ts) {
     }
   }
 
-  if (skyBucket === "fog") {
+  if (bucket === "fog") {
     const vg = ctx.createRadialGradient(w * 0.5, h * 0.5, h * 0.1, w * 0.5, h * 0.5, h * 0.95);
-    vg.addColorStop(0, "rgba(190,197,204,0)"); vg.addColorStop(1, "rgba(174,182,190,.4)");
+    if (night) { vg.addColorStop(0, "rgba(10,14,20,0)"); vg.addColorStop(1, "rgba(6,9,14,.5)"); }
+    else       { vg.addColorStop(0, "rgba(190,197,204,0)"); vg.addColorStop(1, "rgba(174,182,190,.4)"); }
     ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
   }
 
@@ -6486,11 +6850,25 @@ async function detectMrmsFrameCount(product = activeMrmsProduct) {
 }
 
 
+function setPlayButtonsEnabled(enabled) {
+  document.querySelectorAll("#radarPlayButton, #mapFramePlayButton").forEach(btn => { btn.disabled = !enabled; });
+}
+
+// Play/pause is offered twice — the labelled button in the Layers panel and the
+// icon button on the bottom scrubber — so both are driven from one place.
+function setPlayingUi(playing) {
+  const lbl = document.querySelector("#playLabel");
+  if (lbl) lbl.textContent = playing ? "Pause" : "Play";
+  document.querySelectorAll("#radarPlayButton, #mapFramePlayButton").forEach(btn => {
+    btn.classList.toggle("playing", playing);
+    btn.setAttribute("aria-label", playing ? "Pause frame animation" : "Play frame animation");
+  });
+}
+
 function stopRadarAnimation() {
   if (radarAnimationTimer) clearInterval(radarAnimationTimer);
   radarAnimationTimer = null;
-  const lbl = document.querySelector("#playLabel");
-  if (lbl) lbl.textContent = "Play";
+  setPlayingUi(false);
 }
 
 // The layer controls and the conditions sidebar float over the map, so each one
@@ -6627,26 +7005,31 @@ function syncFrameSliders({ value, max, disabled } = {}) {
   });
 }
 
+// The valid time of the frame on screen shows in two places: the timeline row
+// in the Layers panel and the scrubber docked at the bottom of the map.
+function setFrameTimeLabel(text) {
+  document.querySelectorAll("#radarTimeLabel, #mapFrameTimeLabel").forEach(el => { el.textContent = text; });
+}
+
 function updateRadarLabel() {
-  const labelEl = document.querySelector("#radarTimeLabel");
-  if (!labelEl) return;
+  if (!document.querySelector("#radarTimeLabel") && !document.querySelector("#mapFrameTimeLabel")) return;
 
   // Satellite owns the timeline whenever it is active.
   if (satelliteActive) {
     syncFrameSliders({ value: satFrameIndex });
     const frame = satFrames.length ? satFrames[satFrameIndex] : 0;
-    labelEl.textContent = frame === 0 ? "Latest" : `−${frame} frame${frame > 1 ? "s" : ""}`;
+    setFrameTimeLabel(frame === 0 ? "Latest" : `−${frame} frame${frame > 1 ? "s" : ""}`);
     return;
   }
 
   syncFrameSliders({ value: radarFrameIndex });
   const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
-  if (mrmsIdx === 0) { labelEl.textContent = "Latest"; return; }
+  if (mrmsIdx === 0) { setFrameTimeLabel("Latest"); return; }
   const key = `${activeMrmsProduct}_${mrmsIdx}`;
-  if (mrmsTimeCache[key]) { labelEl.textContent = mrmsTimeCache[key]; return; }
+  if (mrmsTimeCache[key]) { setFrameTimeLabel(mrmsTimeCache[key]); return; }
   // Placeholder until the frame's metadata arrives with its real valid time.
   // Frames are not published on a fixed cadence, so don't guess minutes.
-  labelEl.textContent = `−${mrmsIdx} frame${mrmsIdx > 1 ? "s" : ""}`;
+  setFrameTimeLabel(`−${mrmsIdx} frame${mrmsIdx > 1 ? "s" : ""}`);
   // Lazily fetch time from metadata
   const cfg = MRMS_PRODUCTS[activeMrmsProduct];
   const capturedIdx = mrmsIdx;
@@ -6655,7 +7038,7 @@ function updateRadarLabel() {
     .then(meta => {
       if (meta.time) {
         mrmsTimeCache[key] = meta.time;
-        if (radarFrames[radarFrameIndex] === capturedIdx) labelEl.textContent = meta.time;
+        if (radarFrames[radarFrameIndex] === capturedIdx) setFrameTimeLabel(meta.time);
       }
     })
     .catch(() => {});
@@ -6811,8 +7194,7 @@ async function addRadarLayer() {
     value: radarFrameIndex,
     disabled: radarFrames.length < 2,
   });
-  const playBtn = document.querySelector("#radarPlayButton");
-  if (playBtn) playBtn.disabled = radarFrames.length < 2;
+  setPlayButtonsEnabled(radarFrames.length >= 2);
 
   const mrmsIdx = radarFrames[radarFrameIndex]; // 0 = latest
   const data = await loadMrmsFrame(mrmsIdx, product).catch(() => null);
@@ -7198,13 +7580,86 @@ const WEATHER_LAYER_ORDER = [
   "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track", "cyclones-points",
 ];
 
+// ── Country / state borders ─────────────────────────────────────────────────
+// Weather layers are inserted beneath the basemap's own boundary and label
+// layers, which is meant to leave borders drawn over the weather. In practice
+// nothing was visible: an opaque MRMS fill or a full-coverage satellite image
+// swallows the basemap's hairline admin lines, and the Dark basemap draws
+// country borders at such low contrast that they disappear under any overlay
+// at all. So the map now carries its own admin lines, styled for legibility
+// over saturated radar colours, mounted at the top of the stack where nothing
+// weather-related can cover them.
+const BOUNDARY_SOURCE_ID = "admin-boundaries";
+const BOUNDARY_LAYER_IDS = ["admin-state-line", "admin-country-line"];
+
+function addBoundaryLayers() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  if (!radarMap.getSource(BOUNDARY_SOURCE_ID)) {
+    radarMap.addSource(BOUNDARY_SOURCE_ID, { type: "vector", url: "mapbox://mapbox.mapbox-streets-v8" });
+  }
+  // Maritime segments are the offshore continuations of a land border; drawing
+  // them puts long straight lines out across open ocean radar returns.
+  const notMaritime = ["!=", ["get", "maritime"], "true"];
+  // Each border feature is published once per worldview; without this filter
+  // every disputed boundary draws two or three times, one per interpretation.
+  const worldview = ["match", ["get", "worldview"], ["all", "US"], true, false];
+
+  if (!radarMap.getLayer("admin-state-line")) {
+    radarMap.addLayer({
+      id: "admin-state-line",
+      type: "line",
+      source: BOUNDARY_SOURCE_ID,
+      "source-layer": "admin",
+      filter: ["all", ["==", ["get", "admin_level"], 1], notMaritime, worldview],
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        "line-color": "rgba(226, 236, 250, 0.62)",
+        "line-dasharray": [3, 2],
+        "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.6, 6, 1, 10, 1.6],
+      },
+    });
+  }
+  if (!radarMap.getLayer("admin-country-line")) {
+    radarMap.addLayer({
+      id: "admin-country-line",
+      type: "line",
+      source: BOUNDARY_SOURCE_ID,
+      "source-layer": "admin",
+      filter: ["all", ["<=", ["get", "admin_level"], 0], notMaritime, worldview],
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        "line-color": "rgba(255, 255, 255, 0.92)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.9, 6, 1.8, 10, 3],
+      },
+    });
+  }
+}
+
+// Weather layers mount beneath the basemap's labels, so they normally land
+// below these. Re-assert it anyway after a batch of layer adds: a basemap with
+// no symbol layers to anchor against would otherwise stack weather on top.
+function raiseBoundaryLayers() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  BOUNDARY_LAYER_IDS.forEach(id => {
+    if (radarMap.getLayer(id)) radarMap.moveLayer(id, boundaryAnchorId());
+  });
+}
+
+// Place names still belong above the borders; everything else does not.
+function boundaryAnchorId() {
+  const layers = radarMap.getStyle()?.layers || [];
+  return layers.find(layer => layer.type === "symbol" && /label|place|poi/.test(layer.id))?.id;
+}
+
 // First basemap boundary or label layer. Weather layers insert beneath it so
 // admin borders and place names always render on top of the weather stack.
 function basemapLabelAnchorId() {
   const layers = radarMap.getStyle()?.layers || [];
   const anchor = layers.find(layer =>
     layer.type === "symbol" || (layer.type === "line" && /admin|boundary/.test(layer.id)));
-  return anchor?.id;
+  // Falling back to our own border layers keeps weather underneath them even
+  // on a basemap that has no labels or admin lines of its own.
+  return anchor?.id || BOUNDARY_LAYER_IDS.find(id => radarMap.getLayer(id));
 }
 
 // Adds a weather layer at its WEATHER_LAYER_ORDER slot: before the next
@@ -7253,8 +7708,7 @@ async function addSatelliteLayer() {
       value: satFrameIndex,
       disabled: satFrames.length < 2,
     });
-    const playBtn = document.querySelector("#radarPlayButton");
-    if (playBtn) playBtn.disabled = satFrames.length < 2;
+    setPlayButtonsEnabled(satFrames.length >= 2);
     updateRadarLabel();
   }
   prewarmSatFrames(); // warp the rest in the background for smooth animation
@@ -8191,6 +8645,9 @@ function drawRadar(relocate = false) {
   initMap();
   if (!radarMap || !mapLoaded) return;
   clearWeatherLayers();
+  // Mounted before the weather so every weather layer has something to anchor
+  // beneath, and re-asserted after the async adds settle.
+  addBoundaryLayers();
 
   if (radarActive)                        addRadarLayer().catch(e => console.warn("Radar unavailable", e));
   if (activeOverlays.has("SPC"))          addSpcLayer().catch(e => console.warn("SPC unavailable", e));
@@ -8204,6 +8661,8 @@ function drawRadar(relocate = false) {
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
+  // The adds above are async; give them a turn to land before restacking.
+  setTimeout(raiseBoundaryLayers, 0);
   radarMap.resize();
   if (relocate) {
     radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 700 });
@@ -8216,8 +8675,7 @@ function animateRadarLayer() {
   const sat = satelliteActive;
   const frames = sat ? satFrames : radarFrames;
   if ((sat ? !satelliteActive : !radarActive) || !frames.length) return;
-  const lbl = document.querySelector("#playLabel");
-  if (lbl) lbl.textContent = "Pause";
+  setPlayingUi(true);
   // Contour frames are a couple of MB each, so they are only bulk-downloaded
   // once the user asks for animation rather than on every visit to the tab.
   if (!sat) prewarmMrmsFrames();
@@ -9047,9 +9505,11 @@ document.querySelector("#metarClearBtn")?.addEventListener("click", async () => 
     else                 setRadarFrame(event.target.value);
   });
 });
-document.querySelector("#radarPlayButton")?.addEventListener("click", () => {
-  if (radarAnimationTimer) stopRadarAnimation();
-  else animateRadarLayer();
+document.querySelectorAll("#radarPlayButton, #mapFramePlayButton").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (radarAnimationTimer) stopRadarAnimation();
+    else animateRadarLayer();
+  });
 });
 document.querySelector("#radarOpacitySlider")?.addEventListener("input", event => {
   setRainfallOpacity(Number(event.target.value));

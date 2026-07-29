@@ -3,23 +3,37 @@
 // Monoline glyph set: rotating sun, drifting cloud silhouette, staggered
 // rain/snow, striking bolt, layered fog, banded sunset, crescent moon with
 // sparkles. Buckets: clearDay, clearNight, partly, overcast, rain, storm,
-// snow, fog, sunset.
+// snow, fog, sunset — plus a "…Night" variant of the cloud-family buckets
+// (partlyNight, rainNight, snowNight, fogNight) that swaps the sun for a
+// crescent moon tucked behind the cloud.
 // ============================================
 
 const WeatherIcons = {
+    // Buckets that have a night twin. Overcast and storm are deliberately not
+    // in here: an overcast or thundering sky hides the moon outright, so the
+    // day glyph is already the honest one.
+    NIGHT_VARIANTS: ["partly", "rain", "snow", "fog"],
+
     // Map free-text NWS/condition strings (+ night/sunset context) to one of
-    // the nine sky buckets the icon and canvas-sky systems both key off of.
+    // the sky buckets the icon and canvas-sky systems both key off of.
     bucketFor(text, isNight, sunset) {
         const t = String(text || "").toLowerCase();
+        const night = b => (isNight && this.NIGHT_VARIANTS.includes(b)) ? `${b}Night` : b;
         if (t.includes("thunder") || t.includes("storm")) return "storm";
-        if (t.includes("snow") || t.includes("sleet") || t.includes("ice") || t.includes("flurr") || t.includes("wintry")) return "snow";
-        if (t.includes("fog") || t.includes("mist") || t.includes("haze")) return "fog";
-        if (t.includes("rain") || t.includes("shower") || t.includes("drizzle")) return "rain";
+        if (t.includes("snow") || t.includes("sleet") || t.includes("ice") || t.includes("flurr") || t.includes("wintry")) return night("snow");
+        if (t.includes("fog") || t.includes("mist") || t.includes("haze")) return night("fog");
+        if (t.includes("rain") || t.includes("shower") || t.includes("drizzle")) return night("rain");
         if (t.includes("partly") || t.includes("mostly clear") || t.includes("mostly sunny")) {
             return sunset ? "sunset" : (isNight ? "clearNight" : "partly");
         }
         if (t.includes("cloud") || t.includes("overcast")) return "overcast";
         return sunset ? "sunset" : (isNight ? "clearNight" : "clearDay");
+    },
+
+    // "rainNight" → "rain". Everything downstream of the switch reasons about
+    // the base weather; only the extra moon depends on the suffix.
+    baseBucket(bucket) {
+        return bucket === "clearNight" ? bucket : String(bucket || "").replace(/Night$/, "");
     },
 
     // Resolve a free-text condition (e.g. NWS shortForecast) to an icon.
@@ -123,12 +137,60 @@ const WeatherIcons = {
 
         const wrap = (inner) => `<svg viewBox="0 0 64 64" width="100%" height="100%" style="display:block;overflow:visible" aria-hidden="true">${inner}</svg>`;
 
+        // One crescent, drawn once and reused. The clear-night icon fills the
+        // whole 64-unit box with it; the cloud-family night icons need a small
+        // copy tucked behind the cloud, so the shape is scaled about its own
+        // circle center (36.2, 31) rather than re-drawn by hand at each size —
+        // hand-fitted crescents were what made the moon in the mist/fog icons
+        // read as a lopsided blob.
+        const MOON = "M40.5 12.5a19 19 0 1 0 12.2 27.9A20.5 20.5 0 0 1 40.5 12.5z";
+        const moonAt = (cx, cy, r, attrs) => {
+            const s = (r / 19).toFixed(4);
+            return `<path d="${MOON}" ${attrs} transform="translate(${cx} ${cy}) scale(${s}) translate(-36.2 -31)"/>`;
+        };
+
+        // Moon + cloud, in that stacking order, with the cloud knocked out of
+        // the moon so the two outlines never cross. `pad` matches the padding
+        // used for the cloud's own silhouette so the gap around the cloud reads
+        // the same as it does around the sun in the daytime "partly" icon.
+        const moonBehindCloud = (mx, my, mr, dx, dy, s = 1, pad = 6, dur = 8) =>
+            mask(uid, cloudSilhouette(dx, dy, s, pad, dur)) +
+            `<g mask="url(#${uid})">${moonAt(mx, my, mr, base)}</g>`;
+
+        // The night twins share their daytime sibling's cloud and precipitation
+        // geometry exactly; only the moon is new.
+        const NIGHT_MOON = { partlyNight: [46, 17, 9], rainNight: [50, 13, 8.5], snowNight: [50, 12, 8.5], fogNight: [52, 12, 8.5] };
+
         switch (bucket) {
+            case "partlyNight":
+            case "rainNight":
+            case "snowNight":
+            case "fogNight": {
+                const [mx, my, mr] = NIGHT_MOON[bucket];
+                // Cloud placement per base bucket, matching the day glyphs below.
+                const cloudPos = { partlyNight: [-2, 5, 1], rainNight: [-2, -3, 1], snowNight: [-2, -4, 1], fogNight: [-2, -10, 0.9] }[bucket];
+                const [dx, dy, cs] = cloudPos;
+                const moon = moonBehindCloud(mx, my, mr, dx, dy, cs);
+                if (bucket === "partlyNight") return wrap(moon + cloud(dx, dy, cs));
+                if (bucket === "rainNight")   return wrap(moon + cloud(dx, dy, cs, 1, 8) + drops(4, 50));
+                if (bucket === "snowNight")   return wrap(moon + cloud(dx, dy, cs, 1, 8) + drops(3, 49, "snow"));
+                // fogNight: the same three drifting fog bars as the day icon,
+                // drawn under the moon-and-cloud pair.
+                let fogLines = "";
+                for (let i = 0; i < 3; i++) {
+                    const x1 = 15 + (i % 2) * 6, x2 = 49 - (i % 2) * 5, y = 45 + i * 6;
+                    fogLines += `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" fill="none" stroke="${soft}" stroke-width="${(sw * 1.05).toFixed(2)}" stroke-linecap="round" opacity="${1 - i * 0.2}"
+                        style="${anim ? `animation:wxDrift ${5 + i * 1.4}s ease-in-out infinite;` : ""}"/>`;
+                }
+                return wrap(moon + cloud(dx, dy, cs, 0.85, 8) + fogLines);
+            }
+        }
+
+        switch (this.baseBucket(bucket)) {
             case "clearDay":
                 return wrap(sun(32, 32, 12));
 
             case "clearNight": {
-                const MOON = "M40.5 12.5a19 19 0 1 0 12.2 27.9A20.5 20.5 0 0 1 40.5 12.5z";
                 const stars = [[15, 18, 2.2], [22, 44, 1.6], [50, 50, 1.9]].map(([x, y, r], i) => `
                     <g style="${anim ? `transform-box:fill-box;transform-origin:center;animation:wxBreathe ${2.6 + i * 0.8}s ease-in-out infinite;` : ""}">
                         <path d="M${x} ${y - r}l${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)} ${(r * 0.58).toFixed(2)} ${(r * 0.42).toFixed(2)}-${(r * 0.58).toFixed(2)} ${(r * 0.42).toFixed(2)}-${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)}-${(r * 0.58).toFixed(2)}-${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)} ${(r * 0.58).toFixed(2)}-${(r * 0.42).toFixed(2)}z" fill="${color}" stroke="none"/>
