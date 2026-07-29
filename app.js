@@ -285,11 +285,11 @@ const SEASONAL_CENTER = [45, 48, 55, 63, 70, 76, 82, 80, 72, 62, 51, 45];
 const FWI = (() => {
   const COMFORT_WINDOW = 8;
   const RATINGS = [
-    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   sentence: "Conditions are excellent for outdoor activities." },
-    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)",  sentence: "Conditions are generally favorable for outdoor activities." },
-    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)",   sentence: "Conditions are marginal; outdoor activities are not recommended." },
-    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)",   sentence: "Conditions are poor; outdoor activities are strongly discouraged." },
-    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)",   sentence: "Conditions are very poor; outdoor activities should be avoided." },
+    { min: 83, label: "Excellent",     color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   sentence: "A great day to be outside." },
+    { min: 65, label: "Good",          color: "#8BC34A", bg: "rgba(139,195,74,0.15)",  sentence: "Pleasant enough for most outdoor plans." },
+    { min: 45, label: "OK",            color: "#FFC107", bg: "rgba(255,193,7,0.18)",   sentence: "Workable outside, but you'll notice it." },
+    { min: 25, label: "Poor",          color: "#FF7043", bg: "rgba(255,112,67,0.2)",   sentence: "Rough going outside — plan around it." },
+    { min:  0, label: "Extremely Poor",color: "#EF5350", bg: "rgba(239,83,80,0.22)",   sentence: "Best day to stay indoors." },
   ];
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -402,7 +402,7 @@ const fallbackWeather = {
 const themePalettes = {
   sunny: {
     gradient: ["#075985", "#1d4ed8", "#0f172a"],
-    status: "NWS live forecast",
+    status: "Live forecast",
   },
   sunset: {
     gradient: ["#4c1d95", "#be185d", "#f59e0b"],
@@ -1656,14 +1656,154 @@ async function alertsPayload(lat, lon) {
   };
 }
 
+// ─── Plain-English forecast writing ─────────────────────────────────────────
+// Everything below turns numbers into the kind of sentence a person would say
+// out loud. The rule of thumb: lead with what someone actually needs to know
+// (do I need a coat, will I get rained on), keep it to one or two short
+// sentences, and never emit a phrase that sounds machine-assembled.
+
 function headlineFor(condition, forecast) {
   const text = condition || forecast?.shortForecast || "Live weather";
   const name = townName();
-  if (/thunder|storm/i.test(text)) return `Storm signals are active around ${name}.`;
-  if (/rain|shower/i.test(text)) return "Showers are shaping the next few hours.";
-  if (/clear|sun|fair/i.test(text)) return "Clean visibility and brighter breaks are leading the local pattern.";
-  if (/cloud|overcast/i.test(text)) return `Layered clouds are muting the sky over ${name}.`;
-  return `${text} conditions are driving the current forecast.`;
+  if (/thunder/i.test(text)) return `Storms are moving through ${name}.`;
+  if (/freezing|sleet/i.test(text)) return "Ice is the thing to watch right now.";
+  if (/snow/i.test(text)) return `Snow is falling over ${name}.`;
+  if (/rain|shower|drizzle/i.test(text)) return "It's wet out there right now.";
+  if (/fog/i.test(text)) return "Fog has settled in — give yourself extra time.";
+  if (/clear|sunny|mainly clear/i.test(text)) return `Clear skies over ${name}.`;
+  if (/partly/i.test(text)) return `A mix of sun and clouds over ${name}.`;
+  if (/cloud|overcast/i.test(text)) return `Grey skies over ${name}.`;
+  return `${text} over ${name} right now.`;
+}
+
+// A word for how a temperature actually feels, used to open a sentence.
+function temperatureFeel(tempF) {
+  if (tempF == null) return null;
+  if (tempF >= 95) return "dangerously hot";
+  if (tempF >= 88) return "hot";
+  if (tempF >= 78) return "warm";
+  if (tempF >= 65) return "mild";
+  if (tempF >= 50) return "cool";
+  if (tempF >= 35) return "chilly";
+  if (tempF >= 20) return "cold";
+  return "bitterly cold";
+}
+
+// Plain-language sky wording, kept deliberately shorter and warmer than the
+// raw WMO description ("Mainly clear" → "mostly sunny").
+function skyPhrase(code, isDaytime = true) {
+  const sun = isDaytime ? "sun" : "clear skies";
+  if (code == null) return null;
+  if (code >= 95) return "thunderstorms";
+  if (code >= 85) return "snow showers";
+  if (code >= 80) return "showers";
+  if (code >= 71 && code <= 77) return "snow";
+  if (code >= 66) return "freezing rain";
+  if (code >= 61) return "rain";
+  if (code >= 56) return "freezing drizzle";
+  if (code >= 51) return "drizzle";
+  if (code >= 45) return "fog";
+  if (code === 3) return "clouds";
+  if (code === 2) return isDaytime ? "a mix of sun and clouds" : "passing clouds";
+  if (code === 1) return isDaytime ? "mostly sun" : "mostly clear skies";
+  return isDaytime ? "full sun" : "clear skies";
+}
+
+// The adjectival form, for openers like "Cloudy and warm, topping out near 82°".
+function skyAdjective(code, isDaytime = true) {
+  if (code == null) return null;
+  if (code >= 45 && code <= 48) return "Foggy";
+  if (code === 3) return "Cloudy";
+  if (code === 2) return isDaytime ? "Partly cloudy" : "Partly clear";
+  if (code === 1) return isDaytime ? "Mostly sunny" : "Mostly clear";
+  if (code === 0) return isDaytime ? "Sunny" : "Clear";
+  return null;
+}
+
+function isWetCode(code) {
+  return code != null && code >= 45 && code !== 48;
+}
+
+// Which part of the day an hour falls in, for "rain moves in by late afternoon".
+function dayPartLabel(date, tz) {
+  const hour = Number(date.toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: tz }));
+  // Phrased to follow a verb cleanly: "rain moves in by afternoon".
+  if (hour < 6) return "before dawn";
+  if (hour < 10) return "by mid-morning";
+  if (hour < 13) return "around midday";
+  if (hour < 16) return "by afternoon";
+  if (hour < 19) return "by late afternoon";
+  if (hour < 23) return "by evening";
+  return "overnight";
+}
+
+function precipNoun(code) {
+  if (code == null) return "rain";
+  if (code >= 95) return "storms";
+  if (code >= 85 || (code >= 71 && code <= 77)) return "snow";
+  if (code >= 66 || code >= 56) return "freezing rain";
+  return "rain";
+}
+
+// Likelihood expressed as a noun phrase — "scattered rain", "a stray shower" —
+// rather than a bare percentage. The exact number is already on the chip below.
+function precipPhrase(pop, noun = "rain") {
+  if (pop == null) return null;
+  if (pop >= 80) return `steady ${noun}`;
+  if (pop >= 60) return `widespread ${noun}`;
+  if (pop >= 40) return `scattered ${noun}`;
+  if (pop >= 20) return noun === "storms" ? "an isolated storm" : `a stray bit of ${noun}`;
+  return null;
+}
+
+// One warm sentence about what the rest of today holds, shown under the
+// current conditions hero. Reads the next several hours rather than repeating
+// the condition already printed right above it.
+// Returns null when the series can't support it (an ECCC feed carries its own
+// hand-written prose, which is better than anything assembled here), so callers
+// can fall back.
+function nowSummary(hours, tz = selectedLocation.timezone) {
+  const all = hours || [];
+  // At night, stop at sunrise rather than running twelve hours into tomorrow —
+  // "clear overnight, climbing to 88°" describes two different days at once.
+  let span = 12;
+  if (all[0] && !all[0].isDaytime) {
+    const dawn = all.findIndex(h => h.isDaytime);
+    if (dawn > 0) span = Math.max(4, Math.min(12, dawn));
+  }
+  const next = all.slice(0, span);
+  if (!next.length || !next.some(h => h.weatherCode != null)) return null;
+
+  const temps = next.map(h => h.temperature).filter(v => v != null);
+  const nowTemp = temps[0];
+  const peak = temps.length ? Math.max(...temps) : null;
+  const trough = temps.length ? Math.min(...temps) : null;
+
+  const parts = [];
+  const wet = next.find(h => isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= 30);
+  if (wet) {
+    const when = dayPartLabel(new Date(wet.startTime), tz);
+    const noun = precipNoun(wet.weatherCode);
+    parts.push(wet === next[0]
+      ? `${noun[0].toUpperCase()}${noun.slice(1)} is falling now and sticks around a while`
+      : `${noun[0].toUpperCase()}${noun.slice(1)} moves in ${when}`);
+  } else {
+    const sky = skyPhrase(dominantWmoCode(next.map(h => h.weatherCode)), next[0].isDaytime);
+    const window = next[0].isDaytime ? "through the rest of the day" : "through the night";
+    parts.push(sky ? `Look for ${sky} ${window}` : `Quiet conditions ${window}`);
+  }
+
+  if (peak != null && nowTemp != null) {
+    if (peak - nowTemp >= 6) parts.push(`temperatures climbing to about ${uTempNum(peak)}${tempUnit()}`);
+    else if (nowTemp - trough >= 8) parts.push(`temperatures easing back toward ${uTempNum(trough)}${tempUnit()}`);
+    else parts.push(`temperatures holding near ${uTempNum(nowTemp)}${tempUnit()}`);
+  }
+
+  const gusts = next.map(h => numericWind(h.windGust)).filter(v => v != null);
+  const peakGust = gusts.length ? Math.max(...gusts) : null;
+  if (peakGust != null && peakGust >= 25) parts.push(`and gusts up to ${fmtWind(peakGust)}`);
+
+  return `${parts.join(", ").replace(/, and /, " and ")}.`;
 }
 
 async function astronomyPayload() {
@@ -1749,31 +1889,233 @@ async function pollenPayload() {
   }).filter(Boolean);
 }
 
+// ─── Forecast series (Open-Meteo) ───────────────────────────────────────────
+// The NWS gridpoint forecast is the hand-edited NDFD grid: it refreshes only a
+// couple of times a day, smooths the ridge-and-valley terrain around Ephrata
+// into a single 2.5 km cell, and its narrative text is written for a whole
+// county at a time. Open-Meteo serves the high-resolution regional runs
+// (HRRR/NBM over the US, ICON-D2 over Europe) for the first two days and blends
+// into the global runs beyond, refreshed hourly, with per-hour precipitation
+// amounts and gusts the NWS periods never carry. Everything downstream still
+// speaks the NWS period shape, so this reshapes one into the other.
+
+const OPEN_METEO_HOURLY_VARS = [
+  "temperature_2m", "apparent_temperature", "relative_humidity_2m", "dew_point_2m",
+  "precipitation_probability", "precipitation", "snowfall", "weather_code",
+  "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "visibility",
+  "cloud_cover", "is_day",
+];
+
+const OPEN_METEO_DAILY_VARS = [
+  "weather_code", "temperature_2m_max", "temperature_2m_min",
+  "apparent_temperature_max", "apparent_temperature_min",
+  "precipitation_probability_max", "precipitation_sum", "snowfall_sum",
+  "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant",
+  "uv_index_max", "relative_humidity_2m_mean", "cloud_cover_mean",
+];
+
+function openMeteoForecastUrl(loc, timezone) {
+  return `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,` +
+    `pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,cloud_cover,is_day` +
+    `&hourly=${OPEN_METEO_HOURLY_VARS.join(",")}` +
+    `&daily=${OPEN_METEO_DAILY_VARS.join(",")}` +
+    `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch` +
+    `&forecast_days=8&timeformat=unixtime&timezone=${timezone ? encodeURIComponent(timezone) : "auto"}`;
+}
+
+// How much a WMO code matters when one has to stand in for a stretch of hours:
+// a thunderstorm hour outranks the six clear ones around it, but codes 0–3 are
+// only sky cover and rank among themselves.
+function wmoSeverity(code) {
+  if (code == null) return -1;
+  if (code >= 95) return 100;          // thunderstorms
+  if (code >= 85) return 90;           // snow showers
+  if (code >= 80) return 70;           // rain showers
+  if (code >= 71 && code <= 77) return 85;  // snow
+  if (code >= 66) return 80;           // freezing rain
+  if (code >= 61) return 65;           // rain
+  if (code >= 56) return 60;           // freezing drizzle
+  if (code >= 51) return 45;           // drizzle
+  if (code >= 45) return 40;           // fog
+  return code;                          // 0–3 sky cover
+}
+
+function dominantWmoCode(codes) {
+  const list = codes.filter(c => c != null);
+  if (!list.length) return null;
+  const counts = new Map();
+  list.forEach(c => counts.set(c, (counts.get(c) || 0) + 1));
+  // Prefer the most significant code that holds for at least two hours, so a
+  // lone outlier hour can't rename the whole period.
+  const sustained = [...counts.keys()].filter(c => counts.get(c) >= 2);
+  const pool = sustained.length ? sustained : [...counts.keys()];
+  const worst = pool.reduce((a, b) => (wmoSeverity(b) > wmoSeverity(a) ? b : a));
+  if (wmoSeverity(worst) > 3) return worst;
+  // Nothing but sky cover across the period: report the sky it mostly had.
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+// Vector mean of wind directions — averaging 350° and 10° arithmetically gives
+// due south, which is exactly backwards.
+function meanWindDirection(degrees) {
+  const list = degrees.filter(d => d != null);
+  if (!list.length) return null;
+  let x = 0, y = 0;
+  for (const deg of list) {
+    const rad = (deg * Math.PI) / 180;
+    x += Math.cos(rad); y += Math.sin(rad);
+  }
+  if (x === 0 && y === 0) return null;
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+// Reshape an Open-Meteo response into the NWS-style { hourly, daily,
+// dailyExtras } trio every renderer already understands. Daily periods are
+// aggregated from the hourly series rather than read off the daily block, so a
+// "Tonight" low is the actual overnight minimum instead of the calendar day's.
+function buildForecastSeries(data, tzHint) {
+  const tz = data.timezone || tzHint || "America/New_York";
+  const offset = data.utc_offset_seconds ?? 0;
+  const hi = data.hourly || {};
+  const di = data.daily || {};
+  const times = hi.time || [];
+  const round = v => (v == null ? null : Math.round(v));
+
+  const nowSec = Date.now() / 1000;
+  let startIdx = times.findIndex(t => t >= nowSec - 3600);
+  if (startIdx < 0) startIdx = 0;
+
+  const hourly = times.slice(startIdx, startIdx + 48).map((t, k) => {
+    const i = startIdx + k;
+    return {
+      startTime: new Date(t * 1000).toISOString(),
+      temperature: round(hi.temperature_2m?.[i]),
+      apparentTemperature: round(hi.apparent_temperature?.[i]),
+      shortForecast: wmoDescription(hi.weather_code?.[i]),
+      weatherCode: hi.weather_code?.[i] ?? null,
+      windSpeed: hi.wind_speed_10m?.[i] != null ? `${Math.round(hi.wind_speed_10m[i])} mph` : null,
+      windGust: hi.wind_gusts_10m?.[i] != null ? `${Math.round(hi.wind_gusts_10m[i])} mph` : null,
+      windDirection: windDirLabel(hi.wind_direction_10m?.[i]),
+      probabilityOfPrecipitation: { value: hi.precipitation_probability?.[i] ?? null },
+      relativeHumidity: { value: hi.relative_humidity_2m?.[i] ?? null },
+      precipAmount: hi.precipitation?.[i] ?? null,
+      snowAmount: hi.snowfall?.[i] ?? null,
+      cloudCover: hi.cloud_cover?.[i] ?? null,
+      visibility: hi.visibility?.[i] ?? null,
+      // Renderers expect NWS-style dewpoint in Celsius
+      dewpoint: { value: hi.dew_point_2m?.[i] != null ? (hi.dew_point_2m[i] - 32) * 5 / 9 : null },
+      isDaytime: hi.is_day?.[i] == null ? true : hi.is_day[i] === 1,
+    };
+  });
+
+  // Bucket every forecast hour into a local daytime (06–18) or nighttime
+  // (18–06, filed under the evening's date) window.
+  const localDayOf = t => Math.floor((t + offset) / 86400);
+  const localHourOf = t => Math.floor(((((t + offset) % 86400) + 86400) % 86400) / 3600);
+  const buckets = new Map();
+  times.forEach((t, i) => {
+    const hour = localHourOf(t);
+    const isDay = hour >= 6 && hour < 18;
+    const key = `${isDay ? localDayOf(t) : (hour < 6 ? localDayOf(t) - 1 : localDayOf(t))}|${isDay ? "d" : "n"}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(i);
+  });
+
+  const pick = (idxs, arr, fn) => {
+    const vals = idxs.map(i => arr?.[i]).filter(v => v != null);
+    return vals.length ? fn(vals) : null;
+  };
+  const sum = (idxs, arr) => idxs.reduce((total, i) => total + (arr?.[i] || 0), 0);
+
+  const dayTimes = (di.time || []).slice(0, 7);
+  const daily = [];
+  dayTimes.forEach((dayStart, index) => {
+    const key = localDayOf(dayStart);
+    const weekday = new Date(dayStart * 1000).toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
+
+    [true, false].forEach(isDaytime => {
+      const idxs = buckets.get(`${key}|${isDaytime ? "d" : "n"}`) || [];
+      const fallbackTemp = isDaytime ? di.temperature_2m_max?.[index] : di.temperature_2m_min?.[index];
+      const temperature = idxs.length
+        ? pick(idxs, hi.temperature_2m, vals => (isDaytime ? Math.max(...vals) : Math.min(...vals)))
+        : fallbackTemp;
+      const code = idxs.length
+        ? dominantWmoCode(idxs.map(i => hi.weather_code?.[i]))
+        : di.weather_code?.[index];
+      const windMax = idxs.length ? pick(idxs, hi.wind_speed_10m, vals => Math.max(...vals)) : di.wind_speed_10m_max?.[index];
+      const gustMax = idxs.length ? pick(idxs, hi.wind_gusts_10m, vals => Math.max(...vals)) : di.wind_gusts_10m_max?.[index];
+      const pop = idxs.length ? pick(idxs, hi.precipitation_probability, vals => Math.max(...vals)) : di.precipitation_probability_max?.[index];
+      const direction = idxs.length
+        ? meanWindDirection(idxs.map(i => hi.wind_direction_10m?.[i]))
+        : di.wind_direction_10m_dominant?.[index];
+
+      daily.push({
+        startTime: new Date((idxs.length ? times[idxs[0]] : dayStart) * 1000).toISOString(),
+        name: index === 0 ? (isDaytime ? "Today" : "Tonight") : (isDaytime ? weekday : `${weekday} Night`),
+        isDaytime,
+        temperature: round(temperature),
+        shortForecast: wmoDescription(code),
+        weatherCode: code ?? null,
+        detailedForecast: "",
+        windSpeed: windMax != null ? `${Math.round(windMax)} mph` : null,
+        windGust: gustMax != null ? `${Math.round(gustMax)} mph` : null,
+        windDirection: windDirLabel(direction),
+        probabilityOfPrecipitation: { value: pop == null ? null : Math.round(pop) },
+        precipAmount: idxs.length ? sum(idxs, hi.precipitation) : (isDaytime ? di.precipitation_sum?.[index] ?? null : null),
+        snowAmount: idxs.length ? sum(idxs, hi.snowfall) : (isDaytime ? di.snowfall_sum?.[index] ?? null : null),
+        cloudCover: idxs.length ? pick(idxs, hi.cloud_cover, vals => vals.reduce((a, b) => a + b, 0) / vals.length) : di.cloud_cover_mean?.[index],
+        humidity: idxs.length ? pick(idxs, hi.relative_humidity_2m, vals => vals.reduce((a, b) => a + b, 0) / vals.length) : di.relative_humidity_2m_mean?.[index],
+        hourIndexes: idxs.map(i => i - startIdx).filter(i => i >= 0 && i < hourly.length),
+      });
+    });
+  });
+
+  return {
+    tz,
+    hourly,
+    daily,
+    dailyExtras: {
+      apparent_temperature_max: di.apparent_temperature_max || [],
+      apparent_temperature_min: di.apparent_temperature_min || [],
+      uv_index_max: di.uv_index_max || [],
+      relative_humidity_2m_mean: di.relative_humidity_2m_mean || [],
+      wind_gusts_10m_max: di.wind_gusts_10m_max || [],
+      cloud_cover_mean: di.cloud_cover_mean || [],
+      precipitation_sum: di.precipitation_sum || [],
+      snowfall_sum: di.snowfall_sum || [],
+    },
+    startIdx,
+  };
+}
+
 async function weatherPayload() {
   const loc = point();
   const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
-  const openMeteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=uv_index,cloud_cover&daily=uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,wind_gusts_10m_max,cloud_cover_mean&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=${encodeURIComponent(selectedLocation.timezone)}`;
-  const [forecast, hourly, stations, alertsData, openMeteo, airQuality, pollen, astronomy, tempest, shore] = await Promise.all([
-    getJson(props.forecast),
-    getJson(props.forecastHourly),
+  // Forecast series comes from Open-Meteo's high-resolution runs; the NWS
+  // pipeline stays on for what it does best — the nearby ASOS/AWOS observation
+  // and the official alerts.
+  const openMeteoUrl = openMeteoForecastUrl(loc, selectedLocation.timezone);
+  const [openMeteo, stations, alertsData, airQuality, pollen, astronomy, tempest, shore] = await Promise.all([
+    getJson(openMeteoUrl),
     getJson(props.observationStations),
     alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
-    getJson(openMeteoUrl).catch(() => null),
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
     pollenPayload().catch(() => null),
     astronomyPayload().catch(() => null),
     usesTempestStation(loc) ? tempestCurrent().catch(() => null) : Promise.resolve(null),
     coastalObservationPayload(loc.lat, loc.lon).catch(() => null),
   ]);
+  const series = buildForecastSeries(openMeteo, selectedLocation.timezone);
   const station = stations.features?.[0];
   const stationId = station?.properties?.stationIdentifier;
   if (!stationId) throw new Error("No NWS observation station found nearby");
   const observation = await getJson(`https://api.weather.gov/stations/${stationId}/observations/latest`);
   const p = observation.properties || {};
-  const firstHour = hourly.properties?.periods?.[0] || {};
-  const firstDay = forecast.properties?.periods?.[0] || {};
+  const firstHour = series.hourly[0] || {};
+  const firstDay = series.daily[0] || {};
   let temp = fahrenheit(propertyValue(observation, "temperature")) ?? firstHour.temperature;
   let dewPoint = fahrenheit(propertyValue(observation, "dewpoint"));
   let wind = mph(propertyValue(observation, "windSpeed")) ?? parseInt(firstHour.windSpeed, 10);
@@ -1837,7 +2179,7 @@ async function weatherPayload() {
       temp,
       condition,
       headline: headlineFor(condition, firstDay),
-      summary: firstDay.detailedForecast || firstHour.shortForecast || condition,
+      summary: nowSummary(series.hourly, series.tz) || firstDay.shortForecast || condition,
       humidity: humidity == null ? null : Math.round(humidity),
       dewPoint,
       wind,
@@ -1855,9 +2197,9 @@ async function weatherPayload() {
       shoreStation: shoreFields.length ? { ...shore.station, fields: shoreFields, milesInlandStation: nwsStationMiles } : null,
       nwsStation: `${stationId}, ${station?.properties?.name || stationId}`,
     },
-    hourly: hourly.properties?.periods || [],
-    daily: forecast.properties?.periods || [],
-    dailyExtras: openMeteo?.daily || {},
+    hourly: series.hourly,
+    daily: series.daily,
+    dailyExtras: series.dailyExtras,
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "NWS",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
@@ -1865,7 +2207,8 @@ async function weatherPayload() {
     sources: [
       tempest ? "Tempest station " + TEMPEST_STATION_ID : null,
       shoreFields.length ? `NOAA CO-OPS ${shore.station.id}` : null,
-      "api.weather.gov", "api.open-meteo.com", "pollen.googleapis.com",
+      "api.open-meteo.com (forecast)", "api.weather.gov (observations + alerts)",
+      "pollen.googleapis.com",
     ].filter(Boolean),
   };
 }
@@ -1875,14 +2218,8 @@ async function weatherPayload() {
 // NWS pipeline fails.
 async function openMeteoWeatherPayload() {
   const loc = point();
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
-    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,cloud_cover` +
-    `&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,cloud_cover` +
-    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max,apparent_temperature_max,apparent_temperature_min,relative_humidity_2m_mean,cloud_cover_mean` +
-    `&temperature_unit=fahrenheit&wind_speed_unit=mph&forecast_days=8&timeformat=unixtime&timezone=auto`;
-  const data = await getJson(url);
+  const data = await getJson(openMeteoForecastUrl(loc, null));
   selectedLocation.timezone = data.timezone || loc.timezone || "America/New_York";
-  const tz = selectedLocation.timezone;
 
   const [alertsData, airQuality, pollen, astronomy] = await Promise.all([
     alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
@@ -1891,46 +2228,9 @@ async function openMeteoWeatherPayload() {
     astronomyPayload().catch(() => null),
   ]);
 
+  const series = buildForecastSeries(data, selectedLocation.timezone);
+  const { hourly, daily, dailyExtras, startIdx } = series;
   const hi = data.hourly || {};
-  const nowSec = Date.now() / 1000;
-  let startIdx = (hi.time || []).findIndex(t => t >= nowSec - 3600);
-  if (startIdx < 0) startIdx = 0;
-  const hourly = (hi.time || []).slice(startIdx, startIdx + 48).map((t, k) => {
-    const i = startIdx + k;
-    return {
-      startTime: new Date(t * 1000).toISOString(),
-      temperature: hi.temperature_2m?.[i] != null ? Math.round(hi.temperature_2m[i]) : null,
-      shortForecast: wmoDescription(hi.weather_code?.[i]),
-      windSpeed: hi.wind_speed_10m?.[i] != null ? `${Math.round(hi.wind_speed_10m[i])} mph` : null,
-      windGust: hi.wind_gusts_10m?.[i] != null ? `${Math.round(hi.wind_gusts_10m[i])} mph` : null,
-      windDirection: windDirLabel(hi.wind_direction_10m?.[i]),
-      probabilityOfPrecipitation: { value: hi.precipitation_probability?.[i] ?? null },
-      relativeHumidity: { value: hi.relative_humidity_2m?.[i] ?? null },
-      cloudCover: hi.cloud_cover?.[i] ?? null,
-      // Renderers expect NWS-style dewpoint in Celsius
-      dewpoint: { value: hi.dew_point_2m?.[i] != null ? (hi.dew_point_2m[i] - 32) * 5 / 9 : null },
-      isDaytime: true,
-    };
-  });
-
-  const di = data.daily || {};
-  const daily = [];
-  (di.time || []).slice(0, 7).forEach((t, i) => {
-    const startTime = new Date(t * 1000).toISOString();
-    const weekday = new Date(t * 1000).toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
-    const base = {
-      startTime,
-      windSpeed: di.wind_speed_10m_max?.[i] != null ? `${Math.round(di.wind_speed_10m_max[i])} mph` : null,
-      windDirection: windDirLabel(di.wind_direction_10m_dominant?.[i]),
-      shortForecast: wmoDescription(di.weather_code?.[i]),
-      detailedForecast: "",
-      probabilityOfPrecipitation: { value: di.precipitation_probability_max?.[i] ?? null },
-    };
-    daily.push({ ...base, name: i === 0 ? "Today" : weekday, isDaytime: true,
-      temperature: di.temperature_2m_max?.[i] != null ? Math.round(di.temperature_2m_max[i]) : null });
-    daily.push({ ...base, name: i === 0 ? "Tonight" : `${weekday} Night`, isDaytime: false,
-      temperature: di.temperature_2m_min?.[i] != null ? Math.round(di.temperature_2m_min[i]) : null });
-  });
 
   const cur = data.current || {};
   const condition = wmoDescription(cur.weather_code);
@@ -1943,7 +2243,7 @@ async function openMeteoWeatherPayload() {
       temp: cur.temperature_2m != null ? Math.round(cur.temperature_2m) : null,
       condition,
       headline: headlineFor(condition, firstDay),
-      summary: firstDay.shortForecast || condition,
+      summary: nowSummary(series.hourly, series.tz) || firstDay.shortForecast || condition,
       humidity: cur.relative_humidity_2m == null ? null : Math.round(cur.relative_humidity_2m),
       dewPoint: cur.dew_point_2m != null ? Math.round(cur.dew_point_2m) : null,
       wind: cur.wind_speed_10m != null ? Math.round(cur.wind_speed_10m) : null,
@@ -1961,14 +2261,7 @@ async function openMeteoWeatherPayload() {
     },
     hourly,
     daily,
-    dailyExtras: {
-      apparent_temperature_max: di.apparent_temperature_max || [],
-      apparent_temperature_min: di.apparent_temperature_min || [],
-      uv_index_max: di.uv_index_max || [],
-      relative_humidity_2m_mean: di.relative_humidity_2m_mean || [],
-      wind_gusts_10m_max: di.wind_gusts_10m_max || [],
-      cloud_cover_mean: di.cloud_cover_mean || [],
-    },
+    dailyExtras,
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "Unavailable",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
@@ -2114,7 +2407,7 @@ async function primaryWeatherPayload() {
   try {
     return await weatherPayload();
   } catch (error) {
-    console.warn("NWS forecast unavailable, falling back to Open-Meteo", error);
+    console.warn("Observation/alert pipeline unavailable, falling back to Open-Meteo only", error);
     return openMeteoWeatherPayload();
   }
 }
@@ -3419,7 +3712,10 @@ function renderCurrent() {
 
   locationName.textContent = selectedLocation.name;
   document.querySelector("#current-title").textContent = current.headline;
-  document.querySelector("#weatherSummary").textContent = current.summary;
+  // Recomputed here rather than read off the payload so switching units
+  // rewrites the numbers inside the sentence too.
+  document.querySelector("#weatherSummary").textContent =
+    nowSummary(weatherState.hourly, selectedLocation.timezone) || current.summary;
   document.querySelector("#currentIcon").innerHTML = WeatherIcons.fromText(current.condition || current.summary || "Partly Cloudy", activeTheme === "midnight", { animated: true, sunset: skyBucket === "sunset" });
   document.querySelector("#currentTemp").textContent = uTempNum(current.temp);
   updateUnitToggleLabel();
@@ -3663,37 +3959,68 @@ function alertPriority(alert) {
   return 100;
 }
 
+// On a phone the alert panel used to push the entire dashboard below the fold:
+// four stacked cards, each carrying a full headline paragraph, the county list
+// and a row of tags. Every one of those details already lives in the alert
+// modal a tap away, so the panel is now a list of single-line rows — event,
+// when it expires, where — and anything past the first two collapses behind a
+// "show more" toggle.
+const ALERT_COLLAPSE_AFTER = 2;
+let alertsExpanded = false;
+
+// "Lancaster, PA; Berks, PA; Lebanon, PA" is three lines on a phone. One area
+// plus a count is enough to know whether it's you.
+function alertAreaShort(areaDesc) {
+  if (!areaDesc) return "";
+  const areas = areaDesc.split(/;\s*/).map(a => a.trim()).filter(Boolean);
+  if (!areas.length) return "";
+  return areas.length > 1 ? `${areas[0]} +${areas.length - 1}` : areas[0];
+}
+
+function alertExpiryLabel(alert) {
+  if (!alert.expires) return "";
+  const expires = new Date(alert.expires);
+  if (Number.isNaN(expires.getTime())) return "";
+  const time = expires.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const sameDay = expires.toDateString() === new Date().toDateString();
+  return sameDay ? `until ${time}` : `until ${expires.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
 function renderAlerts() {
   const alerts = [...(weatherState.alerts || [])].sort((a, b) => alertPriority(b) - alertPriority(a));
   weatherState.alerts = alerts;
   if (!alerts.length) {
     alertsPanel.hidden = true;
     alertsPanel.innerHTML = "";
+    alertsExpanded = false;
     return;
   }
+  const hasMore = alerts.length > ALERT_COLLAPSE_AFTER;
+  const shown = hasMore && !alertsExpanded ? alerts.slice(0, ALERT_COLLAPSE_AFTER) : alerts;
+
   alertsPanel.hidden = false;
   alertsPanel.innerHTML = `
-    <div class="section-head alert-head">
-      <div>
-        <p class="eyebrow">Weather Alerts</p>
-        <h3>${alerts.length} active alert${alerts.length > 1 ? "s" : ""} for ${safeText(selectedLocation.name)}</h3>
-      </div>
-      <span>${safeText(weatherState.alertSource || "NWS api.weather.gov alerts")}</span>
+    <div class="alert-head">
+      <span class="alert-head-count">${alerts.length} active alert${alerts.length > 1 ? "s" : ""}</span>
+      <span class="alert-head-source">${safeText(weatherState.alertSource || "NWS")}</span>
     </div>
     <div class="alert-list">
-      ${alerts.map((alert, index) => `
-        <button class="tile alert-card severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-alert-index="${index}">
-          <div>
-            <p class="eyebrow">${safeText(alert.source || "Alert")}</p>
-            <h3>${safeText(alertDisplayEvent(alert))}</h3>
-            <p>${safeText(alert.headline || alert.description || "Weather alert")}</p>
-            ${alert.areaDesc ? `<small class="alert-area">Areas: ${safeText(alert.areaDesc)}</small>` : ""}
-            <div class="alert-tags">${(alert.tags || []).slice(0, 8).map(tag => `<span>${safeText(tag)}</span>`).join("")}</div>
-          </div>
-          <small>Expires ${alert.expires ? new Date(alert.expires).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--"}</small>
-        </button>
-      `).join("")}
+      ${shown.map((alert, index) => {
+        const meta = [alertExpiryLabel(alert), alertAreaShort(alert.areaDesc)].filter(Boolean).join(" · ");
+        return `
+        <button class="alert-row severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-alert-index="${index}">
+          <span class="alert-row-text">
+            <span class="alert-row-event">${safeText(alertDisplayEvent(alert))}</span>
+            ${meta ? `<span class="alert-row-meta">${safeText(meta)}</span>` : ""}
+          </span>
+          <svg class="alert-row-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
+        </button>`;
+      }).join("")}
     </div>
+    ${hasMore ? `
+      <button class="alert-more" type="button" data-alert-toggle aria-expanded="${alertsExpanded}">
+        ${alertsExpanded ? "Show fewer" : `Show ${alerts.length - ALERT_COLLAPSE_AFTER} more`}
+      </button>` : ""}
   `;
 }
 
@@ -4061,21 +4388,9 @@ function getDailyPairs(all = []) {
   return pairs;
 }
 
-function generateDailySummary(day, precip) {
-  const detailed = (day.detailedForecast || "").trim();
-  const short = day.shortForecast || "";
-
-  if (!detailed) {
-    // Humanize NWS shortForecast jargon into readable text
-    return short
-      .replace(/\bSlight Chance\b/gi, "Slight chance of")
-      .replace(/\bChance\b/gi, "Chance of")
-      .replace(/\bLikely\b/gi, "Likely")
-      .replace(/T-storms/gi, "thunderstorms")
-      .replace(/TSTM/gi, "thunderstorms") || "Forecast details unavailable.";
-  }
-
-  // Extract first 1–2 sentences, skipping pure precipitation-chance/amount lines
+// Trim any leftover provider prose down to a sentence or two, dropping the
+// boilerplate precipitation-accumulation lines nobody reads.
+function condenseProviderText(detailed, fallback) {
   const sentences = detailed
     .split(/\.(?:\s|$)/)
     .map(s => s.trim())
@@ -4089,8 +4404,126 @@ function generateDailySummary(day, precip) {
     parts.push(s);
     if (parts.join(". ").length >= 90 || parts.length >= 2) break;
   }
+  return (parts.join(". ") + (parts.length ? "." : "")).trim() || fallback;
+}
 
-  return (parts.join(". ") + (parts.length ? "." : "")).trim() || short;
+// Writes the one-or-two-sentence blurb on a daily card. Composed from the
+// numbers rather than lifted from a forecast product, so it reads like a person
+// describing the day: what the sky does, how warm it gets, whether you'll get
+// rained on and roughly when, and the overnight low to plan around.
+function generateDailySummary(day, precip, night, options = {}) {
+  if (!day) return "Forecast details unavailable.";
+  // Providers that publish genuinely readable prose (Environment Canada) keep it.
+  const detailed = (day.detailedForecast || "").trim();
+  if (detailed) return condenseProviderText(detailed, day.shortForecast || "");
+  if (day.weatherCode == null) return day.shortForecast || "Forecast details unavailable.";
+
+  const tz = selectedLocation.timezone || "America/New_York";
+  const high = day.temperature;
+  const low = night?.temperature;
+  const pop = precip ?? day.probabilityOfPrecipitation?.value;
+  const sky = skyPhrase(day.weatherCode, true);
+  const adjective = skyAdjective(day.weatherCode, true);
+  const feel = temperatureFeel(high);
+
+  const sentences = [];
+
+  // Opening line: the sky and the high, joined the way you'd say it aloud.
+  if (isWetCode(day.weatherCode)) {
+    const noun = precipNoun(day.weatherCode);
+    const timing = wetSpellTiming(day, tz);
+    const lead = day.weatherCode >= 95
+      ? `Thunderstorms${timing ? ` ${timing}` : ""}`
+      : `${noun[0].toUpperCase()}${noun.slice(1)}${timing ? ` ${timing}` : ""}`;
+    sentences.push(high != null
+      ? `${lead}, with a high near ${uTempNum(high)}${tempUnit()}.`
+      : `${lead}.`);
+  } else if (adjective && high != null) {
+    sentences.push(feel
+      ? `${adjective} and ${feel}, topping out near ${uTempNum(high)}${tempUnit()}.`
+      : `${adjective}, topping out near ${uTempNum(high)}${tempUnit()}.`);
+  } else if (adjective) {
+    sentences.push(`${adjective} through the day.`);
+  } else if (sky) {
+    sentences.push(`${sky[0].toUpperCase()}${sky.slice(1)} through the day.`);
+  }
+
+  // Second line: the things that would change your plans. Everything here is a
+  // noun phrase so it slots into one "Watch for …" frame without the grammar
+  // going sideways when two of them land in the same day.
+  const watchFor = [];
+  if (!isWetCode(day.weatherCode)) {
+    const phrase = precipPhrase(pop, precipNoun(night && isWetCode(night.weatherCode) ? night.weatherCode : day.weatherCode));
+    if (phrase) {
+      const timing = wetSpellTiming(day, tz);
+      watchFor.push(`${phrase}${timing ? ` ${timing}` : ""}`);
+    }
+  }
+  const gust = numericWind(day.windGust);
+  if (gust != null && gust >= 30) watchFor.push(`winds gusting to ${fmtWind(gust)}`);
+  const snow = day.snowAmount;
+  if (snow != null && snow >= 0.5) {
+    const amount = isMetric() ? `${(snow * 2.54).toFixed(0)} cm` : `${snow.toFixed(snow < 2 ? 1 : 0)} in`;
+    watchFor.push(`around ${amount} of snow`);
+  }
+
+  // The day modal prints a dedicated overnight line right below, so the low is
+  // dropped there rather than said twice.
+  const lowClause = low != null && options.includeOvernight !== false
+    ? (low <= 32 ? `a freezing ${uTempNum(low)}${tempUnit()} overnight` : `lows near ${uTempNum(low)}${tempUnit()}`)
+    : null;
+
+  if (watchFor.length) {
+    const joined = watchFor.length > 1
+      ? `${watchFor.slice(0, -1).join(", ")} and ${watchFor[watchFor.length - 1]}`
+      : watchFor[0];
+    sentences.push(`Watch for ${joined}${lowClause ? `, with ${lowClause}` : ""}.`);
+  } else if (lowClause) {
+    sentences.push(`${lowClause[0].toUpperCase()}${lowClause.slice(1)}.`);
+  }
+
+  return sentences.join(" ") || day.shortForecast || "Forecast details unavailable.";
+}
+
+// The overnight companion to generateDailySummary: a low, not a high, and no
+// talk of sun.
+function generateNightSummary(night, precip) {
+  if (!night) return "";
+  const low = night.temperature;
+  const pop = precip ?? night.probabilityOfPrecipitation?.value;
+  const bits = [];
+
+  if (isWetCode(night.weatherCode)) {
+    const noun = precipNoun(night.weatherCode);
+    bits.push(`Overnight ${noun}`);
+  } else {
+    const sky = skyPhrase(night.weatherCode, false);
+    bits.push(sky ? `${sky[0].toUpperCase()}${sky.slice(1)} overnight` : "Quiet overnight");
+  }
+  if (low != null) {
+    bits.push(low <= 32
+      ? `with a cold low of ${uTempNum(low)}${tempUnit()}`
+      : `with a low around ${uTempNum(low)}${tempUnit()}`);
+  }
+  if (!isWetCode(night.weatherCode)) {
+    const phrase = precipPhrase(pop, precipNoun(night.weatherCode));
+    if (phrase) bits.push(`and ${phrase} possible late`);
+  }
+  return `${bits.join(" ")}.`;
+}
+
+// When the wet weather actually shows up during a period — "by late afternoon",
+// "on and off all day" — read off the hourly series backing that period.
+function wetSpellTiming(period, tz) {
+  const hours = weatherState?.hourly || [];
+  const idxs = period.hourIndexes || [];
+  const wet = idxs
+    .map(i => hours[i])
+    .filter(h => h && isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= 30);
+  if (!wet.length) return null;
+  if (wet.length >= Math.max(6, idxs.length * 0.6)) return "on and off through the day";
+  const label = dayPartLabel(new Date(wet[0].startTime), tz);
+  return wet[0] === hours[idxs[0]] ? `to start the day` : `moving in ${label}`;
 }
 
 function renderDaily() {
@@ -4144,7 +4577,7 @@ function renderDaily() {
         <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
       </div>
       <div class="daily-range">${uTempNum(day.temperature)}°<span class="daily-range-low"> / ${night ? uTempNum(night.temperature) : "--"}°</span></div>
-      <p class="daily-summary">${safeText(generateDailySummary(day, precip))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
+      <p class="daily-summary">${safeText(generateDailySummary(day, precip, night))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
       <div class="daily-chip-row">
         <span class="chip-precip">${uiIcon("precip")}${f(precip)}%</span>
         <span>${uiIcon("temp")}Feels ${uTempNum(feelsHigh)}°/${uTempNum(feelsLow)}°</span>
@@ -4307,8 +4740,12 @@ function showDailyDetails(index) {
       <div><strong style="color:${risk.color}">${safeText(risk.title)}</strong><small>${safeText(risk.sub)}</small></div>
     </div>`).join("")}</div>` : "";
 
-  const discussion = [day.detailedForecast, night?.detailedForecast ? `Night: ${night.detailedForecast}` : ""]
-    .filter(Boolean);
+  // With the forecast coming from model output rather than a written product,
+  // the narrative is composed from the day's own numbers.
+  const nightBlurb = night && night.weatherCode != null
+    ? generateNightSummary(night, precipNight)
+    : (night?.detailedForecast ? `Night: ${night.detailedForecast}` : "");
+  const discussion = [generateDailySummary(day, precipDay, night, { includeOvernight: !nightBlurb }), nightBlurb].filter(Boolean);
 
   modalEyebrow.textContent = "Daily Forecast";
   modalTitle.innerHTML = `${weatherIcon(iconForCondition(day.shortForecast), true)}<span>${safeText(day.name || "Forecast")}</span>`;
@@ -8309,6 +8746,11 @@ dailyGrid.addEventListener("click", event => {
   if (card) showDailyDetails(Number(card.dataset.dayIndex));
 });
 alertsPanel.addEventListener("click", event => {
+  if (event.target.closest("[data-alert-toggle]")) {
+    alertsExpanded = !alertsExpanded;
+    renderAlerts();
+    return;
+  }
   const card = event.target.closest("[data-alert-index]");
   if (card) showAlertDetails(Number(card.dataset.alertIndex));
 });
