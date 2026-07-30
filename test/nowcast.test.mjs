@@ -193,7 +193,121 @@ test('detects and damps a weakening tendency', () => {
   assert.equal(result.summary.intensity, 'weakening');
   assert.ok(result.summary.trendDbzPerMinute < 0);
   assert.ok(maximum(result.forecasts.at(-1)) < maximum(result.baseGrid));
-  assert.ok(maximum(result.baseGrid) - maximum(result.forecasts.at(-1)) <= 4.1);
+  // The tendency itself is capped at maxTrendDeltaDbz (4), and the lead-scaled
+  // uncertainty spreading may soften a core by maxSmoothDropDbz (1.5) more.
+  assert.ok(maximum(result.baseGrid) - maximum(result.forecasts.at(-1)) <= 5.6);
+});
+
+test('recovers sub-cell motion so a half-hour lead is not quantised to whole cells', () => {
+  // Six cells of travel in eight minutes is 0.75 cell/min — a rate the integer
+  // block search cannot represent. The sub-cell peak fit has to find it, or the
+  // 30-minute frame lands two cells short.
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 8 * MINUTE);
+  const previous = makeGrid({ time: previousTime });
+  addBlob(previous, 26, 30, 55, 10);
+  addBlob(previous, 70, 50, 47, 8);
+  const latest = translated(previous, 6, 0, 0, latestTime);
+
+  const result = buildReflectivityNowcast(previous, latest, normalOptions(latestTime));
+  assert.equal(result.accepted, true, result.reason);
+  assert.ok(
+    Math.abs(result.summary.dxCellsPerMinute - 0.75) < 0.12,
+    `expected ~0.75 cells/min, got ${result.summary.dxCellsPerMinute}`,
+  );
+  const baseCenter = echoCentroid(result.baseGrid);
+  const plusTwenty = result.forecasts.find((frame) => frame.leadMinutes === 20);
+  const forecastCenter = echoCentroid(plusTwenty);
+  assert.ok(
+    Math.abs((forecastCenter.x - baseCenter.x) - 15) < 2,
+    `expected ~15 cells of travel, got ${forecastCenter.x - baseCenter.x}`,
+  );
+});
+
+test('carries a growing echo outward past the display threshold', () => {
+  // A blob that fades to nothing over several cells, the way a real echo edge
+  // does — a hard-edged disc has no sub-threshold rim for growth to act on.
+  const addFadingBlob = (grid, cx, cy, peak, radius) => {
+    for (let y = Math.max(0, Math.floor(cy - radius)); y <= Math.min(grid.nj - 1, Math.ceil(cy + radius)); y++) {
+      for (let x = Math.max(0, Math.floor(cx - radius)); x <= Math.min(grid.ni - 1, Math.ceil(cx + radius)); x++) {
+        const distance = Math.hypot(x - cx, y - cy);
+        if (distance > radius) continue;
+        const value = peak * (1 - distance / radius);
+        grid.values[y * grid.ni + x] = Math.max(grid.values[y * grid.ni + x], value);
+      }
+    }
+    return grid;
+  };
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 10 * MINUTE);
+  const previous = makeGrid({ time: previousTime });
+  addFadingBlob(previous, 40, 34, 48, 15);
+  addFadingBlob(previous, 86, 52, 44, 12);
+  // The same storms advected the same way, once intensifying and once steady, so
+  // the comparison isolates growth from resampling losses.
+  const growing = buildReflectivityNowcast(
+    previous, translated(previous, 3, 0, 7, latestTime), normalOptions(latestTime),
+  );
+  const steady = buildReflectivityNowcast(
+    previous, translated(previous, 3, 0, 0, latestTime), normalOptions(latestTime),
+  );
+  assert.equal(growing.accepted, true, growing.reason);
+  assert.equal(steady.accepted, true, steady.reason);
+
+  const echoCells = (grid) => grid.values.reduce(
+    (count, value) => (value >= 15 ? count + 1 : count), 0,
+  );
+  assert.ok(
+    echoCells(growing.forecasts.at(-1)) > echoCells(steady.forecasts.at(-1)),
+    'an intensifying storm should not keep exactly its present footprint',
+  );
+  assert.equal(growing.summary.intensity, 'strengthening');
+  // The synthetic pair intensifies without widening, so coverage is unchanged.
+  assert.equal(growing.summary.coverage, 'holding');
+  assert.ok(Math.abs(growing.summary.areaChangePercent) < 8);
+
+  // Widening the same storms instead of brightening them has to show up as a
+  // coverage trend, which a matched-cell dBZ tendency alone cannot see.
+  const spreadingLatest = translated(previous, 3, 0, 0, latestTime);
+  addFadingBlob(spreadingLatest, 43, 34, 48, 19);
+  addFadingBlob(spreadingLatest, 89, 52, 44, 15);
+  const spreading = buildReflectivityNowcast(
+    previous, spreadingLatest, normalOptions(latestTime),
+  );
+  assert.equal(spreading.accepted, true, spreading.reason);
+  assert.equal(spreading.summary.coverage, 'expanding');
+  assert.ok(spreading.summary.areaChangePercent > 8);
+  assert.match(spreading.summary.text, /coverage expanding/);
+});
+
+test('reports a lead range the tracking quality can support', () => {
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 10 * MINUTE);
+  const previous = makeGrid({ time: previousTime });
+  addBlob(previous, 30, 30, 55, 10);
+  addBlob(previous, 74, 52, 48, 8);
+  const latest = translated(previous, 5, 0, 0, latestTime);
+
+  const confident = buildReflectivityNowcast(previous, latest, normalOptions(latestTime));
+  assert.equal(confident.accepted, true, confident.reason);
+  assert.equal(confident.leadsTrimmed, false);
+  assert.deepEqual(confident.leadsMinutes, NOWCAST_LEADS_MINUTES);
+  assert.ok(confident.forecasts.every((frame) => frame.confidence > 0));
+  // Confidence has to decay with lead, or the label means nothing.
+  assert.ok(confident.forecasts.at(-1).confidence < confident.forecasts[0].confidence);
+
+  // Forcing the quality gates above what any real pair could reach must trim the
+  // published range rather than extrapolate on a weak match.
+  const trimmed = buildReflectivityNowcast(previous, latest, {
+    ...normalOptions(latestTime),
+    minQualityFor30Min: 1.01,
+    minQualityFor20Min: 1.02,
+  });
+  assert.equal(trimmed.accepted, true, trimmed.reason);
+  assert.equal(trimmed.leadsTrimmed, true);
+  assert.ok(trimmed.leadsMinutes.length >= 1);
+  assert.ok(trimmed.leadsMinutes.at(-1) <= 20);
+  assert.deepEqual(trimmed.requestedLeadsMinutes, [...NOWCAST_LEADS_MINUTES]);
 });
 
 test('rejects fields without trackable echoes', () => {
