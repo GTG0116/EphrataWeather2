@@ -132,3 +132,34 @@ test('reports an untrackable field as a rejection rather than an error', async (
   assert.equal(posted[0].data.code, 'NO_ECHO');
   assert.ok(posted[0].data.reason);
 });
+
+test('accepts a scan history and reports the second-order fit back to the page', async () => {
+  // The page names the earlier scans; the ones it already holds are passed
+  // inline. Two of them means the growth and motion get a rate of change.
+  const latestMillis = Date.now() - MINUTE;
+  const earliest = makeGrid(latestMillis - 24 * MINUTE);
+  addBlob(earliest, 30, 40, 52, 14);
+  addBlob(earliest, 88, 58, 46, 11);
+  const previous = shifted(earliest, 8, latestMillis - 8 * MINUTE);
+  const latest = shifted(earliest, 14, latestMillis);
+
+  const posted = await runWorker({
+    id: 9,
+    history: [
+      { key: 'earliest', timeMillis: earliest.timeMillis, grid: earliest },
+      { key: 'previous', timeMillis: previous.timeMillis, grid: previous },
+    ],
+    latest,
+    options: { now: latestMillis, minEchoPixels: 10, minGlobalScore: 0.25 },
+  });
+
+  const [{ data: motion }] = posted;
+  assert.equal(motion.type, 'motion');
+  assert.equal(motion.scanCount, 3);
+  assert.equal(motion.secondOrder, true);
+  assert.equal(motion.summary.direction, 'E');
+
+  const forecasts = posted.filter(({ data }) => data.type === 'forecast');
+  assert.equal(forecasts.length, motion.leadsMinutes.length);
+  assert.equal(posted.at(-1).data.type, 'done');
+});

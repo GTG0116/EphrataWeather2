@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
   NOWCAST_LEADS_MINUTES,
+  advectReflectivityGrid,
+  advectReflectivitySeries,
   buildReflectivityNowcast,
+  cropLatLonGrid,
   downsampleReflectivityGrid,
+  prepareReflectivityNowcast,
 } from '../js/nowcast.js';
 import { prepareGridTexture } from '../js/gridLayer.js';
 import { MRMS_PRODUCTS } from '../js/mrms.js';
@@ -193,8 +197,8 @@ test('detects and damps a weakening tendency', () => {
   assert.equal(result.summary.intensity, 'weakening');
   assert.ok(result.summary.trendDbzPerMinute < 0);
   assert.ok(maximum(result.forecasts.at(-1)) < maximum(result.baseGrid));
-  // The tendency itself is capped at maxTrendDeltaDbz (4), and the lead-scaled
-  // uncertainty spreading may soften a core by maxSmoothDropDbz (1.5) more.
+  // The tendency itself is capped at maxTrendDeltaDbz (4); probability matching
+  // holds the rest of the drop to what resampling and damping cost the peak.
   assert.ok(maximum(result.baseGrid) - maximum(result.forecasts.at(-1)) <= 5.6);
 });
 
@@ -345,4 +349,155 @@ test('rejects irregular and stale scan times', () => {
   );
   assert.equal(staleResult.accepted, false);
   assert.equal(staleResult.code, 'STALE_INPUT');
+});
+
+test('covers the whole MRMS domain rather than a window inside it', () => {
+  // The nowcast asks for all of CONUS and lets the crop clamp to the source, so
+  // a build is valid wherever the map is panned instead of only where it was.
+  const grid = makeGrid({ width: 700, height: 350, di: 0.1, dj: 0.1 });
+  grid.lon1 = -129.995;
+  grid.lat1 = 54.995;
+  addBlob(grid, 40, 40, 52, 8);      // far west
+  addBlob(grid, 660, 300, 48, 8);    // far southeast
+  const domain = { west: -130, east: -60, south: 20, north: 55 };
+  const cropped = cropLatLonGrid(grid, domain, { maxWidth: 350, maxHeight: 175 });
+
+  assert.equal(cropped.downsampleFactor, 2);
+  assert.equal(cropped.ni, 350);
+  assert.equal(cropped.nj, 175);
+  // Both corners survive, so nothing in the domain was cropped away.
+  assert.equal(maximum(cropped), 52);
+  assert.ok(cropped.values[20 * cropped.ni + 20] > 15, 'the western storm is missing');
+  assert.ok(cropped.values[150 * cropped.ni + 330] > 15, 'the southeastern storm is missing');
+  // The reduced grid still spans the source, west edge to east edge.
+  assert.ok(Math.abs(cropped.lon1 - (grid.lon1 + grid.di / 2)) < 1e-6);
+  const east = cropped.lon1 + (cropped.ni - 1) * cropped.di;
+  assert.ok(east > grid.lon1 + (grid.ni - 1) * grid.di - cropped.di);
+});
+
+test('probability matching keeps peak intensity through the scale damping', () => {
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 8 * MINUTE);
+  const previous = makeGrid({ width: 200, height: 120, time: previousTime });
+  addBlob(previous, 60, 60, 62, 9);
+  addBlob(previous, 120, 45, 58, 7);
+  addBlob(previous, 95, 85, 54, 6);
+  const latest = translated(previous, 5, 0, 0, latestTime);
+
+  const options = { ...normalOptions(latestTime), maxWidth: 200, maxHeight: 120 };
+  const matched = buildReflectivityNowcast(previous, latest, options);
+  const unmatched = buildReflectivityNowcast(previous, latest, {
+    ...options,
+    probabilityMatch: false,
+  });
+  assert.equal(matched.accepted, true, matched.reason);
+  assert.equal(unmatched.accepted, true, unmatched.reason);
+
+  const observedPeak = maximum(matched.baseGrid);
+  const matchedPeak = maximum(matched.forecasts.at(-1));
+  const unmatchedPeak = maximum(unmatched.forecasts.at(-1));
+  // Damping alone flattens the core; rank-matching puts it back.
+  assert.ok(
+    unmatchedPeak < observedPeak - 1,
+    `expected damping to flatten the core, got ${unmatchedPeak} vs ${observedPeak}`,
+  );
+  assert.ok(
+    matchedPeak > unmatchedPeak,
+    `matching should recover intensity: ${matchedPeak} vs ${unmatchedPeak}`,
+  );
+  assert.ok(
+    Math.abs(matchedPeak - observedPeak) < Math.abs(unmatchedPeak - observedPeak),
+    'the matched peak should sit closer to the observed peak',
+  );
+  // Matching moves values, never cells: it must not invent echo out of nothing.
+  const finite = (grid) => grid.values.reduce(
+    (count, value) => (Number.isFinite(value) ? count + 1 : count), 0,
+  );
+  assert.equal(finite(matched.forecasts.at(-1)), finite(unmatched.forecasts.at(-1)));
+});
+
+test('a third scan follows an accelerating storm the two-scan estimate undershoots', () => {
+  // Constant acceleration: 0.02 cells/min² on top of 0.42 cells/min. Two scans
+  // can only ever measure the average speed between them and project it
+  // straight; three give the curve.
+  const latestTime = new Date(Date.now() - MINUTE);
+  const at = (minutes) => new Date(latestTime.getTime() + minutes * MINUTE);
+  const position = (minutes) => 60 + 0.5 * minutes + 0.5 * 0.02 * minutes * minutes;
+
+  const scan = (minutes) => {
+    const grid = makeGrid({ width: 220, height: 120, time: at(minutes) });
+    const shift = position(minutes) - position(0);
+    addBlob(grid, 60 + shift, 55, 56, 10);
+    addBlob(grid, 120 + shift, 82, 49, 8);
+    addBlob(grid, 155 + shift, 38, 45, 7);
+    return grid;
+  };
+  const earliest = scan(-24);
+  const previous = scan(-8);
+  const latest = scan(0);
+  const options = {
+    ...normalOptions(latestTime), maxWidth: 220, maxHeight: 120, leadsMinutes: [30],
+  };
+
+  const twoScan = buildReflectivityNowcast(previous, latest, options);
+  const threeScan = buildReflectivityNowcast([earliest, previous], latest, options);
+  assert.equal(twoScan.accepted, true, twoScan.reason);
+  assert.equal(threeScan.accepted, true, threeScan.reason);
+  assert.equal(twoScan.scanCount, 2);
+  assert.equal(twoScan.secondOrder, false);
+  assert.equal(threeScan.scanCount, 3);
+  assert.equal(threeScan.secondOrder, true);
+
+  const truth = position(30) - position(0);
+  const base = echoCentroid(twoScan.baseGrid).x;
+  const twoScanTravel = echoCentroid(twoScan.forecasts.at(-1)).x - base;
+  const threeScanTravel = echoCentroid(threeScan.forecasts.at(-1)).x - base;
+
+  assert.ok(
+    twoScanTravel < truth - 5,
+    `a straight projection should fall short of ${truth}, got ${twoScanTravel}`,
+  );
+  assert.ok(
+    threeScanTravel > twoScanTravel,
+    `expected the curve to carry further: ${threeScanTravel} vs ${twoScanTravel}`,
+  );
+  assert.ok(
+    Math.abs(threeScanTravel - truth) < Math.abs(twoScanTravel - truth),
+    `expected ${threeScanTravel} to sit closer to ${truth} than ${twoScanTravel}`,
+  );
+  // The acceleration is bounded: it may bend the projection, never invert it.
+  assert.ok(threeScanTravel < truth * 1.5);
+});
+
+test('a lead advected in a series matches the same lead advected alone', () => {
+  // Every frame rides one shared set of trajectories, so the series has to agree
+  // with a standalone advection rather than drifting from it.
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 8 * MINUTE);
+  const previous = makeGrid({ width: 160, height: 110, time: previousTime });
+  addBlob(previous, 45, 40, 55, 11);
+  addBlob(previous, 100, 70, 47, 9);
+  const latest = translated(previous, 5, 2, 0, latestTime);
+
+  const prepared = prepareReflectivityNowcast(previous, latest, {
+    ...normalOptions(latestTime), maxWidth: 160, maxHeight: 110,
+  });
+  assert.equal(prepared.accepted, true, prepared.reason);
+
+  const series = advectReflectivitySeries(
+    prepared.baseGrid, prepared.motion, [5, 15, 30], prepared.config,
+  );
+  assert.deepEqual(series.map((frame) => frame.leadMinutes), [5, 15, 30]);
+  for (const frame of series) {
+    const alone = advectReflectivityGrid(
+      prepared.baseGrid, prepared.motion, frame.leadMinutes, prepared.config,
+    );
+    assert.equal(frame.values.length, alone.values.length);
+    for (let i = 0; i < frame.values.length; i++) {
+      const a = frame.values[i];
+      const b = alone.values[i];
+      assert.equal(Number.isFinite(a), Number.isFinite(b));
+      if (Number.isFinite(a)) assert.ok(Math.abs(a - b) < 1e-4);
+    }
+  }
 });

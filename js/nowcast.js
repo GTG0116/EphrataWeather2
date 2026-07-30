@@ -2,17 +2,25 @@
 //
 // This module deliberately implements a conservative radar advection nowcast,
 // not a numerical-weather or machine-learning forecast. It:
-//   1. reduces two same-geometry latitude/longitude reflectivity grids,
+//   1. reduces two or three same-geometry latitude/longitude reflectivity grids,
 //   2. estimates an old -> new displacement globally and in local tiles, refined
 //      to sub-cell accuracy so a 30-minute lead is not quantised to whole cells,
-//   3. carries the latest field forward along multi-step semi-Lagrangian
-//      trajectories, so curving and diverging flow is followed rather than
-//      approximated by one straight jump,
-//   4. applies a damped, trajectory-integrated intensity tendency that may also
-//      grow or erode the echo edge, and
-//   5. spreads the field by the distance the motion estimate itself could be
-//      wrong, so an uncertain nowcast reads as a soft envelope and a confident
-//      one stays sharp.
+//   3. fits growth/decay — and, given a third scan, the *rate of change* of that
+//      growth/decay plus a first-order motion acceleration — per tile,
+//   4. carries the latest field forward along multi-step semi-Lagrangian
+//      trajectories shared by every lead, so curving and accelerating flow is
+//      followed rather than approximated by one straight jump,
+//   5. damps the result by spatial scale rather than uniformly, because small
+//      scales lose their skill in minutes while the large-scale pattern survives
+//      the whole window, and
+//   6. restores the observed intensity distribution by probability matching, so
+//      that damping softens *where* the rain is without washing out *how hard*
+//      it is falling.
+//
+// Steps 5 and 6 are what separate this from plain Lagrangian persistence: a
+// smoothed field verifies better in position but badly under-forecasts peak
+// rates, and rank-matching it back onto the observed histogram recovers those
+// rates without giving up the smoothing's placement skill.
 //
 // All exported functions are pure and work in browsers and Node. Grid rows are
 // expected to run north -> south, matching the objects returned by grib2.js:
@@ -53,15 +61,45 @@ const DEFAULTS = Object.freeze({
   // reach. Without this an intensifying line can never expand its coverage,
   // because only cells that already hold an echo are adjusted.
   growthEdgeDbz: 8,
-  // Position error grows with lead time and shrinks with tracking quality. The
-  // forecast is blended toward a field blurred over that distance, which is how
-  // an uncertain nowcast should look: a spread-out envelope, not a crisp lie.
+  // Position error grows with lead time and shrinks with tracking quality. It
+  // sets the length scale the field is damped over, which is how an uncertain
+  // nowcast should look: a spread-out envelope, not a crisp lie.
   uncertaintyKmPerHour: 9,
   maxSmoothRadiusCells: 4,
-  maxSmoothBlend: 0.55,
-  // The blend may soften a core, but never by more than this, so a storm's peak
-  // intensity stays readable at every lead.
-  maxSmoothDropDbz: 1.5,
+  // Scale-dependent Lagrangian persistence. Convective detail decorrelates in
+  // minutes; the meso-scale envelope holds for the better part of an hour; the
+  // large-scale pattern is essentially persistent over a 30-minute window. Each
+  // band is damped toward the next larger one on its own timescale instead of
+  // the whole field being blurred by one radius.
+  smallScaleTauMinutes: 13,
+  mesoScaleTauMinutes: 55,
+  // Damping alone leaves the field in the right place with the wrong numbers.
+  // Rank-matching it back onto the undamped field's histogram restores observed
+  // peak intensities — without this a 30-minute frame under-forecasts heavy
+  // rain everywhere it smooths.
+  probabilityMatch: true,
+  probabilityMatchBinDbz: 0.5,
+  // Given a third scan: how fast the growth/decay tendency is itself allowed to
+  // change, and how much of the measured motion acceleration is trusted.
+  maxTrendRateDbzPerMinute2: 0.025,
+  // A second difference is signal proportional to the baseline it was measured
+  // over, divided by a noise that does not shrink with it. So the fraction of
+  // the measured acceleration worth believing is the Wiener weight
+  // gap² / (gap² + accelBaselineMinutes²) — near a third when two touching
+  // 8-minute intervals are all there is, and most of it once the two velocities
+  // are a quarter of an hour apart. Calibrated against synthetic storms on a
+  // known accelerating flow.
+  accelBaselineMinutes: 6.5,
+  maxAccelDampen: 0.9,
+  // The acceleration correction may never rewrite more than this fraction of a
+  // parcel's steady-flow displacement, so a noisy third scan cannot fling an
+  // echo somewhere the two-scan estimate would never have put it.
+  maxAccelDisplacementFraction: 0.4,
+  // Trajectories are integrated on a coarse lattice and the resulting
+  // displacement field is interpolated to full resolution. Displacements vary on
+  // the motion field's tile scale (tens of cells), so this is exact to well
+  // under a cell while making a CONUS-wide advection affordable.
+  trajectoryLatticeStep: 4,
   // Leads are trimmed when the tracking quality cannot support them.
   minQualityFor30Min: 0.50,
   minQualityFor20Min: 0.36,
@@ -546,6 +584,102 @@ function tileTrend(
   return { trend: ((bin / 2) - 20) / intervalMinutes, count, areaTrend };
 }
 
+// Replace every tile with the median of its 3x3 neighbourhood.
+function medianSmoothTiles(values, columns, rows) {
+  const output = new Float32Array(values.length);
+  const window = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < columns; x++) {
+      window.length = 0;
+      for (let oy = -1; oy <= 1; oy++) {
+        const ny = y + oy;
+        if (ny < 0 || ny >= rows) continue;
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = x + ox;
+          if (nx < 0 || nx >= columns) continue;
+          window.push(values[ny * columns + nx]);
+        }
+      }
+      output[y * columns + x] = median(window);
+    }
+  }
+  return output;
+}
+
+// Second differences across three scans: how fast each tile's motion and its
+// growth/decay tendency are themselves changing. `prior` describes the earlier
+// interval and must share this field's tile layout, which it does whenever both
+// estimates ran on the same cropped geometry.
+//
+// The two velocity estimates are also a free consistency check: tiles where they
+// disagree by more than the search could resolve are tiles whose vector is noise,
+// so their acceleration is dropped and their confidence cut.
+function deriveSecondOrder(field, prior, intervalMinutes, config) {
+  if (
+    !prior ||
+    prior.columns !== field.columns ||
+    prior.rows !== field.rows
+  ) return;
+
+  const length = field.columns * field.rows;
+  // Each velocity describes the middle of the interval it was measured over, so
+  // the two are separated by the distance between those midpoints — not by an
+  // interval length. Measuring the earlier one further back lengthens this
+  // baseline, and a second difference of two block searches needs all the
+  // baseline it can get to rise above its own noise.
+  const gapMinutes = Number(prior.midpointBeforeLatestMinutes) - intervalMinutes / 2;
+  if (!(gapMinutes > 0)) return;
+  const dampen = Math.min(
+    config.maxAccelDampen,
+    (gapMinutes * gapMinutes) /
+      (gapMinutes * gapMinutes + config.accelBaselineMinutes ** 2),
+  );
+  const ax = new Float32Array(length);
+  const ay = new Float32Array(length);
+  const trendRate = new Float32Array(length);
+  // A vector that moved by more than this between the two intervals is not an
+  // accelerating storm, it is a mismatched block.
+  const allowedDrift = Math.max(0.35, (field.searchRadius || 4) / intervalMinutes);
+
+  for (let i = 0; i < length; i++) {
+    const dvx = field.dxPerMinute[i] - prior.dxPerMinute[i];
+    const dvy = field.dyPerMinute[i] - prior.dyPerMinute[i];
+    const drift = Math.hypot(dvx, dvy);
+    if (drift > allowedDrift) {
+      field.confidence[i] *= 0.8;
+      continue;
+    }
+    ax[i] = (dvx / gapMinutes) * dampen;
+    ay[i] = (dvy / gapMinutes) * dampen;
+    // Both intervals agreeing on the motion is real corroboration; a tile that
+    // survives it has earned a little more trust than one scan pair can justify.
+    field.confidence[i] = clamp(
+      field.confidence[i] * (1 + 0.18 * (1 - drift / allowedDrift)), 0, 1,
+    );
+    // The same second-difference shrinkage: whether a storm's growth is itself
+    // accelerating is exactly as hard to measure as whether its motion is.
+    trendRate[i] = clamp(
+      ((field.trendDbzPerMinute[i] - prior.trendDbzPerMinute[i]) / gapMinutes) * dampen,
+      -config.maxTrendRateDbzPerMinute2,
+      config.maxTrendRateDbzPerMinute2,
+    );
+  }
+
+  // A second difference of two block searches is a noisy quantity — noisy
+  // enough that trusting it tile by tile is worse than ignoring it. Taking the
+  // neighbourhood median first keeps the part that is coherent across a storm,
+  // which is the part that is real, and discards the per-tile jitter.
+  field.axPerMinute2 = medianSmoothTiles(ax, field.columns, field.rows);
+  field.ayPerMinute2 = medianSmoothTiles(ay, field.columns, field.rows);
+  field.trendRateDbzPerMinute2 = medianSmoothTiles(trendRate, field.columns, field.rows);
+  field.accelBaselineMinutes = gapMinutes;
+  field.accelDampen = dampen;
+  // Every tendency is centred on the midpoint of the interval it was measured
+  // over, not on the latest scan, so extrapolating forward starts half an
+  // interval already elapsed.
+  field.baseOffsetMinutes = intervalMinutes / 2;
+}
+
 function localMotionField(
   previousGrid,
   latestGrid,
@@ -715,6 +849,8 @@ function localMotionField(
     rows,
     stride,
     tileSize,
+    searchRadius: radius,
+    intervalMinutes,
     dxPerMinute: smoothDx,
     dyPerMinute: smoothDy,
     trendDbzPerMinute: smoothTrend,
@@ -722,6 +858,11 @@ function localMotionField(
     confidence: smoothConfidence,
     accepted,
     sampleCounts,
+    // Filled in by deriveSecondOrder when a third scan is available.
+    axPerMinute2: null,
+    ayPerMinute2: null,
+    trendRateDbzPerMinute2: null,
+    baseOffsetMinutes: 0,
   };
 }
 
@@ -742,25 +883,21 @@ function sampleField(field, array, x, y) {
     (c * (1 - fx) + d * fx) * fy;
 }
 
-// Just the velocity, for the many samples a multi-step trajectory takes. The
-// tendency fields are read once per cell, at the trajectory's origin.
-function sampleFlow(field, x, y) {
-  return {
-    dxPerMinute: sampleField(field, field.dxPerMinute, x, y),
-    dyPerMinute: sampleField(field, field.dyPerMinute, x, y),
-  };
-}
-
-function sampleMotion(field, x, y) {
-  return {
-    dxPerMinute: sampleField(field, field.dxPerMinute, x, y),
-    dyPerMinute: sampleField(field, field.dyPerMinute, x, y),
-    trendDbzPerMinute: sampleField(field, field.trendDbzPerMinute, x, y),
-    areaTrendPerMinute: field.areaTrendPerMinute
-      ? sampleField(field, field.areaTrendPerMinute, x, y)
-      : 0,
-    confidence: sampleField(field, field.confidence, x, y),
-  };
+// Bilinear read of a regular lattice laid over the grid every `step` cells. The
+// trajectory integration runs on such a lattice rather than per cell.
+function latticeSample(array, columns, rows, step, x, y) {
+  const gx = clamp(x / step, 0, columns - 1);
+  const gy = clamp(y / step, 0, rows - 1);
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const x1 = Math.min(columns - 1, x0 + 1);
+  const y1 = Math.min(rows - 1, y0 + 1);
+  const fx = gx - x0;
+  const fy = gy - y0;
+  const top = y0 * columns;
+  const bottom = y1 * columns;
+  return (array[top + x0] * (1 - fx) + array[top + x1] * fx) * (1 - fy) +
+    (array[bottom + x0] * (1 - fx) + array[bottom + x1] * fx) * fy;
 }
 
 function bilinearFinite(values, width, height, x, y) {
@@ -1034,11 +1171,13 @@ export function estimateReflectivityMotion(previousGrid, latestGrid, options = {
     intervalMinutes,
     config,
   );
+  deriveSecondOrder(field, options.priorField, intervalMinutes, config);
   const dominant = dominantSummary(field, latestGrid, intervalMinutes, global);
 
   return {
     accepted: true,
     intervalMinutes,
+    secondOrder: Boolean(field.axPerMinute2),
     global: {
       dxCells: global.dxSub,
       dyCells: global.dySub,
@@ -1059,61 +1198,144 @@ export function estimateReflectivityMotion(previousGrid, latestGrid, options = {
 
 // Mean of the finite samples within `radius` cells, ignoring holes and treating
 // deep "no coverage" codes as a floor so they cannot drag an echo edge down.
+//
+// Running prefix sums make this cost the same whatever the radius, which matters
+// because the scale decomposition below blurs the whole domain several times per
+// forecast lead.
 function boxBlurNaN(input, width, height, radius, floorValue) {
   const horizontal = new Float32Array(input.length);
   const output = new Float32Array(input.length);
+  const sums = new Float64Array(Math.max(width, height) + 1);
+  const counts = new Int32Array(Math.max(width, height) + 1);
+
   for (let y = 0; y < height; y++) {
     const row = y * width;
+    sums[0] = 0;
+    counts[0] = 0;
     for (let x = 0; x < width; x++) {
-      let sum = 0;
-      let count = 0;
-      const from = Math.max(0, x - radius);
-      const to = Math.min(width - 1, x + radius);
-      for (let sx = from; sx <= to; sx++) {
-        const sample = input[row + sx];
-        if (!Number.isFinite(sample)) continue;
-        sum += sample < floorValue ? floorValue : sample;
-        count++;
-      }
-      horizontal[row + x] = count ? sum / count : NaN;
+      const sample = input[row + x];
+      const usable = Number.isFinite(sample);
+      sums[x + 1] = sums[x] + (usable ? (sample < floorValue ? floorValue : sample) : 0);
+      counts[x + 1] = counts[x] + (usable ? 1 : 0);
+    }
+    for (let x = 0; x < width; x++) {
+      const from = x - radius > 0 ? x - radius : 0;
+      const to = x + radius < width - 1 ? x + radius : width - 1;
+      const count = counts[to + 1] - counts[from];
+      horizontal[row + x] = count ? (sums[to + 1] - sums[from]) / count : NaN;
     }
   }
-  for (let y = 0; y < height; y++) {
-    const row = y * width;
-    const from = Math.max(0, y - radius);
-    const to = Math.min(height - 1, y + radius);
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      let count = 0;
-      for (let sy = from; sy <= to; sy++) {
-        const sample = horizontal[sy * width + x];
-        if (!Number.isFinite(sample)) continue;
-        sum += sample;
-        count++;
-      }
-      output[row + x] = count ? sum / count : NaN;
+
+  for (let x = 0; x < width; x++) {
+    sums[0] = 0;
+    counts[0] = 0;
+    for (let y = 0; y < height; y++) {
+      const sample = horizontal[y * width + x];
+      const usable = Number.isFinite(sample);
+      sums[y + 1] = sums[y] + (usable ? sample : 0);
+      counts[y + 1] = counts[y] + (usable ? 1 : 0);
+    }
+    for (let y = 0; y < height; y++) {
+      const from = y - radius > 0 ? y - radius : 0;
+      const to = y + radius < height - 1 ? y + radius : height - 1;
+      const count = counts[to + 1] - counts[from];
+      output[y * width + x] = count ? (sums[to + 1] - sums[from]) / count : NaN;
     }
   }
   return output;
 }
 
-// Blend the forecast toward a version of itself blurred over the distance the
-// motion estimate could plausibly be wrong by this lead. Cells that had no data
-// keep none, and a core is never dimmed by more than `maxSmoothDropDbz`, so the
-// spreading softens edges and fills the space a storm might occupy instead of
-// washing the whole field out.
-function spreadByUncertainty(values, width, height, radius, blend, config) {
-  if (radius < 1 || blend <= 0.01) return values;
+// Damp the forecast by spatial scale instead of blurring it uniformly.
+//
+// Extrapolation skill is not one number: the large-scale rain pattern is very
+// nearly persistent over half an hour, the meso-scale envelope holds for tens of
+// minutes, and individual convective cells are unrecognisable after ten. Splitting
+// the field into those three bands and shrinking each toward the next larger one
+// on its own timescale reproduces that, so a 30-minute frame keeps the shape of
+// the system while giving up the cell-by-cell detail it genuinely cannot know.
+// The band widths come from the position error, so a well-tracked field is cut
+// far less than a marginal one.
+function dampenByScale(values, width, height, leadMinutes, radius, quality, config) {
+  if (radius < 1) return values;
   const floorValue = config.echoThreshold - 15;
-  const blurred = boxBlurNaN(values, width, height, radius, floorValue);
+  const meso = boxBlurNaN(values, width, height, radius, floorValue);
+  const large = boxBlurNaN(meso, width, height, radius * 3, floorValue);
+  // Confidence stretches both timescales rather than changing the shape of the
+  // decay: tracking a storm well means its detail stays believable for longer.
+  const stretch = 0.55 + 0.9 * quality;
+  const smallWeight = Math.exp(-leadMinutes / (config.smallScaleTauMinutes * stretch));
+  const mesoWeight = Math.exp(-leadMinutes / (config.mesoScaleTauMinutes * stretch));
   for (let i = 0; i < values.length; i++) {
     const value = values[i];
-    const smooth = blurred[i];
-    if (!Number.isFinite(value) || !Number.isFinite(smooth)) continue;
-    const mixed = value * (1 - blend) + smooth * blend;
-    values[i] = mixed < value - config.maxSmoothDropDbz
-      ? value - config.maxSmoothDropDbz
-      : mixed;
+    const middle = meso[i];
+    const broad = large[i];
+    if (!Number.isFinite(value) || !Number.isFinite(middle) || !Number.isFinite(broad)) {
+      continue;
+    }
+    values[i] = broad + (middle - broad) * mesoWeight + (value - middle) * smallWeight;
+  }
+  return values;
+}
+
+const MATCH_FLOOR_DBZ = -35;
+const MATCH_CEILING_DBZ = 100;
+
+// Rank-match `values` onto the distribution of `reference` (the same forecast
+// before it was damped).
+//
+// Damping is what puts the rain in a defensible *place*; on its own it also
+// flattens every peak, which is why smoothed nowcasts chronically under-forecast
+// heavy rain. Because the damping is monotone-ish but not intensity-preserving,
+// re-imposing the undamped histogram by rank restores real 50-60 dBZ cores — and
+// with them realistic rain rates — without moving anything.
+function matchDistribution(values, reference, config) {
+  const binSize = Math.max(0.1, config.probabilityMatchBinDbz);
+  const bins = Math.ceil((MATCH_CEILING_DBZ - MATCH_FLOOR_DBZ) / binSize) + 1;
+  const binOf = (value) =>
+    clamp(Math.round((value - MATCH_FLOOR_DBZ) / binSize), 0, bins - 1);
+
+  const sourceHistogram = new Uint32Array(bins);
+  const targetHistogram = new Uint32Array(bins);
+  let sourceCount = 0;
+  let targetCount = 0;
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (Number.isFinite(value)) { sourceHistogram[binOf(value)]++; sourceCount++; }
+    const target = reference[i];
+    if (Number.isFinite(target)) { targetHistogram[binOf(target)]++; targetCount++; }
+  }
+  if (!sourceCount || !targetCount) return values;
+
+  // Walk both cumulative distributions once, so bin b of the forecast takes the
+  // value standing at the same rank in the reference.
+  const lookup = new Float32Array(bins);
+  let targetBin = 0;
+  let targetBelow = 0;
+  let sourceBelow = 0;
+  for (let bin = 0; bin < bins; bin++) {
+    const population = sourceHistogram[bin];
+    if (!population) {
+      lookup[bin] = MATCH_FLOOR_DBZ + bin * binSize;
+      continue;
+    }
+    const wanted = ((sourceBelow + population / 2) / sourceCount) * targetCount;
+    sourceBelow += population;
+    while (
+      targetBin < bins - 1 &&
+      targetBelow + targetHistogram[targetBin] < wanted
+    ) {
+      targetBelow += targetHistogram[targetBin];
+      targetBin++;
+    }
+    const within = targetHistogram[targetBin]
+      ? clamp((wanted - targetBelow) / targetHistogram[targetBin], 0, 1)
+      : 0.5;
+    lookup[bin] = MATCH_FLOOR_DBZ + (targetBin + within - 0.5) * binSize;
+  }
+
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (Number.isFinite(value)) values[i] = lookup[binOf(value)];
   }
   return values;
 }
@@ -1126,116 +1348,301 @@ function averageCellKm(grid) {
   return (kmX + kmY) / 2;
 }
 
+// ∫₀ᴸ e^(-s/τ) ds — how many minutes of a steady tendency actually land by lead
+// L. A tendency that simply ran for the whole lead would turn a two-scan blip
+// into a 20 dBZ swing, so it saturates: most of the change arrives early.
+function tendencyMinutes(lead, tau) {
+  return tau * (1 - Math.exp(-lead / tau));
+}
+
+// ∫₀ᴸ (L - s + offset) e^(-s/τ) ds — the same weighting applied to a tendency
+// that is itself changing at a constant rate, so a storm that is not just
+// growing but growing *faster* is carried forward as one. `offset` is the half
+// interval that had already elapsed when the tendency was measured.
+function tendencyRateMinutes(lead, tau, offset) {
+  const decay = Math.exp(-lead / tau);
+  const firstMoment = tau * tau * (1 - decay) - tau * lead * decay;
+  return (lead + offset) * tendencyMinutes(lead, tau) - firstMoment;
+}
+
 /**
- * Backward-advect the latest reflectivity through a motion field.
+ * Backward-advect the latest reflectivity through a motion field, once per
+ * requested lead, returning the forecasts in ascending lead order.
  *
- * The back-trajectory is integrated in bounded substeps (each with its own
- * midpoint correction) rather than as one straight jump, so a parcel follows
- * curving or diverging flow; the intensity tendency is accumulated along that
- * same trajectory, which is where the storm actually came from.
+ * The back-trajectories are integrated in bounded substeps (each with its own
+ * midpoint correction) so a parcel follows curving or diverging flow, and they
+ * are integrated *once* for the whole set: every lead is a checkpoint on the
+ * same trajectory rather than a fresh integration, which is both cheaper and
+ * self-consistent between frames. Integration runs on a coarse lattice and the
+ * resulting displacement field is interpolated back to full resolution — the
+ * motion field varies on a tile scale of tens of cells, so this is exact to far
+ * under one cell.
+ *
+ * Returns an iterator so a caller can publish each frame the moment it is ready
+ * instead of waiting for the whole set; the arguments are validated eagerly, not
+ * on the first `next()`.
  */
-export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options = {}) {
+export function advectReflectivityStream(latestGrid, motion, leadsMinutes, options = {}) {
   const config = configured(options);
   const problem = validateGrid(latestGrid, 'latest grid');
   if (problem) throw new TypeError(problem);
   if (!motion?.accepted || !motion.field) {
     throw new TypeError('an accepted motion estimate is required');
   }
-  if (!Number.isFinite(Number(leadMinutes)) || Number(leadMinutes) <= 0) {
-    throw new TypeError('leadMinutes must be positive');
+  const leads = Array.from(leadsMinutes ?? [])
+    .map(Number)
+    .filter((lead) => Number.isFinite(lead) && lead > 0)
+    .sort((a, b) => a - b);
+  if (!leads.length) {
+    throw new TypeError('at least one positive forecast lead is required');
   }
 
-  const lead = Number(leadMinutes);
+  const field = motion.field;
   const width = latestGrid.ni;
   const height = latestGrid.nj;
-  const values = new Float32Array(width * height);
-  values.fill(NaN);
-  // A tendency that simply ran for the whole lead would turn a two-scan blip
-  // into a 20 dBZ swing, so it saturates: most of the change lands early and
-  // the total is capped.
-  const effectiveTrendMinutes = config.trendTauMinutes *
-    (1 - Math.exp(-lead / config.trendTauMinutes));
   const quality = clamp(Number(motion.quality ?? motion.dominant?.quality ?? 0.5), 0, 1);
   // A poorly tracked field gets less of its own tendency, not more.
   const trendScale = 0.35 + 0.65 * quality;
-  const steps = Math.max(1, Math.ceil(lead / config.advectionStepMinutes));
-  const stepMinutes = lead / steps;
+  const tau = config.trendTauMinutes;
+  const offsetMinutes = field.baseOffsetMinutes || 0;
+  const accelerating = Boolean(field.axPerMinute2 && field.ayPerMinute2);
   const edgeReach = Math.max(1, config.growthEdgeDbz);
   const growthFloor = config.echoThreshold - edgeReach;
+  const cellKm = averageCellKm(latestGrid);
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let px = x;
-      let py = y;
-      for (let step = 0; step < steps; step++) {
-        const start = sampleFlow(motion.field, px, py);
-        const midX = px - start.dxPerMinute * stepMinutes * 0.5;
-        const midY = py - start.dyPerMinute * stepMinutes * 0.5;
-        const mid = sampleFlow(motion.field, midX, midY);
-        px -= mid.dxPerMinute * stepMinutes;
-        py -= mid.dyPerMinute * stepMinutes;
+  const latticeStep = Math.max(1, Math.round(config.trajectoryLatticeStep));
+  const columns = Math.max(2, Math.ceil((width - 1) / latticeStep) + 1);
+  const rows = Math.max(2, Math.ceil((height - 1) / latticeStep) + 1);
+  const points = columns * rows;
+  const originX = new Float32Array(points);
+  const originY = new Float32Array(points);
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < columns; i++) {
+      originX[j * columns + i] = Math.min(i * latticeStep, width - 1);
+      originY[j * columns + i] = Math.min(j * latticeStep, height - 1);
+    }
+  }
+  const pathX = Float32Array.from(originX);
+  const pathY = Float32Array.from(originY);
+  // ∫ a ds and ∫ a·s ds along the steady path. Together they give the
+  // first-order acceleration correction to the displacement at any lead, which
+  // is what lets one shared trajectory set carry a time-varying velocity.
+  const accelX = accelerating ? new Float32Array(points) : null;
+  const accelY = accelerating ? new Float32Array(points) : null;
+  const accelMomentX = accelerating ? new Float32Array(points) : null;
+  const accelMomentY = accelerating ? new Float32Array(points) : null;
+
+  const displacementX = new Float32Array(points);
+  const displacementY = new Float32Array(points);
+  const tendencyDbz = new Float32Array(points);
+  const areaTrend = new Float32Array(points);
+
+  let elapsed = 0;
+
+  function* stream() {
+    for (const lead of leads) {
+      while (elapsed < lead - 1e-9) {
+        const substep = Math.min(config.advectionStepMinutes, lead - elapsed);
+        const midpointS = elapsed + substep / 2;
+        for (let index = 0; index < points; index++) {
+          const x = pathX[index];
+          const y = pathY[index];
+          const startX = sampleField(field, field.dxPerMinute, x, y);
+          const startY = sampleField(field, field.dyPerMinute, x, y);
+          const midX = x - startX * substep * 0.5;
+          const midY = y - startY * substep * 0.5;
+          pathX[index] = x - sampleField(field, field.dxPerMinute, midX, midY) * substep;
+          pathY[index] = y - sampleField(field, field.dyPerMinute, midX, midY) * substep;
+          if (!accelerating) continue;
+          const ax = sampleField(field, field.axPerMinute2, midX, midY);
+          const ay = sampleField(field, field.ayPerMinute2, midX, midY);
+          accelX[index] += ax * substep;
+          accelY[index] += ay * substep;
+          accelMomentX[index] += ax * midpointS * substep;
+          accelMomentY[index] += ay * midpointS * substep;
+        }
+        elapsed += substep;
       }
-      const value = bilinearFinite(latestGrid.values, width, height, px, py);
-      if (!Number.isFinite(value)) continue;
 
-      // Read the tendency where the parcel came from: that is the storm whose
-      // recent growth or decay is being carried forward to this cell.
-      const origin = sampleMotion(motion.field, px, py);
-      const tendency = clamp(
-        origin.trendDbzPerMinute * effectiveTrendMinutes * trendScale,
-        -config.maxTrendDeltaDbz,
-        config.maxTrendDeltaDbz,
-      );
-      // Inside the echo the tendency applies in full. Just outside it, it tapers
-      // off — so a growing storm can push its edge outward across the display
-      // threshold and a collapsing one can pull it back, instead of every storm
-      // keeping exactly the footprint it has now.
-      let reach = 1;
-      if (value < config.echoThreshold) {
-        // Outward growth is also gated on the coverage trend: a storm whose echo
-        // area is shrinking should not spread just because its core brightened.
-        const expanding = clamp(0.35 + origin.areaTrendPerMinute * 12, 0, 1);
-        reach = value > growthFloor
-          ? ((value - growthFloor) / edgeReach) * (tendency > 0 ? expanding : 1)
+      const steadyMinutes = tendencyMinutes(lead, tau);
+      const rateMinutes = tendencyRateMinutes(lead, tau, offsetMinutes);
+      for (let index = 0; index < points; index++) {
+        let dx = pathX[index] - originX[index];
+        let dy = pathY[index] - originY[index];
+        if (accelerating) {
+          const limit = config.maxAccelDisplacementFraction * Math.hypot(dx, dy);
+          const correctionX = (lead + offsetMinutes) * accelX[index] - accelMomentX[index];
+          const correctionY = (lead + offsetMinutes) * accelY[index] - accelMomentY[index];
+          dx -= clamp(correctionX, -limit, limit);
+          dy -= clamp(correctionY, -limit, limit);
+        }
+        displacementX[index] = dx;
+        displacementY[index] = dy;
+        // The tendency is a property of the storm, so it is read once at the
+        // trajectory's origin — the storm whose recent evolution is being carried
+        // forward to this cell — and held along the path.
+        const x = originX[index] + dx;
+        const y = originY[index] + dy;
+        const trend = sampleField(field, field.trendDbzPerMinute, x, y);
+        const rate = field.trendRateDbzPerMinute2
+          ? sampleField(field, field.trendRateDbzPerMinute2, x, y)
+          : 0;
+        tendencyDbz[index] = clamp(
+          (trend * steadyMinutes + rate * rateMinutes) * trendScale,
+          -config.maxTrendDeltaDbz,
+          config.maxTrendDeltaDbz,
+        );
+        areaTrend[index] = field.areaTrendPerMinute
+          ? sampleField(field, field.areaTrendPerMinute, x, y)
           : 0;
       }
-      values[y * width + x] = value + tendency * reach;
+
+      const values = new Float32Array(width * height);
+      values.fill(NaN);
+      for (let y = 0; y < height; y++) {
+        // The lattice row weights are shared by the whole scan line.
+        const gy = clamp(y / latticeStep, 0, rows - 1);
+        const row0 = Math.floor(gy);
+        const row1 = Math.min(rows - 1, row0 + 1);
+        const fy = gy - row0;
+        const top = row0 * columns;
+        const bottom = row1 * columns;
+        for (let x = 0; x < width; x++) {
+          const gx = clamp(x / latticeStep, 0, columns - 1);
+          const column0 = Math.floor(gx);
+          const column1 = Math.min(columns - 1, column0 + 1);
+          const fx = gx - column0;
+          const wTopLeft = (1 - fx) * (1 - fy);
+          const wTopRight = fx * (1 - fy);
+          const wBottomLeft = (1 - fx) * fy;
+          const wBottomRight = fx * fy;
+          const topLeft = top + column0;
+          const topRight = top + column1;
+          const bottomLeft = bottom + column0;
+          const bottomRight = bottom + column1;
+          const mix = (array) =>
+            array[topLeft] * wTopLeft + array[topRight] * wTopRight +
+            array[bottomLeft] * wBottomLeft + array[bottomRight] * wBottomRight;
+
+          const value = bilinearFinite(
+            latestGrid.values, width, height, x + mix(displacementX), y + mix(displacementY),
+          );
+          if (!Number.isFinite(value)) continue;
+          const tendency = mix(tendencyDbz);
+          // Inside the echo the tendency applies in full. Just outside it, it
+          // tapers off — so a growing storm can push its edge outward across the
+          // display threshold and a collapsing one can pull it back, instead of
+          // every storm keeping exactly the footprint it has now.
+          let reach = 1;
+          if (value < config.echoThreshold) {
+            // Outward growth is also gated on the coverage trend: a storm whose
+            // echo area is shrinking should not spread just because its core
+            // brightened.
+            const expanding = clamp(0.35 + mix(areaTrend) * 12, 0, 1);
+            reach = value > growthFloor
+              ? ((value - growthFloor) / edgeReach) * (tendency > 0 ? expanding : 1)
+              : 0;
+          }
+          values[y * width + x] = value + tendency * reach;
+        }
+      }
+
+      // Position error grows with lead and shrinks with tracking quality: it sets
+      // the scale the damping works over, so a well tracked squall line keeps its
+      // structure at 30 minutes while a marginal match becomes the soft envelope
+      // it deserves to be.
+      const spreadKm = config.uncertaintyKmPerHour * (lead / 60) * (0.95 - 0.65 * quality);
+      const radius = Math.min(
+        config.maxSmoothRadiusCells,
+        Math.round(cellKm > 0 ? spreadKm / cellKm : 0),
+      );
+      // Kept before the damping so the intensity distribution can be restored from
+      // the forecast's own undamped values rather than from the observation.
+      const undamped = config.probabilityMatch && radius >= 1
+        ? Float32Array.from(values)
+        : null;
+      dampenByScale(values, width, height, lead, radius, quality, config);
+      if (undamped) matchDistribution(values, undamped, config);
+
+      const latestTime = toMillis(latestGrid.time ?? latestGrid.validTime);
+      const validMillis = Number.isFinite(latestTime) ? latestTime + lead * 60000 : NaN;
+      yield {
+        ...latestGrid,
+        values,
+        leadMinutes: lead,
+        kind: 'forecast',
+        extrapolated: true,
+        // How much of the tracking quality survives to this lead, for callers that
+        // want to label or trim frames.
+        confidence: clamp(quality * Math.exp(-lead / 60), 0, 1),
+        uncertaintyKm: Number(spreadKm.toFixed(2)),
+        time: Number.isFinite(validMillis) ? new Date(validMillis) : null,
+        validTime: Number.isFinite(validMillis) ? new Date(validMillis) : null,
+      };
     }
   }
 
-  // Position error grows with lead and shrinks with tracking quality: a well
-  // tracked squall line barely spreads at 30 minutes, a marginal match spreads
-  // several kilometres and reads as the soft envelope it deserves to be.
-  const cellKm = averageCellKm(latestGrid);
-  const spreadKm = config.uncertaintyKmPerHour * (lead / 60) * (0.95 - 0.65 * quality);
-  const radius = Math.min(
-    config.maxSmoothRadiusCells,
-    Math.round(cellKm > 0 ? spreadKm / cellKm : 0),
-  );
-  const blend = clamp(
-    config.maxSmoothBlend * (lead / NOWCAST_MAX_LEAD_MINUTES) * (0.85 - 0.65 * quality),
-    0,
-    config.maxSmoothBlend,
-  );
-  spreadByUncertainty(values, width, height, radius, blend, config);
+  return stream();
+}
 
-  const latestTime = toMillis(latestGrid.time ?? latestGrid.validTime);
-  const validMillis = Number.isFinite(latestTime)
-    ? latestTime + lead * 60000
-    : NaN;
-  return {
-    ...latestGrid,
-    values,
-    leadMinutes: lead,
-    kind: 'forecast',
-    extrapolated: true,
-    // How much of the tracking quality survives to this lead, for callers that
-    // want to label or trim frames.
-    confidence: clamp(quality * Math.exp(-lead / 60), 0, 1),
-    uncertaintyKm: Number((spreadKm).toFixed(2)),
-    time: Number.isFinite(validMillis) ? new Date(validMillis) : null,
-    validTime: Number.isFinite(validMillis) ? new Date(validMillis) : null,
+/** Every requested lead, in ascending order, off one shared trajectory set. */
+export function advectReflectivitySeries(latestGrid, motion, leadsMinutes, options = {}) {
+  return Array.from(advectReflectivityStream(latestGrid, motion, leadsMinutes, options));
+}
+
+/**
+ * Backward-advect the latest reflectivity to a single lead.
+ *
+ * Callers that want several leads should use `advectReflectivityStream`, which
+ * shares one set of trajectories across the whole set instead of re-integrating
+ * from the base time for every frame.
+ */
+export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options = {}) {
+  if (!Number.isFinite(Number(leadMinutes)) || Number(leadMinutes) <= 0) {
+    throw new TypeError('leadMinutes must be positive');
+  }
+  return advectReflectivitySeries(latestGrid, motion, [Number(leadMinutes)], options)[0];
+}
+
+// The motion field of the interval *before* the tracked pair, or null when there
+// is no usable third scan. Everything here is best-effort: a scan that is
+// missing, mis-shaped, badly spaced or simply untrackable just means the nowcast
+// falls back to the two-scan behaviour.
+function earlierMotionField(pair, referenceGrid, latestMillis, factor, config) {
+  if (!pair) return null;
+  const [fromGrid, toGrid] = pair;
+  if (validateGrid(fromGrid, 'earlier grid') || validateGrid(toGrid, 'earlier grid')) {
+    return null;
+  }
+  if (!sameGeometry(fromGrid, referenceGrid) || !sameGeometry(toGrid, referenceGrid)) {
+    return null;
+  }
+  const fromMillis = toMillis(fromGrid.time ?? fromGrid.validTime);
+  const toMillisValue = toMillis(toGrid.time ?? toGrid.validTime);
+  if (!Number.isFinite(fromMillis) || !Number.isFinite(toMillisValue)) return null;
+  const intervalMinutes = (toMillisValue - fromMillis) / 60000;
+  if (
+    intervalMinutes < config.minIntervalMinutes ||
+    intervalMinutes > config.maxIntervalMinutes
+  ) return null;
+
+  const reduce = (grid, millis) => {
+    const reduced = downsampleReflectivityGrid(grid, { ...config, factor });
+    reduced.time = new Date(millis);
+    reduced.validTime = reduced.time;
+    return reduced;
   };
+  const motion = estimateReflectivityMotion(
+    reduce(fromGrid, fromMillis),
+    reduce(toGrid, toMillisValue),
+    { ...config, intervalMinutes },
+  );
+  if (!motion.accepted) return null;
+  // Where this velocity sits in time, so the second difference knows its own
+  // baseline however far back the pair was taken from.
+  motion.field.midpointBeforeLatestMinutes =
+    (latestMillis - (fromMillis + toMillisValue) / 2) / 60000;
+  return motion.field;
 }
 
 /**
@@ -1251,8 +1658,19 @@ export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options 
  * or:
  *   { accepted:true, baseGrid, motion, leadsMinutes, summary, quality, config }
  */
-export function prepareReflectivityNowcast(previousGrid, latestGrid, options = {}) {
+export function prepareReflectivityNowcast(previousGrids, latestGrid, options = {}) {
   const config = configured(options);
+  // Callers may pass one earlier scan or a list of them (oldest first). The most
+  // recent is what the displacement is measured against; the one before it, if
+  // there is a usable one, is what turns growth/decay and motion from a single
+  // difference into a fitted rate of change.
+  const priors = (Array.isArray(previousGrids) ? previousGrids : [previousGrids])
+    .filter(Boolean);
+  const previousGrid = priors[priors.length - 1];
+  // The rate-of-change pair is taken from the *front* of the list, so a caller
+  // that supplies three earlier scans gets its acceleration measured over the
+  // longest baseline available rather than over two touching intervals.
+  const earlierPair = priors.length > 1 ? [priors[0], priors[1]] : null;
   const previousProblem = validateGrid(previousGrid, 'previous grid');
   const latestProblem = validateGrid(latestGrid, 'latest grid');
   if (previousProblem || latestProblem) {
@@ -1307,9 +1725,17 @@ export function prepareReflectivityNowcast(previousGrid, latestGrid, options = {
   latest.time = new Date(latestMillis);
   latest.validTime = new Date(latestMillis);
 
+  // The scan before the pair, when there is a usable one, gives a second
+  // displacement estimate over the same tiles. That is what makes the growth and
+  // decay a fitted rate of change rather than one noisy difference, and it also
+  // corroborates every vector for free.
+  const priorField = earlierMotionField(
+    earlierPair, previousGrid, latestMillis, factor, config,
+  );
   const motion = estimateReflectivityMotion(previous, latest, {
     ...config,
     intervalMinutes,
+    priorField,
   });
   if (!motion.accepted) {
     return {
@@ -1345,7 +1771,13 @@ export function prepareReflectivityNowcast(previousGrid, latestGrid, options = {
   return {
     accepted: true,
     kind: 'radar-nowcast',
-    method: 'sub-cell block correlation with multi-step semi-Lagrangian advection',
+    method: motion.secondOrder
+      ? 'three-scan sub-cell block correlation with scale-damped, ' +
+        'probability-matched semi-Lagrangian advection'
+      : 'sub-cell block correlation with scale-damped, probability-matched ' +
+        'semi-Lagrangian advection',
+    scanCount: priorField ? 3 : 2,
+    secondOrder: Boolean(motion.secondOrder),
     previousTime: new Date(previousMillis),
     latestTime: new Date(latestMillis),
     intervalMinutes,
@@ -1370,12 +1802,13 @@ export function prepareReflectivityNowcast(previousGrid, latestGrid, options = {
  * or:
  *   { accepted:true, baseGrid, motion, forecasts, summary, quality, ... }
  */
-export function buildReflectivityNowcast(previousGrid, latestGrid, options = {}) {
-  const prepared = prepareReflectivityNowcast(previousGrid, latestGrid, options);
+export function buildReflectivityNowcast(previousGrids, latestGrid, options = {}) {
+  const prepared = prepareReflectivityNowcast(previousGrids, latestGrid, options);
   if (!prepared.accepted) return prepared;
   return {
     ...prepared,
-    forecasts: prepared.leadsMinutes.map((lead) =>
-      advectReflectivityGrid(prepared.baseGrid, prepared.motion, lead, prepared.config)),
+    forecasts: advectReflectivitySeries(
+      prepared.baseGrid, prepared.motion, prepared.leadsMinutes, prepared.config,
+    ),
   };
 }
