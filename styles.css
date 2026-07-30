@@ -3437,6 +3437,14 @@ body.modal-open {
   white-space: nowrap;
 }
 
+/* Radar frames past now (the extrapolated tail of the reflectivity timeline)
+   read in the accent colour, so it is obvious when the scrubber has left the
+   observations behind. */
+.timeline-label.forecast-frame,
+.map-frame-scrubber .timeline-label.forecast-frame {
+  color: var(--accent);
+}
+
 /* Opacity row */
 #radarOpacityLabel {
   min-width: 34px;

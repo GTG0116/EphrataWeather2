@@ -159,8 +159,10 @@ const MRMS_BASE = "https://raw.githubusercontent.com/EphrataWeather/MRMS/main/pu
 const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
 const MRMS_PRODUCTS = {
   rate:      { label: "Precip Type",     getGeo: i => i === 0 ? "master.geojson" : `master_${i}.geojson`, getMeta: i => `metadata_${i}.json`,           unit: "in/hr", dec: 2, typed: true },
-  refl:      { label: "Reflectivity",    getGeo: i => `refl_${i}.geojson`,                                getMeta: i => `metadata_refl_${i}.json`,      unit: "dBZ",   dec: 0 },
-  future:    { label: "30-min Future Radar", unit: "dBZ", dec: 0, nowcast: true },
+  // Reflectivity's timeline runs past now: the on-device decoder appends
+  // extrapolated frames after the observed ones, so the future radar lives
+  // inside this product instead of being a separate thing to switch to.
+  refl:      { label: "Reflectivity",    getGeo: i => `refl_${i}.geojson`,                                getMeta: i => `metadata_refl_${i}.json`,      unit: "dBZ",   dec: 0, nowcast: true },
   mesh:      { label: "Hail (MESH)",     getGeo: i => `mesh_${i}.geojson`,                                getMeta: i => `metadata_mesh_${i}.json`,      unit: "in",    dec: 2 },
   qpe6h:     { label: "6-Hr Precip",     getGeo: i => `qpe6h_${i}.geojson`,                               getMeta: i => `metadata_qpe6h_${i}.json`,     unit: "in",    dec: 2 },
   qpe24h:    { label: "24-Hr Precip",    getGeo: i => `qpe24h_${i}.geojson`,                              getMeta: i => `metadata_qpe24h_${i}.json`,    unit: "in",    dec: 2 },
@@ -851,6 +853,19 @@ function usesGeneratedPrecipType(product = activeMrmsProduct) {
   return activeRadarMode === "mrms" && product === "rate";
 }
 
+// Which MRMS product extends its own timeline into the future.
+function mrmsProductHasNowcast(product = activeMrmsProduct) {
+  return activeRadarMode === "mrms" &&
+    Boolean(MRMS_PRODUCTS[product]?.nowcast) &&
+    usesOnDeviceRadar(product);
+}
+
+// The nowcast state reported by the last frame event from the decoder.
+function nowcastInfo() {
+  if (!mrmsProductHasNowcast()) return null;
+  return onDeviceWeatherApi?.nowcastState?.() || null;
+}
+
 function getOnDeviceWeather() {
   if (!onDeviceWeatherPromise) {
     onDeviceWeatherPromise = import("./js/on-device-weather.js")
@@ -870,15 +885,9 @@ function decodedFrameLabel(frame, site = "") {
   const time = date && Number.isFinite(date.getTime())
     ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : frame?.label || "Latest";
-  if (frame?.forecast) {
-    const lead = Number(frame.leadMinutes) || 0;
-    const movement = frame.summary?.direction === "Stationary"
-      ? "Stationary · "
-      : frame.summary?.direction && Number.isFinite(frame.summary?.speedMph)
-      ? `${frame.summary.direction} ${Math.round(frame.summary.speedMph)} mph · `
-      : "";
-    return `+${lead} min · ${movement}${time}`;
-  }
+  // Storm motion and confidence live in the legend, so the scrubber label stays
+  // short enough to read at a glance: how far ahead, and when that is.
+  if (frame?.forecast) return `+${Number(frame.leadMinutes) || 0} min · ${time}`;
   return site ? `${site} · ${time}` : time;
 }
 
@@ -955,6 +964,10 @@ function handleOnDeviceFrame(event) {
     }
   }
   updateRadarLabel();
+  // The radar legend reports the extrapolation's state (building, movement,
+  // confidence), which changes as frames are appended and as the user scrubs
+  // between observed and forecast frames.
+  if (event.kind === "radar" && !satelliteActive) renderMrmsLegend();
 }
 
 function clearRadarSiteMarkers() {
@@ -7207,8 +7220,13 @@ function syncFrameSliders({ value, max, disabled } = {}) {
 
 // The valid time of the frame on screen shows in two places: the timeline row
 // in the Layers panel and the scrubber docked at the bottom of the map.
-function setFrameTimeLabel(text) {
-  document.querySelectorAll("#radarTimeLabel, #mapFrameTimeLabel").forEach(el => { el.textContent = text; });
+function setFrameTimeLabel(text, { forecast = false } = {}) {
+  document.querySelectorAll("#radarTimeLabel, #mapFrameTimeLabel").forEach(el => {
+    el.textContent = text;
+    // Frames past now read in the accent colour, so scrubbing into the forecast
+    // half of the timeline is unmistakable.
+    el.classList.toggle("forecast-frame", Boolean(forecast));
+  });
 }
 
 function updateRadarLabel() {
@@ -7241,10 +7259,14 @@ function updateRadarLabel() {
       return;
     }
     syncFrameSliders({ value: radarFrameIndex });
-    setFrameTimeLabel(decodedFrameLabel(
-      onDeviceRadarFrameInfo[radarFrameIndex],
-      activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
-    ));
+    const frame = onDeviceRadarFrameInfo[radarFrameIndex];
+    setFrameTimeLabel(
+      decodedFrameLabel(
+        frame,
+        activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
+      ),
+      { forecast: Boolean(frame?.forecast) },
+    );
     return;
   }
 
@@ -7429,23 +7451,17 @@ function initMap() {
       }, () => {}, { timeout: 5000, maximumAge: 120000 });
     }
   });
+  // The extrapolation runs on the area in view, so a pan re-derives it — for the
+  // tail of the timeline only. The observed frames on the map are untouched, so
+  // this costs nothing visible while it works.
   radarMap.on("moveend", () => {
-    if (
-      !radarActive ||
-      activeRadarMode !== "mrms" ||
-      activeMrmsProduct !== "future"
-    ) return;
+    if (!radarActive || !mrmsProductHasNowcast()) return;
     clearTimeout(futureRadarPanTimer);
     futureRadarPanTimer = setTimeout(() => {
-      if (
-        radarActive &&
-        activeRadarMode === "mrms" &&
-        activeMrmsProduct === "future"
-      ) {
-        addRadarLayer(false).catch(error =>
-          console.warn("Future radar refresh unavailable", error));
+      if (radarActive && mrmsProductHasNowcast()) {
+        onDeviceWeatherApi?.refreshNowcast?.({ location: selectedLocation });
       }
-    }, 250);
+    }, 400);
   });
   updateRadarLabel();
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
@@ -9615,9 +9631,7 @@ function renderRadarSubControls() {
   });
   sel.value = activeMrmsProduct;
   const paletteRow = document.querySelector(".radar-palette-row");
-  if (paletteRow) {
-    paletteRow.hidden = usesGeneratedPrecipType() || activeMrmsProduct === "future";
-  }
+  if (paletteRow) paletteRow.hidden = usesGeneratedPrecipType();
   const palette = onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct);
   const paletteName = document.querySelector("#radarPaletteName");
   if (paletteName) paletteName.textContent = palette?.name || "Default";
@@ -9628,18 +9642,36 @@ function renderMrmsLegend() {
   if (!box) return;
   if (!radarActive) { box.hidden = true; return; }
   box.hidden = false;
-  const nowcastSummary = activeMrmsProduct === "future"
-    ? onDeviceWeatherApi?.currentState()?.radar?.frame?.summary
-    : null;
-  const nowcastSubtitle = nowcastSummary?.unavailable
-    ? `FUTURE RADAR UNAVAILABLE · ${nowcastSummary.reason || "SHOWING LATEST OBSERVATION"}`
-    : nowcastSummary
-    ? `MRMS MOTION EXTRAPOLATION · ${
+  const nowcast = nowcastInfo();
+  const nowcastSummary = nowcast?.summary;
+  const movement = nowcastSummary && !nowcastSummary.unavailable
+    ? `${
         nowcastSummary.direction === "Stationary"
           ? "STATIONARY"
           : `${nowcastSummary.direction} ${Math.round(nowcastSummary.speedMph)} MPH`
-      } · ${String(nowcastSummary.intensity || "steady").toUpperCase()}`
-    : "MRMS MOTION EXTRAPOLATION · 5-MIN STEPS · EXPERIMENTAL";
+      } · ${String(nowcastSummary.evolution || nowcastSummary.intensity || "steady").toUpperCase()}`
+    : "";
+  // Shown while a forecast frame is on screen, and as a suffix on the observed
+  // subtitle so the timeline's future half is never a surprise.
+  const nowcastSubtitle = nowcastSummary?.unavailable
+    ? `OUTLOOK UNAVAILABLE · ${String(nowcastSummary.reason || "SHOWING OBSERVATIONS").toUpperCase()}`
+    : movement
+    ? `MRMS MOTION EXTRAPOLATION · ${movement} · ${
+        String(nowcastSummary.confidence || "moderate").toUpperCase()
+      } CONFIDENCE`
+    : "MRMS MOTION EXTRAPOLATION · EXPERIMENTAL";
+  const observedSuffix = !nowcast
+    ? ""
+    : nowcast.status === "building"
+    ? " · BUILDING +30 MIN OUTLOOK"
+    : nowcast.status === "ready" && nowcast.frameCount
+    ? ` · +${Math.max(...nowcast.leadsMinutes.slice(0, nowcast.frameCount))} MIN OUTLOOK ON TIMELINE`
+    : nowcast.status === "unavailable"
+    ? ` · OUTLOOK UNAVAILABLE (${String(nowcast.summary?.reason || "NO RECENT SCAN PAIR").toUpperCase()})`
+    : "";
+  const showingForecast = Boolean(
+    onDeviceWeatherApi?.currentState()?.radar?.frame?.forecast
+  );
   const livePalette = usesOnDeviceRadar()
     ? onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct)
     : null;
@@ -9654,9 +9686,9 @@ function renderMrmsLegend() {
       <div class="legend-title">${safeText((cfg?.label || "RADAR").toUpperCase())}</div>
       <div class="mrms-legend-section">
         <div class="legend-subtitle">${
-          activeMrmsProduct === "future"
+          showingForecast
             ? safeText(nowcastSubtitle)
-            : `${activeRadarMode === "single" ? "RAW LEVEL II" : "RAW MRMS GRIB2"} · DECODED ON THIS DEVICE`
+            : `${activeRadarMode === "single" ? "RAW LEVEL II" : "RAW MRMS GRIB2"} · DECODED ON THIS DEVICE${safeText(observedSuffix)}`
         }</div>
         <div class="legend-gradient" style="background:linear-gradient(90deg,${livePalette.colors.join(",")})"></div>
         <div class="legend-ticks" style="--tick-count:3">

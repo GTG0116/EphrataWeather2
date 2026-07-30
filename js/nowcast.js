@@ -3,15 +3,26 @@
 // This module deliberately implements a conservative radar advection nowcast,
 // not a numerical-weather or machine-learning forecast. It:
 //   1. reduces two same-geometry latitude/longitude reflectivity grids,
-//   2. estimates an old -> new displacement globally and in local tiles,
-//   3. carries the latest field forward at five-minute intervals, and
-//   4. applies only a small, damped, motion-compensated intensity tendency.
+//   2. estimates an old -> new displacement globally and in local tiles, refined
+//      to sub-cell accuracy so a 30-minute lead is not quantised to whole cells,
+//   3. carries the latest field forward along multi-step semi-Lagrangian
+//      trajectories, so curving and diverging flow is followed rather than
+//      approximated by one straight jump,
+//   4. applies a damped, trajectory-integrated intensity tendency that may also
+//      grow or erode the echo edge, and
+//   5. spreads the field by the distance the motion estimate itself could be
+//      wrong, so an uncertain nowcast reads as a soft envelope and a confident
+//      one stays sharp.
 //
 // All exported functions are pure and work in browsers and Node. Grid rows are
 // expected to run north -> south, matching the objects returned by grib2.js:
 //   { ni, nj, lon1, lat1, di, dj, values: Float32Array, time }
 
 export const NOWCAST_LEADS_MINUTES = Object.freeze([5, 10, 15, 20, 25, 30]);
+
+// Extrapolation skill falls off quickly; nothing beyond this is published even
+// when a caller asks for it.
+export const NOWCAST_MAX_LEAD_MINUTES = 30;
 
 const METRES_PER_DEGREE = 111320;
 const COMPASS_16 = Object.freeze([
@@ -35,6 +46,25 @@ const DEFAULTS = Object.freeze({
   maxTrendDbzPerMinute: 0.30,
   trendTauMinutes: 10,
   maxTrendDeltaDbz: 4,
+  // Trajectories are integrated in steps no longer than this, so a parcel
+  // follows a curving/accelerating flow field instead of one straight jump.
+  advectionStepMinutes: 5,
+  // How far below the echo threshold a growth/decay tendency is allowed to
+  // reach. Without this an intensifying line can never expand its coverage,
+  // because only cells that already hold an echo are adjusted.
+  growthEdgeDbz: 8,
+  // Position error grows with lead time and shrinks with tracking quality. The
+  // forecast is blended toward a field blurred over that distance, which is how
+  // an uncertain nowcast should look: a spread-out envelope, not a crisp lie.
+  uncertaintyKmPerHour: 9,
+  maxSmoothRadiusCells: 4,
+  maxSmoothBlend: 0.55,
+  // The blend may soften a core, but never by more than this, so a storm's peak
+  // intensity stays readable at every lead.
+  maxSmoothDropDbz: 1.5,
+  // Leads are trimmed when the tracking quality cannot support them.
+  minQualityFor30Min: 0.50,
+  minQualityFor20Min: 0.36,
 });
 
 function clamp(value, lo, hi) {
@@ -154,6 +184,81 @@ export function downsampleReflectivityGrid(grid, options = {}) {
     lat1: Number(grid.lat1) - ((factor - 1) / 2) * Number(grid.dj),
     di: Number(grid.di) * factor,
     dj: Number(grid.dj) * factor,
+    values,
+    downsampleFactor: factor,
+  };
+}
+
+/**
+ * Max-pool the part of a regular lat/lon grid that covers `bounds` down to at
+ * most `maxWidth` x `maxHeight` cells.
+ *
+ * A native MRMS CONUS field is ~24.5 M cells; the extrapolation only ever needs
+ * the viewed area, and cropping first is what keeps the motion search and the
+ * advection bounded. Max pooling (not averaging) preserves convective cores.
+ */
+export function cropLatLonGrid(grid, bounds, { maxWidth, maxHeight }) {
+  const ni = Number(grid?.ni);
+  const nj = Number(grid?.nj);
+  const lon1 = Number(grid?.lon1);
+  const lat1 = Number(grid?.lat1);
+  const di = Number(grid?.di);
+  const dj = Number(grid?.dj);
+  if (
+    !Number.isInteger(ni) || !Number.isInteger(nj) ||
+    ![lon1, lat1, di, dj].every(Number.isFinite) ||
+    !(di > 0) || !(dj > 0)
+  ) {
+    throw new TypeError('MRMS grid has invalid latitude/longitude geometry');
+  }
+
+  const col0 = Math.max(0, Math.floor((bounds.west - lon1) / di));
+  const col1 = Math.min(ni - 1, Math.ceil((bounds.east - lon1) / di));
+  const row0 = Math.max(0, Math.floor((lat1 - bounds.north) / dj));
+  const row1 = Math.min(nj - 1, Math.ceil((lat1 - bounds.south) / dj));
+  if (col1 < col0 || row1 < row0) {
+    throw new RangeError('selected map area is outside MRMS CONUS coverage');
+  }
+
+  const sourceWidth = col1 - col0 + 1;
+  const sourceHeight = row1 - row0 + 1;
+  const factor = Math.max(
+    1,
+    Math.ceil(sourceWidth / maxWidth),
+    Math.ceil(sourceHeight / maxHeight),
+  );
+  const width = Math.ceil(sourceWidth / factor);
+  const height = Math.ceil(sourceHeight / factor);
+  const values = new Float32Array(width * height);
+  values.fill(NaN);
+  for (let outRow = 0; outRow < height; outRow++) {
+    const sourceRow = row0 + outRow * factor;
+    for (let outCol = 0; outCol < width; outCol++) {
+      const sourceCol = col0 + outCol * factor;
+      let best = -Infinity;
+      let found = false;
+      for (let dy = 0; dy < factor && sourceRow + dy <= row1; dy++) {
+        const base = (sourceRow + dy) * ni + sourceCol;
+        for (let dx = 0; dx < factor && sourceCol + dx <= col1; dx++) {
+          const value = Number(grid.values[base + dx]);
+          if (Number.isFinite(value) && (!found || value > best)) {
+            best = value;
+            found = true;
+          }
+        }
+      }
+      if (found) values[outRow * width + outCol] = best;
+    }
+  }
+  return {
+    ...grid,
+    proj: 'latlon',
+    ni: width,
+    nj: height,
+    lon1: lon1 + (col0 + (factor - 1) / 2) * di,
+    lat1: lat1 - (row0 + (factor - 1) / 2) * dj,
+    di: di * factor,
+    dj: dj * factor,
     values,
     downsampleFactor: factor,
   };
@@ -319,6 +424,47 @@ function searchDisplacement(
   return best;
 }
 
+// Vertex of the parabola through three scores sampled one cell apart. Only a
+// real maximum (a downward parabola) yields a shift; anything else keeps the
+// integer peak.
+function parabolicOffset(low, mid, high) {
+  const denom = low - 2 * mid + high;
+  if (!(denom < -1e-9)) return 0;
+  return clamp(0.5 * (low - high) / denom, -0.5, 0.5);
+}
+
+// The block search only ever lands on whole cells, so an 8-minute scan pair
+// quantises motion to ~0.125 cell/min — nearly four cells of position error by
+// the 30-minute lead. Fitting a parabola through the neighbouring scores
+// recovers the sub-cell peak, which is where most of the extra accuracy in a
+// half-hour extrapolation comes from.
+function refineDisplacement(
+  previous,
+  latest,
+  width,
+  height,
+  best,
+  region,
+  sampleStep,
+  minSamples,
+) {
+  const scoreAt = (dx, dy) => displacementScore(
+    previous, latest, width, height, dx, dy, region, sampleStep, minSamples,
+  )?.score ?? null;
+  const west = scoreAt(best.dx - 1, best.dy);
+  const east = scoreAt(best.dx + 1, best.dy);
+  const north = scoreAt(best.dx, best.dy - 1);
+  const south = scoreAt(best.dx, best.dy + 1);
+  return {
+    dxSub: best.dx + (west !== null && east !== null
+      ? parabolicOffset(west, best.score, east)
+      : 0),
+    dySub: best.dy + (north !== null && south !== null
+      ? parabolicOffset(north, best.score, south)
+      : 0),
+  };
+}
+
 function median(numbers) {
   if (!numbers.length) return NaN;
   const sorted = numbers.slice().sort((a, b) => a - b);
@@ -344,8 +490,9 @@ function weightedMedian(values, weights) {
   return entries[entries.length - 1].value;
 }
 
-// Median motion-compensated dBZ change in a tile. A histogram avoids allocating
-// thousands of short-lived arrays while local vectors are searched.
+// Median motion-compensated dBZ change in a tile, plus how much echo *coverage*
+// the tile gained or lost once the motion is removed. A histogram avoids
+// allocating thousands of short-lived arrays while local vectors are searched.
 function tileTrend(
   previousGrid,
   latestGrid,
@@ -357,6 +504,9 @@ function tileTrend(
 ) {
   const bins = new Uint32Array(81); // -20..+20 dBZ in 0.5 dBZ bins
   let count = 0;
+  let previousEcho = 0;
+  let gained = 0;
+  let lost = 0;
   for (let y = region.y0; y < region.y1; y++) {
     const sourceY = y - dy;
     if (sourceY < 0 || sourceY >= latestGrid.nj) continue;
@@ -365,18 +515,27 @@ function tileTrend(
       if (sourceX < 0 || sourceX >= latestGrid.ni) continue;
       const oldValue = Number(previousGrid.values[sourceY * latestGrid.ni + sourceX]);
       const newValue = Number(latestGrid.values[y * latestGrid.ni + x]);
+      if (!Number.isFinite(oldValue) || !Number.isFinite(newValue)) continue;
+      const hadEcho = oldValue >= echoThreshold;
+      const hasEcho = newValue >= echoThreshold;
+      if (hadEcho) previousEcho++;
+      if (hasEcho && !hadEcho) gained++;
+      if (hadEcho && !hasEcho) lost++;
       // Requiring a matched echo in both scans avoids treating a translated edge
       // or a newly uncovered background cell as explosive growth/decay.
-      if (
-        !Number.isFinite(oldValue) || !Number.isFinite(newValue) ||
-        oldValue < echoThreshold || newValue < echoThreshold
-      ) continue;
+      if (!hadEcho || !hasEcho) continue;
       const difference = clamp(newValue - oldValue, -20, 20);
       bins[Math.round((difference + 20) * 2)]++;
       count++;
     }
   }
-  if (count < 8) return { trend: 0, count };
+  // Coverage change as a fraction of the tile's echo area per minute; it is the
+  // clearest signal that a line is building outward or falling apart, which a
+  // median dBZ tendency over matched cells alone cannot see.
+  const areaTrend = previousEcho >= 8
+    ? clamp((gained - lost) / previousEcho / intervalMinutes, -0.1, 0.1)
+    : 0;
+  if (count < 8) return { trend: 0, count, areaTrend };
   const target = Math.ceil(count / 2);
   let cumulative = 0;
   let bin = 40;
@@ -384,7 +543,7 @@ function tileTrend(
     cumulative += bins[i];
     if (cumulative >= target) { bin = i; break; }
   }
-  return { trend: ((bin / 2) - 20) / intervalMinutes, count };
+  return { trend: ((bin / 2) - 20) / intervalMinutes, count, areaTrend };
 }
 
 function localMotionField(
@@ -407,9 +566,12 @@ function localMotionField(
   const dx = new Float32Array(length);
   const dy = new Float32Array(length);
   const trend = new Float32Array(length);
+  const areaTrend = new Float32Array(length);
   const confidence = new Float32Array(length);
   const accepted = new Uint8Array(length);
   const sampleCounts = new Uint32Array(length);
+  const globalDxPerMinute = (global.dxSub ?? global.dx) / intervalMinutes;
+  const globalDyPerMinute = (global.dySub ?? global.dy) / intervalMinutes;
 
   const globalMagnitude = Math.hypot(global.dx, global.dy);
   const radius = Math.round(config.localSearchRadius ||
@@ -450,8 +612,8 @@ function localMotionField(
         candidate.score < config.minLocalScore ||
         candidate.overlap < 0.06
       ) {
-        dx[index] = global.dx / intervalMinutes;
-        dy[index] = global.dy / intervalMinutes;
+        dx[index] = globalDxPerMinute;
+        dy[index] = globalDyPerMinute;
         confidence[index] = global.quality * 0.45;
         continue;
       }
@@ -469,14 +631,25 @@ function localMotionField(
       );
       const trendSupport = clamp(tendency.count / 40, 0, 1);
       const trendConfidence = clamp((quality - 0.25) / 0.55, 0, 1) * trendSupport;
+      const refined = refineDisplacement(
+        previousSignal,
+        latestSignal,
+        width,
+        height,
+        candidate,
+        region,
+        sampleStep,
+        minSamples,
+      );
 
-      dx[index] = candidate.dx / intervalMinutes;
-      dy[index] = candidate.dy / intervalMinutes;
+      dx[index] = refined.dxSub / intervalMinutes;
+      dy[index] = refined.dySub / intervalMinutes;
       trend[index] = clamp(
         tendency.trend,
         -config.maxTrendDbzPerMinute,
         config.maxTrendDbzPerMinute,
       ) * trendConfidence;
+      areaTrend[index] = tendency.areaTrend * trendConfidence;
       confidence[index] = quality;
       accepted[index] = 1;
       sampleCounts[index] = candidate.samples;
@@ -489,6 +662,7 @@ function localMotionField(
   const smoothDx = new Float32Array(dx);
   const smoothDy = new Float32Array(dy);
   const smoothTrend = new Float32Array(trend);
+  const smoothAreaTrend = new Float32Array(areaTrend);
   const smoothConfidence = new Float32Array(confidence);
   for (let ty = 0; ty < rows; ty++) {
     for (let tx = 0; tx < columns; tx++) {
@@ -496,6 +670,7 @@ function localMotionField(
       const nearDx = [];
       const nearDy = [];
       const nearTrend = [];
+      const nearArea = [];
       const nearConfidence = [];
       for (let oy = -1; oy <= 1; oy++) {
         const ny = ty + oy;
@@ -508,6 +683,7 @@ function localMotionField(
           nearDx.push(dx[ni]);
           nearDy.push(dy[ni]);
           nearTrend.push(trend[ni]);
+          nearArea.push(areaTrend[ni]);
           nearConfidence.push(confidence[ni]);
         }
       }
@@ -515,6 +691,7 @@ function localMotionField(
       const mdx = median(nearDx);
       const mdy = median(nearDy);
       const mtrend = median(nearTrend);
+      const marea = median(nearArea);
       if (accepted[index]) {
         const deviation = Math.hypot(dx[index] - mdx, dy[index] - mdy);
         const allowed = Math.max(0.35, radius / intervalMinutes);
@@ -522,10 +699,12 @@ function localMotionField(
         smoothDx[index] = dx[index] * localWeight + mdx * (1 - localWeight);
         smoothDy[index] = dy[index] * localWeight + mdy * (1 - localWeight);
         smoothTrend[index] = trend[index] * 0.7 + mtrend * 0.3;
+        smoothAreaTrend[index] = areaTrend[index] * 0.7 + marea * 0.3;
       } else if (nearDx.length >= 2) {
         smoothDx[index] = mdx;
         smoothDy[index] = mdy;
         smoothTrend[index] = mtrend * 0.65;
+        smoothAreaTrend[index] = marea * 0.65;
         smoothConfidence[index] = median(nearConfidence) * 0.65;
       }
     }
@@ -539,6 +718,7 @@ function localMotionField(
     dxPerMinute: smoothDx,
     dyPerMinute: smoothDy,
     trendDbzPerMinute: smoothTrend,
+    areaTrendPerMinute: smoothAreaTrend,
     confidence: smoothConfidence,
     accepted,
     sampleCounts,
@@ -562,11 +742,23 @@ function sampleField(field, array, x, y) {
     (c * (1 - fx) + d * fx) * fy;
 }
 
+// Just the velocity, for the many samples a multi-step trajectory takes. The
+// tendency fields are read once per cell, at the trajectory's origin.
+function sampleFlow(field, x, y) {
+  return {
+    dxPerMinute: sampleField(field, field.dxPerMinute, x, y),
+    dyPerMinute: sampleField(field, field.dyPerMinute, x, y),
+  };
+}
+
 function sampleMotion(field, x, y) {
   return {
     dxPerMinute: sampleField(field, field.dxPerMinute, x, y),
     dyPerMinute: sampleField(field, field.dyPerMinute, x, y),
     trendDbzPerMinute: sampleField(field, field.trendDbzPerMinute, x, y),
+    areaTrendPerMinute: field.areaTrendPerMinute
+      ? sampleField(field, field.areaTrendPerMinute, x, y)
+      : 0,
     confidence: sampleField(field, field.confidence, x, y),
   };
 }
@@ -609,6 +801,7 @@ function dominantSummary(field, grid, intervalMinutes, global) {
   const dxValues = [];
   const dyValues = [];
   const trendValues = [];
+  const areaValues = [];
   const weights = [];
   const localQualities = [];
   let acceptedTiles = 0;
@@ -620,18 +813,22 @@ function dominantSummary(field, grid, intervalMinutes, global) {
     dxValues.push(field.dxPerMinute[i] * intervalMinutes);
     dyValues.push(field.dyPerMinute[i] * intervalMinutes);
     trendValues.push(field.trendDbzPerMinute[i]);
+    areaValues.push(field.areaTrendPerMinute?.[i] ?? 0);
     weights.push(weight);
     localQualities.push(field.confidence[i]);
   }
 
   const dxCells = Number.isFinite(weightedMedian(dxValues, weights))
     ? weightedMedian(dxValues, weights)
-    : global.dx;
+    : (global.dxSub ?? global.dx);
   const dyCells = Number.isFinite(weightedMedian(dyValues, weights))
     ? weightedMedian(dyValues, weights)
-    : global.dy;
+    : (global.dySub ?? global.dy);
   const trendDbzPerMinute = Number.isFinite(weightedMedian(trendValues, weights))
     ? weightedMedian(trendValues, weights)
+    : 0;
+  const areaTrendPerMinute = Number.isFinite(weightedMedian(areaValues, weights))
+    ? weightedMedian(areaValues, weights)
     : 0;
 
   const centerLat = grid.lat1 - ((grid.nj - 1) * grid.dj) / 2;
@@ -649,6 +846,13 @@ function dominantSummary(field, grid, intervalMinutes, global) {
     : trendDbzPerMinute < -0.035
       ? 'weakening'
       : 'steady';
+  // Coverage change over the next half hour if the observed trend holds.
+  const areaChangePercent = clamp(areaTrendPerMinute * 30 * 100, -95, 300);
+  const coverage = areaChangePercent > 8
+    ? 'expanding'
+    : areaChangePercent < -8
+      ? 'shrinking'
+      : 'holding';
   const localQuality = localQualities.length ? median(localQualities) : global.quality * 0.6;
   const echoTileFraction = acceptedTiles / Math.max(1, field.accepted.length);
   const quality = clamp(
@@ -671,13 +875,22 @@ function dominantSummary(field, grid, intervalMinutes, global) {
     bearing,
     direction,
     trendDbzPerMinute,
+    trendDbzPer30Min: trendDbzPerMinute * 30,
     intensity,
+    areaTrendPerMinute,
+    areaChangePercent,
+    coverage,
     quality,
+    confidence: quality >= 0.6 ? 'high' : quality >= 0.4 ? 'moderate' : 'low',
     acceptedTiles,
     tileCount: field.accepted.length,
+    evolution: coverage === 'holding'
+      ? intensity
+      : `${intensity}, coverage ${coverage}`,
     text: direction === 'Stationary'
-      ? `Nearly stationary; ${intensity}`
-      : `Moving ${direction} at ${Math.round(speedMps * 2.2369362921)} mph; ${intensity}`,
+      ? `Nearly stationary; ${intensity}${coverage === 'holding' ? '' : `, coverage ${coverage}`}`
+      : `Moving ${direction} at ${Math.round(speedMps * 2.2369362921)} mph; ` +
+        `${intensity}${coverage === 'holding' ? '' : `, coverage ${coverage}`}`,
   };
 }
 
@@ -799,6 +1012,19 @@ export function estimateReflectivityMotion(previousGrid, latestGrid, options = {
 
   const uniqueness = clamp(global.peakSeparation / 0.12, 0, 1);
   global.quality = clamp(global.score * (0.75 + 0.25 * uniqueness), 0, 1);
+  const globalSampleStep = Math.max(1, Math.ceil(Math.max(width, height) / 600));
+  const refinedGlobal = refineDisplacement(
+    previousSignal,
+    latestSignal,
+    width,
+    height,
+    global,
+    null,
+    globalSampleStep,
+    8,
+  );
+  global.dxSub = refinedGlobal.dxSub;
+  global.dySub = refinedGlobal.dySub;
   const field = localMotionField(
     previousGrid,
     latestGrid,
@@ -814,8 +1040,10 @@ export function estimateReflectivityMotion(previousGrid, latestGrid, options = {
     accepted: true,
     intervalMinutes,
     global: {
-      dxCells: global.dx,
-      dyCells: global.dy,
+      dxCells: global.dxSub,
+      dyCells: global.dySub,
+      dxCellsWhole: global.dx,
+      dyCellsWhole: global.dy,
       correlation: global.correlation,
       overlap: global.overlap,
       score: global.score,
@@ -829,10 +1057,82 @@ export function estimateReflectivityMotion(previousGrid, latestGrid, options = {
   };
 }
 
+// Mean of the finite samples within `radius` cells, ignoring holes and treating
+// deep "no coverage" codes as a floor so they cannot drag an echo edge down.
+function boxBlurNaN(input, width, height, radius, floorValue) {
+  const horizontal = new Float32Array(input.length);
+  const output = new Float32Array(input.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let count = 0;
+      const from = Math.max(0, x - radius);
+      const to = Math.min(width - 1, x + radius);
+      for (let sx = from; sx <= to; sx++) {
+        const sample = input[row + sx];
+        if (!Number.isFinite(sample)) continue;
+        sum += sample < floorValue ? floorValue : sample;
+        count++;
+      }
+      horizontal[row + x] = count ? sum / count : NaN;
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    const from = Math.max(0, y - radius);
+    const to = Math.min(height - 1, y + radius);
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let count = 0;
+      for (let sy = from; sy <= to; sy++) {
+        const sample = horizontal[sy * width + x];
+        if (!Number.isFinite(sample)) continue;
+        sum += sample;
+        count++;
+      }
+      output[row + x] = count ? sum / count : NaN;
+    }
+  }
+  return output;
+}
+
+// Blend the forecast toward a version of itself blurred over the distance the
+// motion estimate could plausibly be wrong by this lead. Cells that had no data
+// keep none, and a core is never dimmed by more than `maxSmoothDropDbz`, so the
+// spreading softens edges and fills the space a storm might occupy instead of
+// washing the whole field out.
+function spreadByUncertainty(values, width, height, radius, blend, config) {
+  if (radius < 1 || blend <= 0.01) return values;
+  const floorValue = config.echoThreshold - 15;
+  const blurred = boxBlurNaN(values, width, height, radius, floorValue);
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    const smooth = blurred[i];
+    if (!Number.isFinite(value) || !Number.isFinite(smooth)) continue;
+    const mixed = value * (1 - blend) + smooth * blend;
+    values[i] = mixed < value - config.maxSmoothDropDbz
+      ? value - config.maxSmoothDropDbz
+      : mixed;
+  }
+  return values;
+}
+
+function averageCellKm(grid) {
+  const centerLat = Number(grid.lat1) - ((grid.nj - 1) * Number(grid.dj)) / 2;
+  const kmX = Number(grid.di) * 111.32 *
+    Math.max(0.15, Math.cos(centerLat * Math.PI / 180));
+  const kmY = Number(grid.dj) * 111.32;
+  return (kmX + kmY) / 2;
+}
+
 /**
- * Backward-advect the latest reflectivity through a motion field. The midpoint
- * flow sample is a cheap second-order correction when neighbouring storms have
- * different vectors.
+ * Backward-advect the latest reflectivity through a motion field.
+ *
+ * The back-trajectory is integrated in bounded substeps (each with its own
+ * midpoint correction) rather than as one straight jump, so a parcel follows
+ * curving or diverging flow; the intensity tendency is accumulated along that
+ * same trajectory, which is where the storm actually came from.
  */
 export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options = {}) {
   const config = configured(options);
@@ -850,31 +1150,74 @@ export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options 
   const height = latestGrid.nj;
   const values = new Float32Array(width * height);
   values.fill(NaN);
+  // A tendency that simply ran for the whole lead would turn a two-scan blip
+  // into a 20 dBZ swing, so it saturates: most of the change lands early and
+  // the total is capped.
   const effectiveTrendMinutes = config.trendTauMinutes *
     (1 - Math.exp(-lead / config.trendTauMinutes));
+  const quality = clamp(Number(motion.quality ?? motion.dominant?.quality ?? 0.5), 0, 1);
+  // A poorly tracked field gets less of its own tendency, not more.
+  const trendScale = 0.35 + 0.65 * quality;
+  const steps = Math.max(1, Math.ceil(lead / config.advectionStepMinutes));
+  const stepMinutes = lead / steps;
+  const edgeReach = Math.max(1, config.growthEdgeDbz);
+  const growthFloor = config.echoThreshold - edgeReach;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const initial = sampleMotion(motion.field, x, y);
-      const midX = x - initial.dxPerMinute * lead * 0.5;
-      const midY = y - initial.dyPerMinute * lead * 0.5;
-      const local = sampleMotion(motion.field, midX, midY);
-      const sourceX = x - local.dxPerMinute * lead;
-      const sourceY = y - local.dyPerMinute * lead;
-      let value = bilinearFinite(latestGrid.values, width, height, sourceX, sourceY);
+      let px = x;
+      let py = y;
+      for (let step = 0; step < steps; step++) {
+        const start = sampleFlow(motion.field, px, py);
+        const midX = px - start.dxPerMinute * stepMinutes * 0.5;
+        const midY = py - start.dyPerMinute * stepMinutes * 0.5;
+        const mid = sampleFlow(motion.field, midX, midY);
+        px -= mid.dxPerMinute * stepMinutes;
+        py -= mid.dyPerMinute * stepMinutes;
+      }
+      const value = bilinearFinite(latestGrid.values, width, height, px, py);
       if (!Number.isFinite(value)) continue;
 
-      if (value >= config.echoThreshold) {
-        const tendency = clamp(
-          local.trendDbzPerMinute * effectiveTrendMinutes,
-          -config.maxTrendDeltaDbz,
-          config.maxTrendDeltaDbz,
-        );
-        value += tendency;
+      // Read the tendency where the parcel came from: that is the storm whose
+      // recent growth or decay is being carried forward to this cell.
+      const origin = sampleMotion(motion.field, px, py);
+      const tendency = clamp(
+        origin.trendDbzPerMinute * effectiveTrendMinutes * trendScale,
+        -config.maxTrendDeltaDbz,
+        config.maxTrendDeltaDbz,
+      );
+      // Inside the echo the tendency applies in full. Just outside it, it tapers
+      // off — so a growing storm can push its edge outward across the display
+      // threshold and a collapsing one can pull it back, instead of every storm
+      // keeping exactly the footprint it has now.
+      let reach = 1;
+      if (value < config.echoThreshold) {
+        // Outward growth is also gated on the coverage trend: a storm whose echo
+        // area is shrinking should not spread just because its core brightened.
+        const expanding = clamp(0.35 + origin.areaTrendPerMinute * 12, 0, 1);
+        reach = value > growthFloor
+          ? ((value - growthFloor) / edgeReach) * (tendency > 0 ? expanding : 1)
+          : 0;
       }
-      values[y * width + x] = value;
+      values[y * width + x] = value + tendency * reach;
     }
   }
+
+  // Position error grows with lead and shrinks with tracking quality: a well
+  // tracked squall line barely spreads at 30 minutes, a marginal match spreads
+  // several kilometres and reads as the soft envelope it deserves to be.
+  const cellKm = averageCellKm(latestGrid);
+  const spreadKm = config.uncertaintyKmPerHour * (lead / 60) * (0.95 - 0.65 * quality);
+  const radius = Math.min(
+    config.maxSmoothRadiusCells,
+    Math.round(cellKm > 0 ? spreadKm / cellKm : 0),
+  );
+  const blend = clamp(
+    config.maxSmoothBlend * (lead / NOWCAST_MAX_LEAD_MINUTES) * (0.85 - 0.65 * quality),
+    0,
+    config.maxSmoothBlend,
+  );
+  spreadByUncertainty(values, width, height, radius, blend, config);
 
   const latestTime = toMillis(latestGrid.time ?? latestGrid.validTime);
   const validMillis = Number.isFinite(latestTime)
@@ -886,20 +1229,29 @@ export function advectReflectivityGrid(latestGrid, motion, leadMinutes, options 
     leadMinutes: lead,
     kind: 'forecast',
     extrapolated: true,
+    // How much of the tracking quality survives to this lead, for callers that
+    // want to label or trim frames.
+    confidence: clamp(quality * Math.exp(-lead / 60), 0, 1),
+    uncertaintyKm: Number((spreadKm).toFixed(2)),
     time: Number.isFinite(validMillis) ? new Date(validMillis) : null,
     validTime: Number.isFinite(validMillis) ? new Date(validMillis) : null,
   };
 }
 
 /**
- * End-to-end public API.
+ * Everything up to (but not including) the per-lead advection: validation,
+ * reduction, motion estimation and the lead list the estimate can support.
+ *
+ * Splitting this out lets a caller advect one lead at a time — publishing each
+ * forecast frame as it becomes available instead of waiting for the whole set —
+ * while `buildReflectivityNowcast` keeps the batch behaviour.
  *
  * Returns either:
  *   { accepted:false, code, reason, ...diagnostics }
  * or:
- *   { accepted:true, baseGrid, motion, forecasts, summary, quality, ... }
+ *   { accepted:true, baseGrid, motion, leadsMinutes, summary, quality, config }
  */
-export function buildReflectivityNowcast(previousGrid, latestGrid, options = {}) {
+export function prepareReflectivityNowcast(previousGrid, latestGrid, options = {}) {
   const config = configured(options);
   const previousProblem = validateGrid(previousGrid, 'previous grid');
   const latestProblem = validateGrid(latestGrid, 'latest grid');
@@ -969,20 +1321,31 @@ export function buildReflectivityNowcast(previousGrid, latestGrid, options = {})
     };
   }
 
-  const leads = Array.from(options.leadsMinutes || NOWCAST_LEADS_MINUTES)
+  const requested = Array.from(options.leadsMinutes || NOWCAST_LEADS_MINUTES)
     .map(Number)
     .filter((lead) => Number.isFinite(lead) && lead > 0)
     .sort((a, b) => a - b);
-  if (!leads.length) {
+  if (!requested.length) {
     return rejection('INVALID_LEADS', 'at least one positive forecast lead is required');
   }
-  const forecasts = leads.map((lead) =>
-    advectReflectivityGrid(latest, motion, lead, config));
+  // A weakly tracked field does not earn a half-hour projection. Trimming the
+  // range is a better answer than publishing a frame nobody should trust — the
+  // shortest lead is always kept so the caller still gets something usable. The
+  // ceiling is a fraction of the requested span, so it holds whatever base the
+  // caller counts leads from.
+  const usableSpan = motion.quality >= config.minQualityFor30Min
+    ? 1
+    : motion.quality >= config.minQualityFor20Min
+      ? 0.68
+      : 0.5;
+  const leadCeiling = requested[0] +
+    (requested[requested.length - 1] - requested[0]) * usableSpan;
+  const leads = requested.filter((lead, index) => index === 0 || lead <= leadCeiling + 1e-6);
 
   return {
     accepted: true,
     kind: 'radar-nowcast',
-    method: 'multi-scale block correlation and backward advection',
+    method: 'sub-cell block correlation with multi-step semi-Lagrangian advection',
     previousTime: new Date(previousMillis),
     latestTime: new Date(latestMillis),
     intervalMinutes,
@@ -990,9 +1353,29 @@ export function buildReflectivityNowcast(previousGrid, latestGrid, options = {})
     downsampleFactor: factor,
     baseGrid: latest,
     motion,
-    forecasts,
     leadsMinutes: leads,
+    requestedLeadsMinutes: requested,
+    leadsTrimmed: leads.length < requested.length,
     summary: motion.dominant,
     quality: motion.quality,
+    config,
+  };
+}
+
+/**
+ * End-to-end public API: prepare, then advect every supported lead.
+ *
+ * Returns either:
+ *   { accepted:false, code, reason, ...diagnostics }
+ * or:
+ *   { accepted:true, baseGrid, motion, forecasts, summary, quality, ... }
+ */
+export function buildReflectivityNowcast(previousGrid, latestGrid, options = {}) {
+  const prepared = prepareReflectivityNowcast(previousGrid, latestGrid, options);
+  if (!prepared.accepted) return prepared;
+  return {
+    ...prepared,
+    forecasts: prepared.leadsMinutes.map((lead) =>
+      advectReflectivityGrid(prepared.baseGrid, prepared.motion, lead, prepared.config)),
   };
 }

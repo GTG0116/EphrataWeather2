@@ -10,7 +10,12 @@ import { PRODUCTS, makeScale, parsePal } from './products.js';
 import { createRadarLayer } from './radarLayer.js';
 import { MRMS_PRODUCTS, listMrms, loadMrms } from './mrms.js';
 import { createGridLayer } from './gridLayer.js';
-import { buildReflectivityNowcast } from './nowcast.js';
+import {
+  NOWCAST_MAX_LEAD_MINUTES,
+  prepareReflectivityNowcast,
+  advectReflectivityGrid,
+  cropLatLonGrid,
+} from './nowcast.js';
 import { SATELLITES, SECTORS, listScenes, sceneBBox } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, clearSceneCache } from './satClient.js';
 import { bandsFor, buildRGBA, SAT_PRECIP_ID } from './satProducts.js';
@@ -28,8 +33,10 @@ export const RADAR_PRODUCTS = {
 };
 
 export const MRMS_RADAR_PRODUCTS = {
-  refl:      { decoderId: 'REFC',     label: 'Composite Reflectivity', unit: 'dBZ' },
-  future:    { decoderId: 'REFC',     label: '30-min Future Radar', unit: 'dBZ', nowcast: true },
+  // Composite reflectivity carries the extrapolated frames on the end of its own
+  // timeline (`nowcast`), so the future radar is simply the part of the radar
+  // timeline that runs past now — not a separate product to switch to.
+  refl:      { decoderId: 'REFC',     label: 'Composite Reflectivity', unit: 'dBZ', nowcast: true },
   mesh:      { decoderId: 'MESH',     label: 'Hail (MESH)', unit: 'in' },
   qpe6h:     { decoderId: 'QPE6H',    label: '6-Hr Precip', unit: 'in' },
   qpe24h:    { decoderId: 'QPE24H',   label: '24-Hr Precip', unit: 'in' },
@@ -64,7 +71,6 @@ const SATELLITE_LAYER_ID = 'on-device-satellite';
 const MRMS_SMOOTH_LEVEL = 1;
 const MAX_RADAR_FRAMES = 10;
 const NOWCAST_MAX_SOURCE_AGE_MINUTES = 8;
-const NOWCAST_DISPLAY_LEADS_MINUTES = Object.freeze([5, 10, 15, 20, 25, 30]);
 const MAX_SATELLITE_FRAMES = 10;
 const nav = typeof navigator === 'undefined' ? {} : navigator;
 const viewportMin =
@@ -76,6 +82,26 @@ const constrained =
   (nav.maxTouchPoints > 0 && viewportMin <= 1024);
 const RADAR_CACHE_MAX = constrained ? 1 : 3;
 const SATELLITE_CACHE_MAX = constrained ? 1 : 2;
+// Forecast frames are spaced closer than the 5-minute steps the extrapolation
+// used to publish, so playing past "now" glides at roughly the observed scan
+// cadence instead of jumping. Each frame is a float grid, so phones get the
+// coarser spacing.
+const NOWCAST_LEAD_STEP_MINUTES = constrained ? 5 : 3;
+const NOWCAST_DISPLAY_LEADS_MINUTES = Object.freeze(
+  Array.from(
+    { length: Math.floor(NOWCAST_MAX_LEAD_MINUTES / NOWCAST_LEAD_STEP_MINUTES) },
+    (_, index) => (index + 1) * NOWCAST_LEAD_STEP_MINUTES,
+  ),
+);
+// A finished build stays valid until a newer scan lands; this only bounds how
+// long we trust it when the bucket listing has not moved on yet.
+const NOWCAST_REUSE_MS = 150_000;
+// The extrapolation works on the viewed area only: cropping the native CONUS
+// field to this keeps the motion search and every advection pass bounded.
+const NOWCAST_GRID_LIMITS = Object.freeze({
+  maxWidth: constrained ? 520 : 900,
+  maxHeight: constrained ? 360 : 520,
+});
 
 let radarLayer = null;
 let mrmsLayer = null;
@@ -100,16 +126,23 @@ let radarFrames = [];
 let radarFrameIndex = -1;
 let radarFrameMeta = null;
 let shownRadar = null;
+// How many of `radarFrames` are observations; anything after them is an
+// extrapolated frame appended by the nowcast.
+let radarObservedCount = 0;
 let nowcastBuildSequence = 0;
-let nowcastLatestObservedIndex = -1;
+let nowcastFrames = [];
 let nowcastSourceKey = null;
 let nowcastRegionKey = null;
 let nowcastGeneratedAt = 0;
 let nowcastSummary = null;
+let nowcastStatus = 'idle'; // idle | building | ready | unavailable
+let nowcastFailedKey = null;
+let nowcastFailedAt = 0;
 let nowcastInflightPromise = null;
 let nowcastInflightToken = -1;
 let nowcastInflightRegionKey = null;
 let nowcastAbortController = null;
+let nowcastWorker = null;
 const radarCache = new Map();
 const radarInflight = new Map();
 const mrmsCache = new Map();
@@ -277,6 +310,15 @@ function radarResult() {
     frame: radarFrameMeta,
     mode: radarMode,
     productKey: radarProductKey,
+    // Where the observed timeline ends and the extrapolation begins, plus the
+    // state of the build, so the page can label the future half of the scrubber.
+    observedCount: radarObservedCount || radarFrames.length,
+    nowcast: {
+      supported: radarMode === 'mrms' && Boolean(MRMS_RADAR_PRODUCTS[radarProductKey]?.nowcast),
+      status: nowcastStatus,
+      frameCount: Math.max(0, radarFrames.length - radarObservedCount),
+      summary: nowcastSummary,
+    },
     site: radarSite
       ? { id: radarSite[0], name: radarSite[1], lat: radarSite[2], lon: radarSite[3] }
       : null,
@@ -422,19 +464,78 @@ function nowcastHistoryFrame(frames, latest) {
   return best;
 }
 
+function nowcastProduct(productKey = radarProductKey) {
+  return radarMode === 'mrms' && Boolean(MRMS_RADAR_PRODUCTS[productKey]?.nowcast);
+}
+
 function nowcastJobIsCurrent(token) {
   return (
     token === nowcastBuildSequence &&
     radarVisible &&
-    radarMode === 'mrms' &&
-    radarProductKey === 'future'
+    nowcastProduct()
   );
+}
+
+function stopNowcastWorker() {
+  if (!nowcastWorker) return;
+  try { nowcastWorker.terminate(); } catch {}
+  nowcastWorker = null;
 }
 
 function invalidateNowcastBuild() {
   nowcastBuildSequence++;
   nowcastAbortController?.abort();
   nowcastAbortController = null;
+  // Terminating is how an in-progress extrapolation is cancelled: the work is a
+  // bounded synchronous loop inside the worker, so there is nothing to poll.
+  stopNowcastWorker();
+}
+
+function publishRadarFrames() {
+  radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
+}
+
+function observedRadarFrames() {
+  return radarFrames.slice(0, radarObservedCount || radarFrames.length);
+}
+
+// Extrapolated frames are only ever the tail of the timeline, so replacing them
+// never disturbs the observed frames or which frame the user is looking at.
+function applyNowcastFrames(frames) {
+  const selectedKey = radarFrames[radarFrameIndex]?.key;
+  nowcastFrames = frames;
+  radarFrames = observedRadarFrames().concat(frames);
+  const selectedIndex = radarFrames.findIndex((frame) => frame.key === selectedKey);
+  radarFrameIndex = selectedIndex >= 0
+    ? selectedIndex
+    : Math.min(Math.max(0, radarObservedCount - 1), Math.max(0, radarFrames.length - 1));
+  publishRadarFrames();
+  // The frame the user was on is gone (it aged past its valid time, or a rebuild
+  // replaced it) — put whatever the timeline now points at on the map so the
+  // label and the picture agree.
+  if (selectedKey && selectedIndex < 0 && radarFrames.length) {
+    showMrmsRadar(radarFrameIndex).catch((error) =>
+      console.warn('Radar frame unavailable', error));
+  }
+}
+
+function futureNowcastFrames(frames = nowcastFrames) {
+  const now = Date.now();
+  return frames.filter((frame) => frameTimeMillis(frame) > now);
+}
+
+// A finished build is reusable while it still describes the newest scan, covers
+// the same area, and has frames left in the future — switching products or
+// panning back then re-shows it instantly instead of rebuilding.
+function reusableNowcastFrames(latestKey, regionKey) {
+  if (
+    nowcastSourceKey !== latestKey ||
+    nowcastRegionKey !== regionKey ||
+    !nowcastGeneratedAt ||
+    Date.now() - nowcastGeneratedAt > NOWCAST_REUSE_MS
+  ) return null;
+  const usable = futureNowcastFrames();
+  return usable.length ? usable : null;
 }
 
 function currentMapBounds(location, preferredCenter = null) {
@@ -473,297 +574,317 @@ function nowcastBoundsKey(bounds) {
     .join(':');
 }
 
-function cropLatLonGrid(grid, bounds, { maxWidth, maxHeight }) {
-  const ni = Number(grid?.ni);
-  const nj = Number(grid?.nj);
-  const lon1 = Number(grid?.lon1);
-  const lat1 = Number(grid?.lat1);
-  const di = Number(grid?.di);
-  const dj = Number(grid?.dj);
-  if (
-    !Number.isInteger(ni) || !Number.isInteger(nj) ||
-    ![lon1, lat1, di, dj].every(Number.isFinite) ||
-    !(di > 0) || !(dj > 0)
-  ) {
-    throw new TypeError('MRMS grid has invalid latitude/longitude geometry');
-  }
 
-  const col0 = Math.max(0, Math.floor((bounds.west - lon1) / di));
-  const col1 = Math.min(ni - 1, Math.ceil((bounds.east - lon1) / di));
-  const row0 = Math.max(0, Math.floor((lat1 - bounds.north) / dj));
-  const row1 = Math.min(nj - 1, Math.ceil((lat1 - bounds.south) / dj));
-  if (col1 < col0 || row1 < row0) {
-    throw new RangeError('selected map area is outside MRMS CONUS coverage');
-  }
-
-  const sourceWidth = col1 - col0 + 1;
-  const sourceHeight = row1 - row0 + 1;
-  const factor = Math.max(
-    1,
-    Math.ceil(sourceWidth / maxWidth),
-    Math.ceil(sourceHeight / maxHeight),
-  );
-  const width = Math.ceil(sourceWidth / factor);
-  const height = Math.ceil(sourceHeight / factor);
-  const values = new Float32Array(width * height);
-  values.fill(NaN);
-  for (let outRow = 0; outRow < height; outRow++) {
-    const sourceRow = row0 + outRow * factor;
-    for (let outCol = 0; outCol < width; outCol++) {
-      const sourceCol = col0 + outCol * factor;
-      let best = -Infinity;
-      let found = false;
-      for (let dy = 0; dy < factor && sourceRow + dy <= row1; dy++) {
-        const base = (sourceRow + dy) * ni + sourceCol;
-        for (let dx = 0; dx < factor && sourceCol + dx <= col1; dx++) {
-          const value = Number(grid.values[base + dx]);
-          if (Number.isFinite(value) && (!found || value > best)) {
-            best = value;
-            found = true;
-          }
-        }
-      }
-      if (found) values[outRow * width + outCol] = best;
-    }
-  }
-  return {
-    ...grid,
-    proj: 'latlon',
-    ni: width,
-    nj: height,
-    lon1: lon1 + (col0 + (factor - 1) / 2) * di,
-    lat1: lat1 - (row0 + (factor - 1) / 2) * dj,
-    di: di * factor,
-    dj: dj * factor,
-    values,
-    downsampleFactor: factor,
-  };
+// A decoded native grid for this scan that is already in memory, if any: the
+// frame's own grid, the one currently on the map, or a cached decode. Never
+// downloads — callers use this to avoid re-fetching a field the page already has.
+function residentMrmsGrid(frame) {
+  const usable = (grid) => grid?.values?.length > 0 && grid.key === frame.key;
+  if (usable(frame.grid)) return frame.grid;
+  if (usable(shownRadar?.grid)) return shownRadar.grid;
+  const cached = lruGet(mrmsCache, `REFC|${frame.key}`);
+  return usable(cached) ? cached : null;
 }
 
-async function reducedNowcastGrid(frame, bounds, onProgress, signal) {
-  const cacheKey = `REFC|${frame.key}`;
-  let raw = lruGet(mrmsCache, cacheKey);
+function croppedNowcastGrid(raw, frame, bounds) {
+  const reduced = cropLatLonGrid(raw, bounds, NOWCAST_GRID_LIMITS);
+  reduced.key = frame.key;
+  reduced.time = frame.time || raw.time || null;
+  reduced.validTime = reduced.time;
+  return reduced;
+}
+
+// Crop one scan to the viewed area, downloading it only if the page does not
+// already hold it. The scan the user is looking at is resident, so the usual case
+// is a crop of a few hundred thousand cells and no network at all.
+async function nowcastSourceGrid(frame, bounds, signal, onProgress) {
+  let raw = residentMrmsGrid(frame);
   let ownsRaw = false;
-  mrmsCache.delete(cacheKey);
-  if (!raw && mrmsInflight.has(cacheKey)) {
-    raw = await mrmsInflight.get(cacheKey);
-    mrmsCache.delete(cacheKey);
-  }
-  if (!raw) {
-    emitStatus('radar', 'downloading', 'Downloading MRMS Composite Reflectivity', 0);
+  const cacheKey = `REFC|${frame.key}`;
+  if (!raw && mrmsInflight.has(cacheKey)) raw = await mrmsInflight.get(cacheKey);
+  if (!raw?.values?.length) {
     raw = await loadMrms('REFC', frame.key, onProgress, signal);
     ownsRaw = true;
   }
   try {
     if (signal?.aborted) {
-      const error = new Error('Future radar build was canceled');
+      const error = new Error('the extrapolation was canceled');
       error.name = 'AbortError';
       throw error;
     }
-    const reduced = cropLatLonGrid(raw, bounds, {
-      maxWidth: constrained ? 520 : 900,
-      maxHeight: constrained ? 360 : 520,
-    });
-    reduced.key = frame.key;
-    reduced.time = frame.time || raw.time || null;
-    reduced.validTime = reduced.time;
-    return reduced;
+    return croppedNowcastGrid(raw, frame, bounds);
   } finally {
-    // A native CONUS field is close to 100 MB. Release it before fetching the
-    // second scan so constrained devices never retain two native grids at once.
-    // A grid borrowed from the shared cache/in-flight map may still be awaited
-    // by a newly selected Reflectivity view. Only clear arrays this reducer
-    // downloaded itself; borrowed grids are merely evicted and left intact.
+    // A native CONUS field is close to 100 MB. Release the one this build
+    // downloaded itself so constrained devices never retain two at once; a grid
+    // borrowed from the frame cache is still backing the observed view and is
+    // left untouched.
     if (ownsRaw) raw.values = new Float32Array(0);
-    mrmsCache.delete(cacheKey);
   }
 }
 
-function publishNowcastUnavailable(observed, latest, latestGrid, reason) {
-  radarFrames = observed.map(frame =>
-    frame.key === latest.key ? { ...frame, grid: latestGrid } : frame);
-  nowcastLatestObservedIndex = radarFrames.length - 1;
-  radarFrameIndex = nowcastLatestObservedIndex;
-  nowcastSummary = { unavailable: true, reason, text: reason };
-  radarFrameMeta = {
-    key: latest.key,
-    time: latest.time || latestGrid?.time || null,
-    forecast: false,
-    leadMinutes: 0,
-    quality: 0,
-    summary: nowcastSummary,
+function nowcastGridMessage(grid) {
+  return {
+    ni: grid.ni,
+    nj: grid.nj,
+    lon1: grid.lon1,
+    lat1: grid.lat1,
+    di: grid.di,
+    dj: grid.dj,
+    values: grid.values,
+    timeMillis: frameTimeMillis(grid),
   };
-  if (shownRadar?.mode === 'mrms') shownRadar.forecast = radarFrameMeta;
-  emitStatus('radar', 'ready', `Future radar unavailable: ${reason}`, 1);
-  radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
-  return radarResult();
 }
 
-async function loadFutureRadar(token, bounds, regionKey, resetToLatest, signal) {
-  emitStatus('radar', 'listing', 'Finding recent MRMS reflectivity scans', null);
-  const available = await recentMrmsFrames('REFC');
-  if (!nowcastJobIsCurrent(token)) return radarResult();
-  if (!available.length) throw new Error('No recent MRMS reflectivity scans were found');
+function nowcastForecastFrame(sourceFrame, leadMinutes, grid, motion) {
+  const time = Number.isFinite(grid.timeMillis) ? new Date(grid.timeMillis) : null;
+  return {
+    key: `nowcast:${sourceFrame.key}:+${leadMinutes}`,
+    label: `Extrapolated +${leadMinutes} min`,
+    time,
+    validTime: time,
+    forecast: true,
+    extrapolated: true,
+    leadMinutes,
+    sourceLeadMinutes: grid.leadMinutes,
+    quality: Number.isFinite(grid.confidence) ? grid.confidence : motion.quality,
+    summary: motion.summary,
+    method: motion.method,
+    grid: {
+      proj: 'latlon',
+      ni: grid.ni,
+      nj: grid.nj,
+      lon1: grid.lon1,
+      lat1: grid.lat1,
+      di: grid.di,
+      dj: grid.dj,
+      values: grid.values,
+      key: `nowcast:${sourceFrame.key}:+${leadMinutes}`,
+      time,
+      validTime: time,
+      forecast: true,
+      extrapolated: true,
+      leadMinutes,
+    },
+  };
+}
 
-  const latest = available[available.length - 1];
-  const latestAgeMinutes = (Date.now() - frameTimeMillis(latest)) / 60000;
-  if (
-    nowcastSourceKey === latest.key &&
-    nowcastRegionKey === regionKey &&
-    Date.now() - nowcastGeneratedAt <= 90_000 &&
-    latestAgeMinutes <= NOWCAST_MAX_SOURCE_AGE_MINUTES &&
-    radarFrames.some(frame => frame.forecast && frameTimeMillis(frame) > Date.now()) &&
-    nowcastLatestObservedIndex >= 0
-  ) {
-    const selectedKey = radarFrames[radarFrameIndex]?.key;
-    radarFrames = radarFrames.filter(frame =>
-      !frame.forecast || frameTimeMillis(frame) > Date.now());
-    nowcastLatestObservedIndex = radarFrames.reduce(
-      (last, frame, index) => frame.forecast ? last : index,
-      -1,
-    );
-    const selectedIndex = radarFrames.findIndex(frame => frame.key === selectedKey);
-    return showMrmsRadar(
-      !resetToLatest && selectedIndex >= 0 ? selectedIndex : nowcastLatestObservedIndex,
-    );
+// Run the extrapolation in a module worker, handing each finished lead straight
+// to `onForecast`. The older scan is passed by key so the worker downloads and
+// decodes it itself. Falls back to running in-page (fetching that scan here and
+// yielding between leads so the map keeps painting) if a worker cannot be made.
+function runNowcastEngine(request, hooks) {
+  const { onMotion, onForecast, isCurrent } = hooks;
+  let worker = null;
+  try {
+    worker = new Worker(new URL('./nowcast.worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    worker = null;
   }
+  if (!worker) return runNowcastInPage(request, hooks);
 
-  const observed = [latest];
-  const history = nowcastHistoryFrame(available, latest);
+  stopNowcastWorker();
+  nowcastWorker = worker;
+  return new Promise((resolve, reject) => {
+    let motion = null;
+    const finish = (action, value) => {
+      if (nowcastWorker === worker) stopNowcastWorker();
+      else { try { worker.terminate(); } catch {} }
+      action(value);
+    };
+    worker.onmessage = ({ data }) => {
+      if (!isCurrent()) { finish(resolve, { canceled: true }); return; }
+      if (data.type === 'motion') {
+        motion = data;
+        onMotion(data);
+      } else if (data.type === 'forecast') {
+        onForecast(data.index, data.grid, motion);
+      } else if (data.type === 'rejected') {
+        finish(resolve, { rejected: data.reason || 'the echo field could not be tracked' });
+      } else if (data.type === 'error') {
+        finish(reject, new Error(data.error));
+      } else if (data.type === 'done') {
+        finish(resolve, { motion });
+      }
+    };
+    worker.onerror = (event) =>
+      finish(reject, new Error(event.message || 'the extrapolation worker crashed'));
+    worker.onmessageerror = () =>
+      finish(reject, new Error('the extrapolation worker returned an unreadable response'));
+    worker.postMessage({ id: 1, ...request });
+  });
+}
+
+async function runNowcastInPage(request, { onMotion, onForecast, isCurrent }) {
+  const { latest, options } = request;
+  const previous = request.previous || await nowcastSourceGrid(
+    { key: request.previousKey.key, time: new Date(request.previousKey.timeMillis) },
+    request.bounds,
+    null,
+  );
+  const prepared = prepareReflectivityNowcast(
+    { ...previous, time: new Date(previous.timeMillis ?? frameTimeMillis(previous)) },
+    { ...latest, time: new Date(latest.timeMillis) },
+    options,
+  );
+  if (!prepared.accepted) {
+    return { rejected: prepared.reason || 'the echo field could not be tracked' };
+  }
+  const motion = {
+    summary: prepared.summary,
+    quality: prepared.quality,
+    method: prepared.method,
+    intervalMinutes: prepared.intervalMinutes,
+    leadsMinutes: prepared.leadsMinutes,
+    leadsTrimmed: prepared.leadsTrimmed,
+  };
+  onMotion(motion);
+  for (let index = 0; index < prepared.leadsMinutes.length; index++) {
+    if (!isCurrent()) return { canceled: true };
+    // One frame per turn of the event loop, so a slow device still paints and
+    // scrolls between leads rather than freezing for the whole set.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const forecast = advectReflectivityGrid(
+      prepared.baseGrid, prepared.motion, prepared.leadsMinutes[index], prepared.config,
+    );
+    onForecast(index, {
+      ni: forecast.ni,
+      nj: forecast.nj,
+      lon1: forecast.lon1,
+      lat1: forecast.lat1,
+      di: forecast.di,
+      dj: forecast.dj,
+      values: forecast.values,
+      timeMillis: frameTimeMillis(forecast),
+      leadMinutes: forecast.leadMinutes,
+      confidence: forecast.confidence,
+      uncertaintyKm: forecast.uncertaintyKm,
+    }, motion);
+  }
+  return { motion };
+}
+
+function markNowcastUnavailable(reason) {
+  nowcastStatus = 'unavailable';
+  nowcastSummary = { unavailable: true, reason, text: reason };
+  nowcastGeneratedAt = 0;
+  // Remember what failed, so panning around or flipping products does not retry
+  // the same doomed build (and its download) over and over.
+  nowcastFailedKey = `${nowcastSourceKey}|${nowcastRegionKey}`;
+  nowcastFailedAt = Date.now();
+  applyNowcastFrames([]);
+}
+
+// Build (or rebuild) the extrapolated tail of the reflectivity timeline. The
+// observed frames are already on screen and are never touched by this, so a
+// failure here costs the user nothing and a success simply extends the scrubber.
+async function buildNowcast(token, bounds, regionKey) {
+  const observed = observedRadarFrames();
+  const latest = observed[observed.length - 1];
+  if (!latest) return;
   nowcastSourceKey = latest.key;
   nowcastRegionKey = regionKey;
   nowcastGeneratedAt = 0;
   nowcastSummary = null;
 
-  // Decode/crop the latest field first and publish it as the only frame. That
-  // both gives immediate feedback and keeps the timeline inert while the
-  // previous scan is fetched, so scrubbing cannot start a second native decode.
+  const latestAgeMinutes = (Date.now() - frameTimeMillis(latest)) / 60000;
+  if (!(latestAgeMinutes <= NOWCAST_MAX_SOURCE_AGE_MINUTES)) {
+    markNowcastUnavailable(`latest scan is ${Math.round(latestAgeMinutes)} minutes old`);
+    return;
+  }
+  const history = nowcastHistoryFrame(observed, latest);
+  if (!history) {
+    markNowcastUnavailable('not enough recent scan history');
+    return;
+  }
+
+  nowcastStatus = 'building';
+  publishRadarFrames();
+
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  nowcastAbortController = controller;
   let latestGrid;
   try {
-    latestGrid = await reducedNowcastGrid(latest, bounds, (progress) => {
-      if (nowcastJobIsCurrent(token))
-        emitStatus('radar', 'downloading', 'Downloading latest MRMS reflectivity', progress);
-    }, signal);
+    // The newest scan is already decoded for the observed view, so this is just a
+    // crop. The older one is left to the worker, which fetches and decodes it
+    // without the page ever touching a native CONUS field.
+    latestGrid = await nowcastSourceGrid(latest, bounds, controller?.signal);
   } catch (error) {
-    if (!nowcastJobIsCurrent(token)) return radarResult();
-    return publishNowcastUnavailable([], latest, null, error.message);
+    if (!nowcastJobIsCurrent(token)) return;
+    markNowcastUnavailable(error?.name === 'AbortError'
+      ? 'the extrapolation was canceled'
+      : `the latest scan could not be prepared: ${error.message}`);
+    return;
+  } finally {
+    if (nowcastAbortController === controller) nowcastAbortController = null;
   }
-  if (!nowcastJobIsCurrent(token)) return radarResult();
-  radarFrames = [{ ...latest, grid: latestGrid }];
-  nowcastLatestObservedIndex = 0;
-  radarFrameIndex = 0;
-  await showMrmsRadar(0);
-  if (!nowcastJobIsCurrent(token)) return radarResult();
+  if (!nowcastJobIsCurrent(token)) return;
 
-  if (latestAgeMinutes > NOWCAST_MAX_SOURCE_AGE_MINUTES) {
-    return publishNowcastUnavailable(
-      observed,
-      latest,
-      latestGrid,
-      `latest scan is ${Math.round(latestAgeMinutes)} minutes old`,
-    );
-  }
+  const buildNow = Date.now();
+  // Leads are counted from now rather than from the scan time, so "+3 min" is
+  // three minutes away for the user, not three minutes after a scan that landed
+  // two minutes ago.
+  const sourceAgeMinutes = Math.max(0, (buildNow - frameTimeMillis(latest)) / 60000);
+  const advectionLeads = NOWCAST_DISPLAY_LEADS_MINUTES.map((lead) => lead + sourceAgeMinutes);
+  // Existing frames stay on the timeline until the replacements are complete, so
+  // a rebuild (a pan, say) never makes the future half of the scrubber flicker.
+  const replacing = nowcastFrames.length > 0;
+  const pending = [];
+  let motionInfo = null;
 
-  if (!history) {
-    return publishNowcastUnavailable(
-      observed,
-      latest,
-      latestGrid,
-      'not enough recent scan history',
-    );
-  }
+  // If the older scan happens to be decoded already (the user animated the
+  // timeline, say), crop it here and skip the worker's download entirely.
+  const residentHistory = residentMrmsGrid(history);
+  const previousMessage = residentHistory
+    ? nowcastGridMessage(croppedNowcastGrid(residentHistory, history, bounds))
+    : null;
 
-  emitStatus('radar', 'deriving', 'Estimating storm speed and direction', null);
-  let previousGrid;
-  try {
-    previousGrid = await reducedNowcastGrid(history, bounds, (progress) => {
-      if (nowcastJobIsCurrent(token))
-        emitStatus('radar', 'downloading', 'Downloading prior MRMS reflectivity', progress);
-    }, signal);
-  } catch (error) {
-    if (!nowcastJobIsCurrent(token)) return radarResult();
-    return publishNowcastUnavailable(
-      observed,
-      latest,
-      latestGrid,
-      `prior scan could not be decoded: ${error.message}`,
-    );
-  }
-  if (!nowcastJobIsCurrent(token)) return radarResult();
-
-  // Let the status text paint before the bounded, synchronous correlation pass.
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const buildNow = new Date();
-  const sourceAgeMinutes = Math.max(
-    0,
-    (buildNow.getTime() - frameTimeMillis(latest)) / 60000,
-  );
-  const advectionLeads = NOWCAST_DISPLAY_LEADS_MINUTES.map(
-    lead => lead + sourceAgeMinutes,
-  );
-  const result = buildReflectivityNowcast(previousGrid, latestGrid, {
-    now: buildNow,
-    maxWidth: constrained ? 520 : 900,
-    maxHeight: constrained ? 360 : 520,
-    maxAgeMinutes: NOWCAST_MAX_SOURCE_AGE_MINUTES,
-    leadsMinutes: advectionLeads,
+  const outcome = await runNowcastEngine({
+    latest: nowcastGridMessage(latestGrid),
+    previous: previousMessage,
+    previousKey: { key: history.key, timeMillis: frameTimeMillis(history) },
+    bounds,
+    limits: NOWCAST_GRID_LIMITS,
+    options: {
+      now: buildNow,
+      ...NOWCAST_GRID_LIMITS,
+      maxAgeMinutes: NOWCAST_MAX_SOURCE_AGE_MINUTES,
+      leadsMinutes: advectionLeads,
+    },
+  }, {
+    isCurrent: () => nowcastJobIsCurrent(token),
+    onMotion: (motion) => {
+      motionInfo = motion;
+      nowcastSummary = motion.summary;
+      if (!replacing) publishRadarFrames();
+    },
+    onForecast: (index, grid, motion) => {
+      const leadMinutes = NOWCAST_DISPLAY_LEADS_MINUTES[index];
+      if (!Number.isFinite(leadMinutes)) return;
+      const frame = nowcastForecastFrame(
+        latest, leadMinutes, grid, motion || motionInfo || { quality: 0 },
+      );
+      if (frameTimeMillis(frame) <= Date.now()) return;
+      if (replacing) pending.push(frame);
+      else applyNowcastFrames(nowcastFrames.concat(frame));
+    },
   });
-  if (!nowcastJobIsCurrent(token)) return radarResult();
-  if (!result.accepted) {
-    return publishNowcastUnavailable(
-      observed,
-      latest,
-      latestGrid,
-      result.reason,
-    );
-  }
 
-  nowcastSummary = result.summary;
-  nowcastGeneratedAt = buildNow.getTime();
-  const forecastFrames = result.forecasts.map((forecast, index) => ({
-    key: `nowcast:${latest.key}:+${NOWCAST_DISPLAY_LEADS_MINUTES[index]}`,
-    label: `Extrapolated +${NOWCAST_DISPLAY_LEADS_MINUTES[index]} min`,
-    time: forecast.validTime || forecast.time,
-    validTime: forecast.validTime || forecast.time,
-    forecast: true,
-    extrapolated: true,
-    leadMinutes: NOWCAST_DISPLAY_LEADS_MINUTES[index],
-    sourceLeadMinutes: forecast.leadMinutes,
-    grid: forecast,
-    quality: result.quality,
-    summary: result.summary,
-    method: result.method,
-  })).filter(frame => frameTimeMillis(frame) > Date.now());
-  if (!forecastFrames.length) {
-    return publishNowcastUnavailable(
-      observed,
-      latest,
-      latestGrid,
-      'no extrapolated frame has a future valid time',
-    );
+  if (!nowcastJobIsCurrent(token) || outcome?.canceled) return;
+  if (outcome?.rejected) {
+    markNowcastUnavailable(outcome.rejected);
+    return;
   }
-  const motionObservedFrames = [
-    { ...history, grid: previousGrid },
-    { ...latest, grid: latestGrid },
-  ];
-  radarFrames = motionObservedFrames.concat(forecastFrames);
-  nowcastLatestObservedIndex = motionObservedFrames.length - 1;
-  radarFrameIndex = nowcastLatestObservedIndex;
-  radarFrameMeta = {
-    key: latest.key,
-    time: latest.time || latestGrid.time || null,
-    forecast: false,
-    leadMinutes: 0,
-    quality: result.quality,
-    summary: result.summary,
-  };
-  if (shownRadar?.mode === 'mrms') shownRadar.forecast = radarFrameMeta;
-  emitStatus('radar', 'ready', `Future radar ready · ${result.summary.text}`, 1);
-  radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
-  return radarResult();
+  if (replacing) applyNowcastFrames(pending);
+  if (!nowcastFrames.length) {
+    markNowcastUnavailable('no extrapolated frame has a future valid time');
+    return;
+  }
+  nowcastStatus = 'ready';
+  nowcastGeneratedAt = Date.now();
+  publishRadarFrames();
 }
 
-function queuedFutureRadar(token, bounds, regionKey, resetToLatest = false) {
+function queuedNowcast(token, bounds, regionKey) {
   if (
     nowcastInflightPromise &&
     nowcastInflightToken === token &&
@@ -776,20 +897,8 @@ function queuedFutureRadar(token, bounds, regionKey, resetToLatest = false) {
     if (previous) {
       try { await previous; } catch {}
     }
-    if (!nowcastJobIsCurrent(token)) return radarResult();
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    nowcastAbortController = controller;
-    try {
-      return await loadFutureRadar(
-        token,
-        bounds,
-        regionKey,
-        resetToLatest,
-        controller?.signal,
-      );
-    } finally {
-      if (nowcastAbortController === controller) nowcastAbortController = null;
-    }
+    if (!nowcastJobIsCurrent(token)) return;
+    await buildNowcast(token, bounds, regionKey);
   })();
   nowcastInflightPromise = task;
   nowcastInflightToken = token;
@@ -800,8 +909,47 @@ function queuedFutureRadar(token, bounds, regionKey, resetToLatest = false) {
       nowcastInflightToken = -1;
       nowcastInflightRegionKey = null;
     }
-  }).catch(() => {});
+  }).catch((error) => {
+    if (nowcastJobIsCurrent(token)) markNowcastUnavailable(error.message);
+    console.warn('Radar extrapolation unavailable', error);
+  });
   return task;
+}
+
+// Extend the reflectivity timeline into the future once its observed frames are
+// on screen. Deliberately not awaited by the caller: the radar is already
+// usable, and the extrapolation only ever adds to the end of the timeline.
+function scheduleNowcast({ location = null, center = null } = {}) {
+  if (!nowcastProduct() || !radarVisible || !radarFrames.length) return;
+  const bounds = currentMapBounds(location, center);
+  const regionKey = nowcastBoundsKey(bounds);
+  const latest = observedRadarFrames().at(-1);
+  if (!latest) return;
+
+  const reusable = reusableNowcastFrames(latest.key, regionKey);
+  if (reusable) {
+    if (reusable.length !== nowcastFrames.length || radarFrames.length === radarObservedCount) {
+      applyNowcastFrames(reusable);
+    }
+    nowcastStatus = 'ready';
+    return;
+  }
+  if (
+    nowcastInflightPromise &&
+    nowcastInflightRegionKey === regionKey &&
+    nowcastSourceKey === latest.key
+  ) return;
+  // The same scan over the same area already failed a moment ago; leave the
+  // "unavailable" note in place instead of grinding through it again.
+  if (
+    nowcastFailedKey === `${latest.key}|${regionKey}` &&
+    Date.now() - nowcastFailedAt < 60_000
+  ) return;
+
+  // A different source scan or viewed area means the frames in hand are stale.
+  invalidateNowcastBuild();
+  const token = nowcastBuildSequence;
+  queuedNowcast(token, bounds, regionKey);
 }
 
 function satelliteConfig(sourceKey) {
@@ -977,7 +1125,14 @@ export async function loadRadar({
     radarFrames = [];
     radarFrameIndex = -1;
     radarFrameMeta = null;
+    radarObservedCount = 0;
     shownRadar = null;
+    // Frames from the previous product are gone, but a still-valid extrapolation
+    // of the same source scan is kept so switching back is instant.
+    if (!nowcastProduct(requestedProduct)) {
+      nowcastStatus = 'idle';
+      nowcastSummary = null;
+    }
     radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
   }
 
@@ -985,39 +1140,42 @@ export async function loadRadar({
     radarSite = null;
     radarLayer?.clear();
     const product = MRMS_RADAR_PRODUCTS[radarProductKey];
-    if (product.nowcast) {
-      const bounds = currentMapBounds(location, nowcastCenter);
-      const regionKey = nowcastBoundsKey(bounds);
-      const regionChanged = (
-        (nowcastInflightPromise && nowcastInflightRegionKey !== regionKey) ||
-        (nowcastRegionKey && nowcastRegionKey !== regionKey && radarFrames.length)
-      );
-      if (regionChanged) {
-        invalidateNowcastBuild();
-        radarFrames = [];
-        radarFrameIndex = -1;
-        radarFrameMeta = null;
-        shownRadar = null;
-        mrmsLayer?.clear();
-        radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
-      }
-      const token = nowcastBuildSequence;
-      return queuedFutureRadar(token, bounds, regionKey, resetToLatest);
-    }
     if (contextChanged || resetToLatest || !radarFrames.length || shownRadar?.mode !== 'mrms') {
       emitStatus('radar', 'listing', `Finding recent MRMS ${product.label} frames`, null);
       const frames = await recentMrmsFrames(product.decoderId);
       if (sequence !== radarSequence) return radarResult();
-      radarFrames = frames.slice(-MAX_RADAR_FRAMES);
-      radarFrameIndex = radarFrames.length - 1;
+      const observed = frames.slice(-MAX_RADAR_FRAMES);
+      radarObservedCount = observed.length;
+      // A build that still describes the newest scan and the same area is put
+      // straight back on the timeline; otherwise the tail starts out empty and
+      // fills in behind the observed frames.
+      const reusable = product.nowcast
+        ? reusableNowcastFrames(observed.at(-1)?.key, nowcastBoundsKey(
+            currentMapBounds(location, nowcastCenter),
+          ))
+        : null;
+      nowcastFrames = reusable || [];
+      radarFrames = observed.concat(nowcastFrames);
+      radarFrameIndex = Math.max(0, radarObservedCount - 1);
     }
     if (!radarFrames.length) throw new Error(`No recent MRMS ${product.label} frames were found`);
+    if (!radarObservedCount) radarObservedCount = radarFrames.length;
+    const latestObservedIndex = Math.max(0, radarObservedCount - 1);
     const targetIndex = contextChanged || resetToLatest || radarFrameIndex < 0
-      ? radarFrames.length - 1
+      ? latestObservedIndex
       : Math.min(radarFrameIndex, radarFrames.length - 1);
-    return showMrmsRadar(targetIndex, sequence);
+    const shown = await showMrmsRadar(targetIndex, sequence);
+    // Deliberately not awaited: the observed radar is already on the map, and the
+    // extrapolated frames append themselves to the timeline as they finish.
+    if (product.nowcast && sequence === radarSequence) {
+      scheduleNowcast({ location, center: nowcastCenter });
+    }
+    return shown;
   }
 
+  radarObservedCount = 0;
+  nowcastFrames = [];
+  nowcastStatus = 'idle';
   mrmsLayer?.clear();
   const requestedSite = String(siteId || '').toUpperCase();
   const selected =
@@ -1052,6 +1210,30 @@ export async function loadRadar({
 
 export function showRadarFrame(index) {
   return showRadar(index);
+}
+
+/**
+ * Re-derive the extrapolated tail for the area now in view (and drop any frame
+ * whose valid time has passed). Cheap to call on every map idle: it returns
+ * immediately unless the viewed area or the newest scan actually changed.
+ */
+export function refreshNowcast({ location = null, center = null } = {}) {
+  if (!radarVisible || !nowcastProduct() || !radarFrames.length) return;
+  const usable = futureNowcastFrames();
+  if (usable.length !== nowcastFrames.length) applyNowcastFrames(usable);
+  scheduleNowcast({ location, center });
+}
+
+export function nowcastState() {
+  return {
+    supported: nowcastProduct(),
+    status: nowcastStatus,
+    frameCount: nowcastFrames.length,
+    observedCount: radarObservedCount,
+    leadsMinutes: [...NOWCAST_DISPLAY_LEADS_MINUTES],
+    summary: nowcastSummary,
+    generatedAt: nowcastGeneratedAt || null,
+  };
 }
 
 export async function loadSatellite({
