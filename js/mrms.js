@@ -348,8 +348,8 @@ async function loadMrmsExceedance(productId, qpeKey, onProgress) {
   return grid;
 }
 
-export async function fetchMrms(key, onProgress) {
-  const res = await fetch(`${BUCKET}/${key}`);
+export async function fetchMrms(key, onProgress, signal) {
+  const res = await fetch(`${BUCKET}/${key}`, { signal });
   if (!res.ok) throw new Error(`MRMS download failed: ${res.status}`);
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
@@ -370,10 +370,10 @@ export async function fetchMrms(key, onProgress) {
 }
 
 // Download + decode one MRMS frame into a lat/lon grid of physical values.
-export async function loadMrms(productId, key, onProgress) {
+export async function loadMrms(productId, key, onProgress, signal) {
   const prod = MRMS_PRODUCTS[productId];
   if (prod && prod.custom === 'ffgx') return loadMrmsExceedance(productId, key, onProgress);
-  const bytes = await fetchMrms(key, onProgress);
+  const bytes = await fetchMrms(key, onProgress, signal);
   const grid = await decodeGrib2(bytes);
   if (prod && prod.valueFactor != null && prod.valueFactor !== 1) {
     const values = grid.values;

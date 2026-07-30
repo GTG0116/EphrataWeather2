@@ -160,6 +160,7 @@ const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
 const MRMS_PRODUCTS = {
   rate:      { label: "Precip Type",     getGeo: i => i === 0 ? "master.geojson" : `master_${i}.geojson`, getMeta: i => `metadata_${i}.json`,           unit: "in/hr", dec: 2, typed: true },
   refl:      { label: "Reflectivity",    getGeo: i => `refl_${i}.geojson`,                                getMeta: i => `metadata_refl_${i}.json`,      unit: "dBZ",   dec: 0 },
+  future:    { label: "30-min Future Radar", unit: "dBZ", dec: 0, nowcast: true },
   mesh:      { label: "Hail (MESH)",     getGeo: i => `mesh_${i}.geojson`,                                getMeta: i => `metadata_mesh_${i}.json`,      unit: "in",    dec: 2 },
   qpe6h:     { label: "6-Hr Precip",     getGeo: i => `qpe6h_${i}.geojson`,                               getMeta: i => `metadata_qpe6h_${i}.json`,     unit: "in",    dec: 2 },
   qpe24h:    { label: "24-Hr Precip",    getGeo: i => `qpe24h_${i}.geojson`,                              getMeta: i => `metadata_qpe24h_${i}.json`,    unit: "in",    dec: 2 },
@@ -176,7 +177,7 @@ const MRMS_RATE_TYPE_BY_COLOR = (() => {
   const add = (colors, type) => colors.forEach(c => { map[c.toLowerCase()] = type; });
   add(["#00fb90", "#00cc00", "#009900", "#006600", "#ffff00", "#ffcc00", "#ff9100", "#ff5500", "#ff0000", "#cc0000"], "Rain");
   add(["#00ffff", "#80ffff", "#ffffff", "#adc5ff", "#5a82ff"], "Snow");
-  add(["#ff00ff", "#d100d1", "#910091", "#4b0082", "#2d004b"], "Ice / Sleet");
+  add(["#ff00ff", "#d100d1", "#910091", "#4b0082", "#2d004b"], "Freezing Rain/Sleet");
   return map;
 })();
 const MRMS_LEGENDS = {
@@ -189,7 +190,7 @@ const MRMS_LEGENDS = {
         ticks: ["0.02\"", "0.12\"", "0.50\"", "2.0\"", "5.0\""],
       },
       {
-        label: "ICE PELLETS (IN/HR)",
+        label: "FREEZING RAIN / SLEET (IN/HR)",
         gradient: "linear-gradient(90deg, #ff4dff 0%, #e000df 45%, #b000aa 72%, #7a0078 100%)",
         ticks: ["Light", "Heavy"],
       },
@@ -707,12 +708,14 @@ function buildSkyScene(rawBucket) {
 }
 buildSkyScene(skyBucket);
 let radarActive = true;
+let radarLatestResetKey = null;
 let activeRadarMode = localStorage.getItem("radarMode") === "single" ? "single" : "mrms";
 let selectedRadarSite = (localStorage.getItem("radarSite") || "").toUpperCase();
 let radarSiteMarkers = [];
 let activeOverlays = new Set();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
 let radarFrameTransitionTimer = null;
+let futureRadarPanTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail | prob
 let activeSpcDay  = 1;       // 1-8
 let activeWpcDay  = 1;       // 1-5
@@ -734,6 +737,7 @@ let activeSatelliteSector = null; // null = full disk, else a TC sector id
 const satSectorCache = {};        // sourceId → array of normalized sector objects
 const satWarpCache = new Map();   // frameKey → equirect→Mercator warped data URL
 let cycloneData = null;           // cached {storms:[…]} across all feeds
+let renderedSatelliteSequence = 0;
 let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
@@ -833,7 +837,18 @@ let onDeviceRadarSite = null;
 let lastAutoFittedSatelliteFrame = null;
 
 function usesOnDeviceRadar(product = activeMrmsProduct) {
-  return Boolean(ON_DEVICE_RADAR_PRODUCTS[product] || MRMS_PRODUCTS[product]);
+  return Boolean(
+    ON_DEVICE_RADAR_PRODUCTS[product] ||
+    (MRMS_PRODUCTS[product] && !(activeRadarMode === "mrms" && product === "rate"))
+  );
+}
+
+// The generated precipitation-type contours combine observed MRMS rate with
+// HRRR categorical precipitation-type forecast fields. Keep that product on
+// its purpose-built contour path while every other MRMS product uses the raw
+// browser decoder.
+function usesGeneratedPrecipType(product = activeMrmsProduct) {
+  return activeRadarMode === "mrms" && product === "rate";
 }
 
 function getOnDeviceWeather() {
@@ -855,10 +870,25 @@ function decodedFrameLabel(frame, site = "") {
   const time = date && Number.isFinite(date.getTime())
     ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : frame?.label || "Latest";
+  if (frame?.forecast) {
+    const lead = Number(frame.leadMinutes) || 0;
+    const movement = frame.summary?.direction === "Stationary"
+      ? "Stationary · "
+      : frame.summary?.direction && Number.isFinite(frame.summary?.speedMph)
+      ? `${frame.summary.direction} ${Math.round(frame.summary.speedMph)} mph · `
+      : "";
+    return `+${lead} min · ${movement}${time}`;
+  }
   return site ? `${site} · ${time}` : time;
 }
 
 function handleOnDeviceStatus(status) {
+  if (status.kind === "radar" && (
+    satelliteActive ||
+    !radarActive ||
+    !usesOnDeviceRadar()
+  )) return;
+  if (status.kind === "satellite" && !satelliteActive) return;
   const active = status.kind === "satellite" ? satelliteActive : (radarActive && usesOnDeviceRadar());
   if (!active || status.phase === "ready") return;
   const pct = Number.isFinite(status.progress) ? ` ${Math.round(status.progress * 100)}%` : "";
@@ -866,6 +896,14 @@ function handleOnDeviceStatus(status) {
 }
 
 function handleOnDeviceFrame(event) {
+  if (event.kind === "radar" && (
+    satelliteActive ||
+    !radarActive ||
+    !usesOnDeviceRadar() ||
+    (event.mode && event.mode !== activeRadarMode) ||
+    (event.productKey && event.productKey !== activeMrmsProduct)
+  )) return;
+  if (event.kind === "satellite" && !satelliteActive) return;
   if (event.kind === "radar") {
     onDeviceRadarFrameInfo = event.frames || [];
     onDeviceRadarSite = event.site || null;
@@ -876,12 +914,16 @@ function handleOnDeviceFrame(event) {
     }
     radarFrames = onDeviceRadarFrameInfo.map((_, index) => index);
     radarFrameIndex = event.index;
-    syncFrameSliders({
-      max: Math.max(1, radarFrames.length - 1),
-      value: radarFrameIndex,
-      disabled: radarFrames.length < 2,
-    });
-    setPlayButtonsEnabled(radarFrames.length >= 2);
+    // Satellite owns the shared timeline while it is visible. A slower radar
+    // decode must not overwrite the satellite's max/value after it has loaded.
+    if (!satelliteActive) {
+      syncFrameSliders({
+        max: Math.max(0, radarFrames.length - 1),
+        value: radarFrameIndex,
+        disabled: radarFrames.length < 2,
+      });
+      setPlayButtonsEnabled(radarFrames.length >= 2);
+    }
   } else {
     onDeviceSatelliteFrameInfo = event.frames || [];
     const mapElement = document.querySelector("#radarMap");
@@ -903,12 +945,14 @@ function handleOnDeviceFrame(event) {
     }
     satFrames = onDeviceSatelliteFrameInfo.map((_, index) => index);
     satFrameIndex = event.index;
-    syncFrameSliders({
-      max: Math.max(1, satFrames.length - 1),
-      value: satFrameIndex,
-      disabled: satFrames.length < 2,
-    });
-    setPlayButtonsEnabled(satFrames.length >= 2);
+    if (satelliteActive) {
+      syncFrameSliders({
+        max: Math.max(0, satFrames.length - 1),
+        value: satFrameIndex,
+        disabled: satFrames.length < 2,
+      });
+      setPlayButtonsEnabled(satFrames.length >= 2);
+    }
   }
   updateRadarLabel();
 }
@@ -7177,21 +7221,39 @@ function updateRadarLabel() {
       setFrameTimeLabel(decodedFrameLabel(onDeviceSatelliteFrameInfo[satFrameIndex]));
       return;
     }
+    if (!satFrames.length) {
+      const max = Number(document.querySelector("#mapFrameSlider")?.max || 0);
+      syncFrameSliders({ value: max });
+      setFrameTimeLabel("Latest");
+      return;
+    }
     syncFrameSliders({ value: satFrameIndex });
     const frame = satFrames.length ? satFrames[satFrameIndex] : 0;
     setFrameTimeLabel(frame === 0 ? "Latest" : `−${frame} frame${frame > 1 ? "s" : ""}`);
     return;
   }
 
-  if (activeRadarMode === "single") {
+  if (usesOnDeviceRadar()) {
+    if (!onDeviceRadarFrameInfo.length) {
+      const max = Number(document.querySelector("#mapFrameSlider")?.max || 0);
+      syncFrameSliders({ value: max });
+      setFrameTimeLabel("Latest");
+      return;
+    }
     syncFrameSliders({ value: radarFrameIndex });
     setFrameTimeLabel(decodedFrameLabel(
       onDeviceRadarFrameInfo[radarFrameIndex],
-      onDeviceRadarSite?.id || ""
+      activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
     ));
     return;
   }
 
+  if (!radarFrames.length) {
+    const max = Number(document.querySelector("#mapFrameSlider")?.max || 0);
+    syncFrameSliders({ value: max });
+    setFrameTimeLabel("Latest");
+    return;
+  }
   syncFrameSliders({ value: radarFrameIndex });
   const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
   if (mrmsIdx === 0) { setFrameTimeLabel("Latest"); return; }
@@ -7203,12 +7265,21 @@ function updateRadarLabel() {
   // Lazily fetch time from metadata
   const cfg = MRMS_PRODUCTS[activeMrmsProduct];
   const capturedIdx = mrmsIdx;
+  const capturedProduct = activeMrmsProduct;
   fetch(`${MRMS_BASE}${cfg.getMeta(capturedIdx)}`)
     .then(r => r.json())
     .then(meta => {
       if (meta.time) {
         mrmsTimeCache[key] = meta.time;
-        if (radarFrames[radarFrameIndex] === capturedIdx) setFrameTimeLabel(meta.time);
+        if (
+          radarActive &&
+          !satelliteActive &&
+          usesGeneratedPrecipType() &&
+          activeMrmsProduct === capturedProduct &&
+          radarFrames[radarFrameIndex] === capturedIdx
+        ) {
+          setFrameTimeLabel(meta.time);
+        }
       }
     })
     .catch(() => {});
@@ -7358,25 +7429,69 @@ function initMap() {
       }, () => {}, { timeout: 5000, maximumAge: 120000 });
     }
   });
+  radarMap.on("moveend", () => {
+    if (
+      !radarActive ||
+      activeRadarMode !== "mrms" ||
+      activeMrmsProduct !== "future"
+    ) return;
+    clearTimeout(futureRadarPanTimer);
+    futureRadarPanTimer = setTimeout(() => {
+      if (
+        radarActive &&
+        activeRadarMode === "mrms" &&
+        activeMrmsProduct === "future"
+      ) {
+        addRadarLayer(false).catch(error =>
+          console.warn("Future radar refresh unavailable", error));
+      }
+    }, 250);
+  });
   updateRadarLabel();
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
 }
 
-async function addRadarLayer() {
+async function addRadarLayer(relocate = false) {
+  const requestedMode = activeRadarMode;
+  const requestedProduct = activeMrmsProduct;
+  const requestedSite = requestedMode === "single" ? selectedRadarSite : null;
+  const requestKey = `${requestedMode}:${requestedProduct}`;
+  const resetToLatest = radarLatestResetKey === requestKey;
+  const requestIsCurrent = () => Boolean(
+    radarActive &&
+    activeRadarMode === requestedMode &&
+    activeMrmsProduct === requestedProduct &&
+    (requestedMode !== "single" || !requestedSite || selectedRadarSite === requestedSite) &&
+    usesOnDeviceRadar()
+  );
+  const radarOwnsTimeline = () => requestIsCurrent() && !satelliteActive;
   const api = await getOnDeviceWeather();
-  api.setVisibility({ radar: radarActive, satellite: satelliteActive });
+  if (!requestIsCurrent()) return;
+  api.setVisibility({ radar: radarActive && usesOnDeviceRadar(), satellite: satelliteActive });
   api.setOpacity(radarOpacity);
-  const result = await api.loadRadar({
-    map: radarMap,
-    beforeId: boundaryAnchorId(),
-    location: selectedLocation,
-    mode: activeRadarMode,
-    productKey: activeMrmsProduct,
-    siteId: activeRadarMode === "single" ? selectedRadarSite : null,
-    onStatus: handleOnDeviceStatus,
-    onFrame: handleOnDeviceFrame,
-  });
-  handleOnDeviceFrame({ kind: "radar", ...result });
+  try {
+    await api.loadRadar({
+      map: radarMap,
+      beforeId: boundaryAnchorId(),
+      location: selectedLocation,
+      nowcastCenter: relocate ? selectedLocation : null,
+      mode: requestedMode,
+      productKey: requestedProduct,
+      siteId: requestedSite,
+      resetToLatest,
+      onStatus: status => {
+        if (radarOwnsTimeline()) handleOnDeviceStatus(status);
+      },
+      onFrame: event => {
+        if (radarOwnsTimeline()) handleOnDeviceFrame(event);
+      },
+    });
+  } catch (error) {
+    if (!requestIsCurrent()) return;
+    throw error;
+  }
+  if (!requestIsCurrent()) return;
+  if (radarLatestResetKey === requestKey) radarLatestResetKey = null;
   renderMrmsLegend();
   restackWeatherLayers();
   raiseBoundaryLayers();
@@ -7384,6 +7499,9 @@ async function addRadarLayer() {
 
 async function addMrmsLayer() {
   const product = activeMrmsProduct;
+  onDeviceRadarFrameInfo = [];
+  onDeviceRadarSite = null;
+  onDeviceWeatherApi?.setVisibility({ radar: false, satellite: satelliteActive });
   const count = await detectMrmsFrameCount(product);
   if (!radarMap || !radarMap.getStyle() || !radarActive) return; // bailed mid-await
   if (product !== activeMrmsProduct) return;                     // product switched mid-await
@@ -7392,12 +7510,14 @@ async function addMrmsLayer() {
   radarFrameIndex = radarFrames.length - 1; // latest = mrmsIdx 0
   // A single-frame buffer has nothing to scrub through; the row stays visible
   // so the timestamp readout still shows, but the control goes inert.
-  syncFrameSliders({
-    max: Math.max(1, radarFrames.length - 1),
-    value: radarFrameIndex,
-    disabled: radarFrames.length < 2,
-  });
-  setPlayButtonsEnabled(radarFrames.length >= 2);
+  if (!satelliteActive) {
+    syncFrameSliders({
+      max: Math.max(0, radarFrames.length - 1),
+      value: radarFrameIndex,
+      disabled: radarFrames.length < 2,
+    });
+    setPlayButtonsEnabled(radarFrames.length >= 2);
+  }
 
   const mrmsIdx = radarFrames[radarFrameIndex]; // 0 = latest
   const data = await loadMrmsFrame(mrmsIdx, product).catch(() => null);
@@ -7673,21 +7793,42 @@ function currentSatExtent() {
   return sector ? sector.extent : satSource().extent;
 }
 
+function captureRenderedSatelliteView() {
+  const source = satSource();
+  const availableBands = satBandsFor(source);
+  const band = availableBands.find(item => item.id === activeSatelliteType) || availableBands[0];
+  const sectorId = activeSatelliteSector || null;
+  const sector = sectorId
+    ? (satSectorCache[source.id] || []).find(item => item.id === sectorId) || null
+    : null;
+  return {
+    source,
+    band,
+    sector,
+    sectorId,
+    extent: [...(sector ? sector.extent : source.extent)],
+    key: `${source.id}|${sectorId ? `sec:${sectorId}` : "full"}|${band.id}`,
+  };
+}
+
+function renderedSatelliteViewIsCurrent(view) {
+  return captureRenderedSatelliteView().key === view.key;
+}
+
 function satDataUrl(source, file) {
   const base = source.base || `${SATELLITE_RAW}/${source.repo}/main/site/data`;
   return `${base}/${file}`;
 }
 // Raw PNG url for a given frame (full-disk or sector), honouring repo naming.
-function satFrameRawUrl(frame) {
-  const source = satSource(), band = satBand(), sector = currentSatSector();
+function satFrameRawUrl(frame, view = captureRenderedSatelliteView()) {
+  const { source, band, sector } = view;
   const fr = String(frame).padStart(2, "0");
   if (sector) return satDataUrl(source, sector.fileFor(band.file, fr));
   return satDataUrl(source, `${band.file}_${fr}.png`);
 }
 // Stable cache key for a frame's warped image.
-function satFrameKey(frame) {
-  const sectorPart = activeSatelliteSector ? `sec:${activeSatelliteSector}` : "full";
-  return `${activeSatelliteSource}|${sectorPart}|${satBand().id}|${frame}`;
+function satFrameKey(frame, view = captureRenderedSatelliteView()) {
+  return `${view.key}|${frame}`;
 }
 
 // ─── Equirectangular → Web Mercator warp ──────────────────────────────────────
@@ -7728,14 +7869,14 @@ function warpEquirectToMercator(img, extent) {
   }
   return canvas;
 }
-async function warpedFrameUrl(frame) {
+async function warpedFrameUrl(frame, view = captureRenderedSatelliteView()) {
   // Mercator-rendered sources (e.g. GOES-18, Himawari) already ship Web Mercator
   // PNGs — warping them again would double-project. Use the raw frame as-is.
-  if (satSource().proj === "mercator") return satFrameRawUrl(frame);
-  const key = satFrameKey(frame);
+  if (view.source.proj === "mercator") return satFrameRawUrl(frame, view);
+  const key = satFrameKey(frame, view);
   if (satWarpCache.has(key)) return satWarpCache.get(key);
-  const img = await loadImgCors(satFrameRawUrl(frame));
-  const dataUrl = warpEquirectToMercator(img, currentSatExtent()).toDataURL("image/png");
+  const img = await loadImgCors(satFrameRawUrl(frame, view));
+  const dataUrl = warpEquirectToMercator(img, view.extent).toDataURL("image/png");
   satWarpCache.set(key, dataUrl);
   // Keep the cache bounded so band/source/sector churn can't grow unbounded.
   if (satWarpCache.size > 60) satWarpCache.delete(satWarpCache.keys().next().value);
@@ -7744,14 +7885,14 @@ async function warpedFrameUrl(frame) {
 
 // Probe how many frames the active view currently publishes (rolling buffers can
 // be partially filled). Cached per source/sector/band view key.
-async function detectSatFrameCount() {
-  const key = satFrameKey("count"); // distinct per view; band rarely changes count
+async function detectSatFrameCount(view = captureRenderedSatelliteView()) {
+  const key = satFrameKey("count", view); // distinct per view; band rarely changes count
   if (satFrameCountCache[key]) return satFrameCountCache[key];
   let count = 1; // frame 00 is assumed to exist
   for (let i = 1; i < SATELLITE_MAX_FRAMES; i++) {
     let res;
     try {
-      res = await fetch(satFrameRawUrl(i), { method: "HEAD", cache: "no-store" });
+      res = await fetch(satFrameRawUrl(i, view), { method: "HEAD", cache: "no-store" });
     } catch {
       count = SATELLITE_MAX_FRAMES; // network/CORS hiccup → assume a full buffer
       break;
@@ -7894,32 +8035,48 @@ function restackWeatherLayers() {
 }
 
 async function addSatelliteLayer() {
+  const renderedSequence = ++renderedSatelliteSequence;
   // The legacy frame publisher still owns its storm-specific cropped products.
   // Full-disk/CONUS imagery below is raw and decoded locally; selecting an
   // explicit storm crop temporarily uses that publisher until the raw decoder
   // gains the same cyclone-window control.
   if (activeSatelliteSector) {
+    const renderedView = captureRenderedSatelliteView();
     onDeviceWeatherApi?.setVisibility({ satellite: false });
     onDeviceSatelliteFrameInfo = [];
-    return addRenderedSatelliteLayer();
+    return addRenderedSatelliteLayer(renderedView, renderedSequence);
   }
+  const requestedSource = activeSatelliteSource;
+  const requestedType = activeSatelliteType;
+  const requestIsCurrent = () => Boolean(
+    satelliteActive &&
+    !activeSatelliteSector &&
+    activeSatelliteSource === requestedSource &&
+    activeSatelliteType === requestedType
+  );
   try {
     const api = await getOnDeviceWeather();
+    if (!requestIsCurrent()) return;
     api.setVisibility({ radar: radarActive && usesOnDeviceRadar(), satellite: satelliteActive });
     api.setOpacity(radarOpacity);
-    const result = await api.loadSatellite({
+    await api.loadSatellite({
       map: radarMap,
       beforeId: boundaryAnchorId(),
-      sourceKey: activeSatelliteSource,
-      productKey: activeSatelliteType,
+      sourceKey: requestedSource,
+      productKey: requestedType,
       location: selectedLocation,
-      onStatus: handleOnDeviceStatus,
-      onFrame: handleOnDeviceFrame,
+      onStatus: status => {
+        if (requestIsCurrent()) handleOnDeviceStatus(status);
+      },
+      onFrame: event => {
+        if (requestIsCurrent()) handleOnDeviceFrame(event);
+      },
     });
-    handleOnDeviceFrame({ kind: "satellite", ...result });
+    if (!requestIsCurrent()) return;
     restackWeatherLayers();
     raiseBoundaryLayers();
   } catch (error) {
+    if (!requestIsCurrent()) return;
     // Keep the existing generated-frame path as a resilience fallback for old
     // browsers that lack module workers, DecompressionStream, or WebGL support.
     console.warn("On-device satellite decode unavailable; using rendered fallback", error);
@@ -7929,23 +8086,31 @@ async function addSatelliteLayer() {
       setFrameTimeLabel(`Satellite decode failed: ${error.message}`);
       return;
     }
-    await addRenderedSatelliteLayer();
+    await addRenderedSatelliteLayer(captureRenderedSatelliteView(), renderedSequence);
   }
 }
 
-async function addRenderedSatelliteLayer() {
+async function addRenderedSatelliteLayer(
+  view = captureRenderedSatelliteView(),
+  sequence = ++renderedSatelliteSequence,
+) {
   if (!radarMap || !mapLoaded) return;
+  const requestIsCurrent = () => Boolean(
+    sequence === renderedSatelliteSequence &&
+    satelliteActive &&
+    renderedSatelliteViewIsCurrent(view)
+  );
 
-  const count = await detectSatFrameCount();
-  if (!radarMap || !radarMap.getStyle() || !satelliteActive) return; // bailed mid-await
+  const count = await detectSatFrameCount(view);
+  if (!radarMap || !radarMap.getStyle() || !requestIsCurrent()) return;
   satFrames = Array.from({ length: count }, (_, i) => count - 1 - i); // [count-1 … 0]
   satFrameIndex = satFrames.length - 1;                                // newest
 
-  const [west, east, south, north] = currentSatExtent();
+  const [west, east, south, north] = view.extent;
   const coords = [[west, north], [east, north], [east, south], [west, south]];
 
-  const url = await warpedFrameUrl(satFrames[satFrameIndex]).catch(() => null);
-  if (!url || !radarMap.getStyle() || !satelliteActive) return;
+  const url = await warpedFrameUrl(satFrames[satFrameIndex], view).catch(() => null);
+  if (!url || !radarMap.getStyle() || !requestIsCurrent()) return;
   if (radarMap.getSource("satellite-source")) return; // already present
 
   radarMap.addSource("satellite-source", { type: "image", url, coordinates: coords });
@@ -7959,7 +8124,7 @@ async function addRenderedSatelliteLayer() {
   });
 
   // Reflect satellite frames on the shared timeline when it owns the controls.
-  if (satelliteActive) {
+  if (requestIsCurrent()) {
     syncFrameSliders({
       max: satFrames.length - 1,
       value: satFrameIndex,
@@ -7968,12 +8133,12 @@ async function addRenderedSatelliteLayer() {
     setPlayButtonsEnabled(satFrames.length >= 2);
     updateRadarLabel();
   }
-  prewarmSatFrames(); // warp the rest in the background for smooth animation
+  prewarmSatFrames(view); // warp the rest in the background for smooth animation
 }
 
 // Warp remaining frames ahead of time so scrubbing/animation doesn't stutter.
-function prewarmSatFrames() {
-  satFrames.forEach(frame => { warpedFrameUrl(frame).catch(() => {}); });
+function prewarmSatFrames(view = captureRenderedSatelliteView()) {
+  [...satFrames].forEach(frame => { warpedFrameUrl(frame, view).catch(() => {}); });
 }
 
 function setSatelliteFrame(index) {
@@ -7990,9 +8155,18 @@ function setSatelliteFrame(index) {
   if (!satFrames.length) return;
   satFrameIndex = Math.max(0, Math.min(satFrames.length - 1, Number(index)));
   const frame = satFrames[satFrameIndex];
-  warpedFrameUrl(frame).then(url => {
+  const view = captureRenderedSatelliteView();
+  warpedFrameUrl(frame, view).then(url => {
     const src = radarMap?.getSource("satellite-source");
-    if (url && src && satelliteActive) { try { src.updateImage({ url }); } catch {} }
+    if (
+      url &&
+      src &&
+      satelliteActive &&
+      renderedSatelliteViewIsCurrent(view) &&
+      satFrames[satFrameIndex] === frame
+    ) {
+      try { src.updateImage({ url }); } catch {}
+    }
   }).catch(() => {});
   updateRadarLabel();
 }
@@ -8939,7 +9113,7 @@ function drawRadar(relocate = false) {
   clearWeatherLayers();
   if (onDeviceWeatherApi) {
     onDeviceWeatherApi.setVisibility({
-      radar: radarActive,
+      radar: radarActive && usesOnDeviceRadar(),
       satellite: satelliteActive,
     });
   }
@@ -8947,7 +9121,10 @@ function drawRadar(relocate = false) {
   // beneath, and re-asserted after the async adds settle.
   addBoundaryLayers();
 
-  if (radarActive)                        addRadarLayer().catch(e => console.warn("Radar unavailable", e));
+  if (radarActive && usesGeneratedPrecipType())
+    addMrmsLayer().catch(e => console.warn("Precipitation type unavailable", e));
+  else if (radarActive)
+    addRadarLayer(relocate).catch(e => console.warn("Radar unavailable", e));
   syncRadarSiteMarkers().catch(e => console.warn("Radar sites unavailable", e));
   if (activeOverlays.has("SPC"))          addSpcLayer().catch(e => console.warn("SPC unavailable", e));
   if (activeOverlays.has("Drought"))      addDroughtLayer().catch(e => console.warn("Drought unavailable", e));
@@ -9437,6 +9614,10 @@ function renderRadarSubControls() {
     group.disabled = !enabled;
   });
   sel.value = activeMrmsProduct;
+  const paletteRow = document.querySelector(".radar-palette-row");
+  if (paletteRow) {
+    paletteRow.hidden = usesGeneratedPrecipType() || activeMrmsProduct === "future";
+  }
   const palette = onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct);
   const paletteName = document.querySelector("#radarPaletteName");
   if (paletteName) paletteName.textContent = palette?.name || "Default";
@@ -9447,7 +9628,21 @@ function renderMrmsLegend() {
   if (!box) return;
   if (!radarActive) { box.hidden = true; return; }
   box.hidden = false;
-  const livePalette = onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct);
+  const nowcastSummary = activeMrmsProduct === "future"
+    ? onDeviceWeatherApi?.currentState()?.radar?.frame?.summary
+    : null;
+  const nowcastSubtitle = nowcastSummary?.unavailable
+    ? `FUTURE RADAR UNAVAILABLE · ${nowcastSummary.reason || "SHOWING LATEST OBSERVATION"}`
+    : nowcastSummary
+    ? `MRMS MOTION EXTRAPOLATION · ${
+        nowcastSummary.direction === "Stationary"
+          ? "STATIONARY"
+          : `${nowcastSummary.direction} ${Math.round(nowcastSummary.speedMph)} MPH`
+      } · ${String(nowcastSummary.intensity || "steady").toUpperCase()}`
+    : "MRMS MOTION EXTRAPOLATION · 5-MIN STEPS · EXPERIMENTAL";
+  const livePalette = usesOnDeviceRadar()
+    ? onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct)
+    : null;
   if (livePalette) {
     const cfg = activeRadarMode === "single"
       ? ON_DEVICE_RADAR_PRODUCTS[activeMrmsProduct]
@@ -9458,7 +9653,11 @@ function renderMrmsLegend() {
     box.innerHTML = `
       <div class="legend-title">${safeText((cfg?.label || "RADAR").toUpperCase())}</div>
       <div class="mrms-legend-section">
-        <div class="legend-subtitle">${activeRadarMode === "single" ? "RAW LEVEL II" : "RAW MRMS GRIB2"} · DECODED ON THIS DEVICE</div>
+        <div class="legend-subtitle">${
+          activeMrmsProduct === "future"
+            ? safeText(nowcastSubtitle)
+            : `${activeRadarMode === "single" ? "RAW LEVEL II" : "RAW MRMS GRIB2"} · DECODED ON THIS DEVICE`
+        }</div>
         <div class="legend-gradient" style="background:linear-gradient(90deg,${livePalette.colors.join(",")})"></div>
         <div class="legend-ticks" style="--tick-count:3">
           ${[livePalette.lo, mid, livePalette.hi].map((value, index) =>
@@ -9537,6 +9736,7 @@ function sampleMrmsValue(point, lngLat = null) {
   const high  = props.v1 === null || props.v1 === undefined || props.v1 === "" ? null : Number(props.v1);
 
   return {
+    source: cfg.typed ? "MRMS + HRRR" : "MRMS",
     product: cfg.label,
     unit: cfg.unit,
     color: /^#[0-9a-f]{6}$/.test(color) ? color : null,
@@ -9545,6 +9745,7 @@ function sampleMrmsValue(point, lngLat = null) {
     dec: cfg.dec,
     // Only the precip-rate product mixes several colour tables into one file.
     precipType: cfg.typed ? MRMS_RATE_TYPE_BY_COLOR[color] || null : null,
+    method: cfg.typed ? "MRMS rate intensity · HRRR forecast precipitation type" : null,
   };
 }
 
@@ -9560,6 +9761,9 @@ function mrmsBandLabel(data) {
 function buildRadarPixelHtml(data) {
   const swatch = data.color || "#38bdf8";
   const iconBg = `background:${swatch}33;border:1px solid ${swatch}88`;
+  const sampleKind = data.extrapolated
+    ? "Extrapolated Grid Cell"
+    : data.exact ? "Decoded Gate" : "Contour Band";
   const typeRow = data.precipType
     ? `<div class="popup-stat"><span class="popup-key">Type</span><span class="popup-val">${safeText(data.precipType)}</span></div>`
     : "";
@@ -9570,13 +9774,13 @@ function buildRadarPixelHtml(data) {
       </div>
       <div>
         <div class="popup-title">${safeText(data.source || "MRMS")} ${safeText(data.product)}</div>
-        <div class="popup-subtitle">${data.site ? `${safeText(data.site)} · ` : ""}${data.exact ? "Decoded Gate" : "Contour Band"}</div>
+        <div class="popup-subtitle">${data.site ? `${safeText(data.site)} · ` : ""}${sampleKind}</div>
       </div>
     </div>
     [NAV_SLOT]
     ${typeRow}
     <div class="popup-stat"><span class="popup-key">Value</span><span class="popup-val">${safeText(mrmsBandLabel(data))}</span></div>
-    <div class="popup-note">NOAA/MRMS — EphrataWeather</div>`;
+    <div class="popup-note">${safeText(data.method || "NOAA/MRMS — EphrataWeather")}</div>`;
 }
 
 // ─── Overlay popup content builders ──────────────────────────────────────────
@@ -9976,6 +10180,7 @@ document.querySelector("#radarModeBtns")?.addEventListener("click", event => {
     : (MRMS_PRODUCTS[saved] ? saved : "refl");
   localStorage.setItem("radarMode", activeRadarMode);
   localStorage.setItem("mrmsProduct", activeMrmsProduct);
+  radarLatestResetKey = `${activeRadarMode}:${activeMrmsProduct}`;
   onDeviceRadarFrameInfo = [];
   renderRadarSubControls();
   drawRadar(false);
@@ -9987,8 +10192,13 @@ document.querySelector("#mrmsProductSelect")?.addEventListener("change", event =
     activeRadarMode === "single" ? "radarSingleProduct" : "radarMrmsProduct",
     activeMrmsProduct
   );
+  radarLatestResetKey = `${activeRadarMode}:${activeMrmsProduct}`;
   mrmsGeoCache = {};        // Drop the previous product's contour frames
   mrmsTimeCache = {};       // Frame timestamps are per product too
+  onDeviceRadarFrameInfo = [];
+  radarFrames = [];
+  radarFrameIndex = 0;
+  renderRadarSubControls();
   drawRadar(false);
 });
 document.querySelector("#radarPaletteInput")?.addEventListener("change", event => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "weather-portal-v12";
+const CACHE_NAME = "weather-portal-v13";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -12,6 +12,7 @@ const APP_SHELL = [
   "./js/products.js",
   "./js/radarLayer.js",
   "./js/mrms.js",
+  "./js/nowcast.js",
   "./js/grib2.js",
   "./js/gridLayer.js",
   "./js/jpx.js",
