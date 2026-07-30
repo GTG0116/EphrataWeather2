@@ -7451,15 +7451,15 @@ function initMap() {
       }, () => {}, { timeout: 5000, maximumAge: 120000 });
     }
   });
-  // The extrapolation runs on the area in view, so a pan re-derives it — for the
-  // tail of the timeline only. The observed frames on the map are untouched, so
-  // this costs nothing visible while it works.
+  // The extrapolation covers the whole radar domain, so panning never rebuilds
+  // it. Nudging it after a move only drops frames whose valid time has passed
+  // and picks up a newer scan if one landed while the map was moving.
   radarMap.on("moveend", () => {
     if (!radarActive || !mrmsProductHasNowcast()) return;
     clearTimeout(futureRadarPanTimer);
     futureRadarPanTimer = setTimeout(() => {
       if (radarActive && mrmsProductHasNowcast()) {
-        onDeviceWeatherApi?.refreshNowcast?.({ location: selectedLocation });
+        onDeviceWeatherApi?.refreshNowcast?.();
       }
     }, 400);
   });
@@ -7490,7 +7490,6 @@ async function addRadarLayer(relocate = false) {
       map: radarMap,
       beforeId: boundaryAnchorId(),
       location: selectedLocation,
-      nowcastCenter: relocate ? selectedLocation : null,
       mode: requestedMode,
       productKey: requestedProduct,
       siteId: requestedSite,

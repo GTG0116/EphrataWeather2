@@ -12,7 +12,7 @@
 
 import {
   prepareReflectivityNowcast,
-  advectReflectivityGrid,
+  advectReflectivityStream,
   cropLatLonGrid,
 } from './nowcast.js';
 import { loadMrms } from './mrms.js';
@@ -55,14 +55,27 @@ async function historyGrid({ key, timeMillis }, bounds, limits) {
   }
 }
 
+// The scans the extrapolation is measured against, oldest first. Each entry is
+// either a grid the page already had cropped (`grid`) or just a bucket key for
+// this worker to fetch. A single `previous` is still accepted so the older
+// two-scan message shape keeps working.
+function historyEntries({ history, previous, previousKey }) {
+  if (Array.isArray(history) && history.length) return history;
+  if (previous) return [{ grid: previous }];
+  return previousKey ? [{ key: previousKey.key, timeMillis: previousKey.timeMillis }] : [];
+}
+
 self.onmessage = async ({ data }) => {
-  const { id, previous, previousKey, latest, bounds, limits, options } = data || {};
+  const { id, latest, bounds, limits, options } = data || {};
   try {
-    const previousGrid = previous
-      ? { ...previous, time: new Date(previous.timeMillis) }
-      : await historyGrid(previousKey, bounds, limits);
+    const priorGrids = [];
+    for (const entry of historyEntries(data || {})) {
+      priorGrids.push(entry.grid
+        ? { ...entry.grid, time: new Date(entry.grid.timeMillis) }
+        : await historyGrid(entry, bounds, limits));
+    }
     const prepared = prepareReflectivityNowcast(
-      previousGrid,
+      priorGrids,
       { ...latest, time: new Date(latest.timeMillis) },
       options || {},
     );
@@ -80,14 +93,19 @@ self.onmessage = async ({ data }) => {
       leadsMinutes: prepared.leadsMinutes,
       leadsTrimmed: prepared.leadsTrimmed,
       downsampleFactor: prepared.downsampleFactor,
+      scanCount: prepared.scanCount,
+      secondOrder: prepared.secondOrder,
     });
-    prepared.leadsMinutes.forEach((lead, index) => {
-      const forecast = advectReflectivityGrid(
-        prepared.baseGrid, prepared.motion, lead, prepared.config,
-      );
+    // Every lead rides the same trajectories, and each is posted (buffer
+    // transferred, not copied) the moment it comes off the stream.
+    let index = 0;
+    for (const forecast of advectReflectivityStream(
+      prepared.baseGrid, prepared.motion, prepared.leadsMinutes, prepared.config,
+    )) {
       const message = gridMessage(forecast);
       self.postMessage({ id, type: 'forecast', index, grid: message }, [message.values.buffer]);
-    });
+      index++;
+    }
     self.postMessage({ id, type: 'done' });
   } catch (error) {
     self.postMessage({ id, type: 'error', error: error?.message || 'nowcast failed' });
