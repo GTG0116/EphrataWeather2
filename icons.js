@@ -3,16 +3,16 @@
 // Monoline glyph set: rotating sun, drifting cloud silhouette, staggered
 // rain/snow, striking bolt, layered fog, banded sunset, crescent moon with
 // sparkles. Buckets: clearDay, clearNight, partly, overcast, rain, storm,
-// snow, fog, sunset — plus a "…Night" variant of the cloud-family buckets
-// (partlyNight, rainNight, snowNight, fogNight) that swaps the sun for a
-// crescent moon tucked behind the cloud.
+// snow, fog, sunset — plus a partlyNight variant that swaps the sun for a
+// crescent moon tucked behind the cloud. Fully obscuring conditions keep the
+// same glyph after dark; the surrounding night sky supplies the context.
 // ============================================
 
 const WeatherIcons = {
     // Buckets that have a night twin. Overcast and storm are deliberately not
     // in here: an overcast or thundering sky hides the moon outright, so the
     // day glyph is already the honest one.
-    NIGHT_VARIANTS: ["partly", "rain", "snow", "fog"],
+    NIGHT_VARIANTS: ["partly"],
 
     // Map free-text NWS/condition strings (+ night/sunset context) to one of
     // the sky buckets the icon and canvas-sky systems both key off of.
@@ -23,9 +23,10 @@ const WeatherIcons = {
         if (t.includes("snow") || t.includes("sleet") || t.includes("ice") || t.includes("flurr") || t.includes("wintry")) return night("snow");
         if (t.includes("fog") || t.includes("mist") || t.includes("haze")) return night("fog");
         if (t.includes("rain") || t.includes("shower") || t.includes("drizzle")) return night("rain");
-        if (t.includes("partly") || t.includes("mostly clear") || t.includes("mostly sunny")) {
-            return sunset ? "sunset" : (isNight ? "clearNight" : "partly");
+        if (t.includes("partly") || t.includes("mostly sunny")) {
+            return sunset ? "sunset" : (isNight ? "partlyNight" : "partly");
         }
+        if (t.includes("mostly clear")) return sunset ? "sunset" : (isNight ? "clearNight" : "partly");
         if (t.includes("cloud") || t.includes("overcast")) return "overcast";
         return sunset ? "sunset" : (isNight ? "clearNight" : "clearDay");
     },
@@ -157,33 +158,10 @@ const WeatherIcons = {
             mask(uid, cloudSilhouette(dx, dy, s, pad, dur)) +
             `<g mask="url(#${uid})">${moonAt(mx, my, mr, base)}</g>`;
 
-        // The night twins share their daytime sibling's cloud and precipitation
-        // geometry exactly; only the moon is new.
-        const NIGHT_MOON = { partlyNight: [46, 17, 9], rainNight: [50, 13, 8.5], snowNight: [50, 12, 8.5], fogNight: [52, 12, 8.5] };
-
-        switch (bucket) {
-            case "partlyNight":
-            case "rainNight":
-            case "snowNight":
-            case "fogNight": {
-                const [mx, my, mr] = NIGHT_MOON[bucket];
-                // Cloud placement per base bucket, matching the day glyphs below.
-                const cloudPos = { partlyNight: [-2, 5, 1], rainNight: [-2, -3, 1], snowNight: [-2, -4, 1], fogNight: [-2, -10, 0.9] }[bucket];
-                const [dx, dy, cs] = cloudPos;
-                const moon = moonBehindCloud(mx, my, mr, dx, dy, cs);
-                if (bucket === "partlyNight") return wrap(moon + cloud(dx, dy, cs));
-                if (bucket === "rainNight")   return wrap(moon + cloud(dx, dy, cs, 1, 8) + drops(4, 50));
-                if (bucket === "snowNight")   return wrap(moon + cloud(dx, dy, cs, 1, 8) + drops(3, 49, "snow"));
-                // fogNight: the same three drifting fog bars as the day icon,
-                // drawn under the moon-and-cloud pair.
-                let fogLines = "";
-                for (let i = 0; i < 3; i++) {
-                    const x1 = 15 + (i % 2) * 6, x2 = 49 - (i % 2) * 5, y = 45 + i * 6;
-                    fogLines += `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" fill="none" stroke="${soft}" stroke-width="${(sw * 1.05).toFixed(2)}" stroke-linecap="round" opacity="${1 - i * 0.2}"
-                        style="${anim ? `animation:wxDrift ${5 + i * 1.4}s ease-in-out infinite;` : ""}"/>`;
-                }
-                return wrap(moon + cloud(dx, dy, cs, 0.85, 8) + fogLines);
-            }
+        if (bucket === "partlyNight") {
+            const [dx, dy, cs] = [-2, 5, 1];
+            const moon = moonBehindCloud(46, 17, 9, dx, dy, cs);
+            return wrap(moon + cloud(dx, dy, cs));
         }
 
         switch (this.baseBucket(bucket)) {

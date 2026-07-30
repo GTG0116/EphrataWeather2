@@ -1,4 +1,4 @@
-const CACHE_NAME = "weather-portal-v10";
+const CACHE_NAME = "weather-portal-v12";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -26,6 +26,7 @@ const APP_SHELL = [
   "./icons.js",
   "./manifest.json",
   "./favicon-32.png",
+  "./favicon-64.png",
   "./apple-touch-icon.png",
   "./icon-192.png",
   "./icon-512.png"

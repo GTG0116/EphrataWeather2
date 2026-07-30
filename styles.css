@@ -129,21 +129,15 @@ body {
 body::before {
   content: "";
   position: fixed;
-  inset: -220px 0;
+  inset: -96px 0;
   z-index: 0;
-  /* The first layer pins the top of the scene to the flat --sky-0 color
-     (uniform across the full width) before easing into the diagonal
-     gradient. iOS intermittently composites the status-bar band without
-     any fixed layers, exposing the flat html background-color — keeping
-     the scene itself flat --sky-0 through that band (220px offscreen bleed
-     + the safe-area strip) makes the seam below the Dynamic Island
-     invisible whether or not the band drops out. The animated canvas
-     mirrors this same blend. */
-  background:
-    linear-gradient(to bottom,
-      var(--sky-0, #075985) 340px, rgba(0, 0, 0, 0) 600px),
-    linear-gradient(to bottom,
-      var(--sky-0, #075985), var(--sky-1, #1d4ed8), var(--sky-2, #0f172a), var(--sky-3, var(--sky-2, #0f172a)));
+  /* Keep the fallback's color stops aligned to the visible viewport despite
+     the safe-area bleed. The canvas uses the same 96px offset. */
+  background: linear-gradient(to bottom,
+    var(--sky-0, #075985) 96px,
+    var(--sky-1, #1d4ed8) calc(96px + 33.333vh),
+    var(--sky-2, #0f172a) calc(96px + 66.666vh),
+    var(--sky-3, var(--sky-2, #0f172a)) calc(96px + 100vh));
   pointer-events: none;
 }
 
@@ -192,7 +186,7 @@ body[data-condition="winter"] {
 
 #atmosphereCanvas {
   position: fixed;
-  /* Bleed 220px past the top and bottom of the screen. On iOS 26/27
+  /* Bleed 96px past the top and bottom of the screen. On iOS 26/27
      standalone web apps the fixed-position viewport can start below the
      status bar (and dvh/lvh can exclude the safe areas), and momentum /
      rubber-band overscroll can briefly pull the page well past either edge —
@@ -201,11 +195,11 @@ body[data-condition="winter"] {
      the status bar and home indicator no matter how the viewport is resolved
      or how far an overscroll bounces; the extra gradient just renders
      offscreen. */
-  top: -220px;
+  top: -96px;
   left: 0;
   width: 100vw;
-  height: calc(100vh + 440px);
-  height: calc(100lvh + 440px);
+  height: calc(100vh + 192px);
+  height: calc(100lvh + 192px);
   /* Never use a negative z-index here: iOS Safari (and standalone web apps)
      intermittently composite negative z-index fixed elements behind the
      document background, which made the animated gradient vanish — leaving
@@ -228,16 +222,13 @@ body::after {
   /* Overshoot the viewport top/bottom like #atmosphereCanvas so the glow
      overlay also covers the iOS status-bar and home-indicator regions.
      Sits above the canvas (z-index 0) but below the content shell (2). */
-  inset: -220px 0;
+  inset: -96px 0;
   z-index: 1;
-  /* Fade the glow/darkening overlay out across the same 340px→600px band the
-     canvas and body::before blend to flat --sky-0. iOS standalone clips all
-     fixed layers out of the status-bar strip (it only paints the flat html
-     background-color there), and this overlay's yellow glow + dark scrim was
-     tinting the scene right below that strip — leaving a visible seam under
-     the Dynamic Island even once the gradients matched. */
-  -webkit-mask-image: linear-gradient(to bottom, transparent 340px, #000 600px);
-  mask-image: linear-gradient(to bottom, transparent 340px, #000 600px);
+  /* Fade the decorative overlay in only across the first 80 visible pixels.
+     If iOS omits fixed layers in its status-bar band, the transition meets
+     the root color invisibly instead of creating a page-wide hard stripe. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 96px, #000 176px);
+  mask-image: linear-gradient(to bottom, transparent 96px, #000 176px);
   background:
     radial-gradient(circle at 80% 12%, var(--glow), transparent 28rem),
     radial-gradient(circle at 14% 85%, rgba(56, 189, 248, 0.18), transparent 24rem),
@@ -344,11 +335,16 @@ body[data-theme="midnight"][data-condition="storm"]::after {
   width: 36px;
   height: 36px;
   flex: none;
-  border-radius: 12px;
-  color: #fff;
-  background: var(--panel-strong);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(14px);
+  border-radius: 11px;
+  overflow: hidden;
+  box-shadow: 0 8px 22px rgba(2, 6, 23, 0.2);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .brand-text {
@@ -1379,11 +1375,11 @@ body.map-mode .shell {
   font: 700 10px/1 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   letter-spacing: 0.03em;
   pointer-events: auto;
-  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+  transition: scale 120ms ease, background 120ms ease, border-color 120ms ease;
 }
 
 .radar-site-pill:hover {
-  transform: scale(1.08);
+  scale: 1.08;
   border-color: #67e8f9;
   background: rgba(14, 42, 67, 0.96);
 }
@@ -3348,6 +3344,10 @@ body.modal-open {
   flex-wrap: wrap;
 }
 
+.ctrl-row[hidden] {
+  display: none;
+}
+
 .ctrl-label {
   font-size: 0.66rem;
   font-weight: 700;
@@ -3645,6 +3645,10 @@ body.modal-open {
 .mrms-select option {
   background: #0f172a;
   color: #e8f0ff;
+}
+
+.satellite-select {
+  width: min(100%, 290px);
 }
 
 .radar-palette-row {

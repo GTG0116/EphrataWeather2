@@ -355,14 +355,19 @@ const FWI = (() => {
   }
 
   function scoreCloud(cloud) {
-    if (cloud == null) return { pts: 6, max: 10 };
+    if (cloud == null) return { pts: 9, max: 10 };
+    const cover = clamp(Number(cloud), 0, 100);
     let pts;
-    if      (cloud <= 20) pts = 10;
-    else if (cloud <= 40) pts = 8;
-    else if (cloud <= 60) pts = 6;
-    else if (cloud <= 80) pts = 3;
-    else                  pts = 1;
-    return { pts, max: 10 };
+    // Cloudiness alone should barely dent an otherwise pleasant day. Only a
+    // nearly solid deck — where there is little or no usable sun — takes more
+    // than two points. The steeper final segment still distinguishes truly
+    // gloomy overcast from an ordinary mix of sun and clouds.
+    if      (cover <= 60) pts = 10;
+    else if (cover <= 80) pts = 10 - ((cover - 60) / 20);
+    else if (cover <= 90) pts =  9 - ((cover - 80) / 10);
+    else if (cover <= 97) pts =  8 - ((cover - 90) /  7) * 4;
+    else                  pts =  4 - ((cover - 97) /  3) * 2;
+    return { pts: clamp(pts, 0, 10), max: 10 };
   }
 
   function scorePrecip(chance) {
@@ -764,6 +769,7 @@ let alertPolygonData = null;
 let nwsAlertPolygonData = null;
 let alertFetchBox = null;           // {west,south,east,north} the alert overlay was last fetched for
 let alertPanRefreshInFlight = false;
+let alertLoadSequence = 0;          // invalidates stale async alert loads after redraws/toggles
 let activeAlertFilter = (() => {
   const saved = localStorage.getItem("alertKindFilter");
   return ["priority", "all", "warning", "watch", "advisory"].includes(saved) ? saved : "priority";
@@ -932,6 +938,11 @@ async function syncRadarSiteMarkers() {
     return;
   }
   radarSiteMarkers = api.radarSites().map(site => {
+    // Mapbox owns the wrapper's transform. Keeping hover/active styling on a
+    // child prevents CSS from replacing Mapbox's translate while the camera is
+    // moving, which previously made the pills drift and then snap back.
+    const markerElement = document.createElement("div");
+    markerElement.className = "radar-site-marker";
     const element = document.createElement("button");
     element.type = "button";
     element.className = "radar-site-pill";
@@ -946,7 +957,8 @@ async function syncRadarSiteMarkers() {
       updateRadarSiteMarkerSelection();
       drawRadar(false);
     });
-    const marker = new mapboxgl.Marker({ element, anchor: "center" })
+    markerElement.appendChild(element);
+    const marker = new mapboxgl.Marker({ element: markerElement, anchor: "center" })
       .setLngLat([site.lon, site.lat])
       .addTo(radarMap);
     return { id: site.id, element, marker };
@@ -1467,6 +1479,7 @@ function hideLocationSuggestions() {
 async function chooseLocation(location) {
   selectedLocation = { ...location };
   nwsAlertPolygonData = null;
+  alertFetchBox = null;
   suppressNextAlertNotifications = true;
   setLocationBrand();
   locationInput.value = selectedLocation.name;
@@ -4127,7 +4140,7 @@ function conditionClass(current) {
 }
 
 function weatherIcon(type, forceDay = false) {
-  return `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(type, forceDay ? false : isNightPeriod(type))}</span>`;
+  return `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(type, forceDay ? false : isNightPeriod(type), { animated: true })}</span>`;
 }
 
 function uiIcon(name) {
@@ -4278,7 +4291,7 @@ function renderCurrent() {
     const precip = hour.probabilityOfPrecipitation?.value;
     const sunTimes = forecastSunTimesFor(time);
     const isHourNight = isNightAt(time, sunTimes?.sunriseDate, sunTimes?.sunsetDate);
-    const iconHtml = `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(hour.shortForecast), isHourNight)}</span>`;
+    const iconHtml = `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(hour.shortForecast), isHourNight, { animated: true })}</span>`;
     return `
       <button class="hour-card compact" type="button" data-hour-index="${index}">
         <strong>${index === 0 ? "Now" : time.toLocaleTimeString([], { hour: "numeric" })}</strong>
@@ -5443,7 +5456,7 @@ function showDailyDetails(index) {
     <div class="day-night-split">
       ${periodCard("Day", weatherIcon(iconForCondition(day.shortForecast), true), day, windDay, precipDay)}
       ${night ? periodCard("Night",
-        `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(night.shortForecast), true)}</span>`,
+        `<span class="weather-icon" aria-hidden="true">${WeatherIcons.fromText(iconForCondition(night.shortForecast), true, { animated: true })}</span>`,
         night, windNight, precipNight) : ""}
     </div>
     <div class="day-modal-stats">
@@ -5535,7 +5548,7 @@ const ALERT_LEVEL_CATEGORIES = {
   ],
   "Tornado Warning": [
     { label: "WARNING",   color: "#dc2626", desc: "A tornado is imminent or occurring. Take shelter immediately in a lowest-floor interior room away from windows." },
-    { label: "PDS",       color: "#a855f7", desc: "Particularly Dangerous Situation — a long-track, violent tornado is likely. Extreme caution and immediate shelter required." },
+    { label: "PDS",       color: "#a855f7", desc: "Particularly Dangerous Situation — a strong tornado is likely ongoing. Take shelter immediately in a lowest-floor interior room away from windows." },
     { label: "EMERGENCY", color: "#7c3aed", desc: "Tornado Emergency — a confirmed, extremely dangerous tornado is causing catastrophic damage. Act immediately." },
   ],
   "Severe Thunderstorm Warning": [
@@ -6814,6 +6827,9 @@ function drawAtmosphere(ts) {
   // bands, so the body::before gradient mirrors this palette as the reliable fallback.
   const w = canvas.clientWidth || window.innerWidth;
   const h = canvas.clientHeight || window.innerHeight;
+  const canvasRect = canvas.getBoundingClientRect();
+  const viewTop = Math.max(0, -canvasRect.top);
+  const viewH = Math.max(1, Math.min(window.innerHeight, h - viewTop));
   const bufferW = Math.round(w * dpr);
   const bufferH = Math.round(h * dpr);
   if (canvas.width !== bufferW || canvas.height !== bufferH) {
@@ -6824,7 +6840,7 @@ function drawAtmosphere(ts) {
   const t = skyT;
   ctx.clearRect(0, 0, w, h);
 
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  const grad = ctx.createLinearGradient(0, viewTop, 0, viewTop + viewH);
   stops.forEach((color, i) => grad.addColorStop(i / (stops.length - 1), color));
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
@@ -6870,19 +6886,11 @@ function drawAtmosphere(ts) {
   }
 
   if (bucket === "sunset") {
-    const sx = w * 0.68, sy = h * 0.72;
-    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.95);
+    const sx = w * 0.68, sy = viewTop + viewH * 0.72;
+    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, viewH * 0.95);
     sg.addColorStop(0, "rgba(255,236,190,.95)"); sg.addColorStop(0.045, "rgba(255,197,120,.58)");
     sg.addColorStop(0.28, "rgba(255,140,90,.19)"); sg.addColorStop(1, "rgba(255,120,80,0)");
     ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
-    ctx.save(); ctx.globalCompositeOperation = "lighter";
-    for (let i = 0; i < 5; i++) {
-      const y = sy - h * (0.06 + i * 0.07) + Math.sin(t * 0.25 + i) * h * 0.01;
-      const bg = ctx.createLinearGradient(0, y, w, y + h * 0.04);
-      bg.addColorStop(0, "rgba(255,180,120,0)"); bg.addColorStop(0.5, `rgba(255,190,130,${0.09 - i * 0.012})`); bg.addColorStop(1, "rgba(255,180,120,0)");
-      ctx.fillStyle = bg; ctx.fillRect(0, y, w, h * 0.035);
-    }
-    ctx.restore();
   }
 
   const tint = night
@@ -6957,23 +6965,6 @@ function drawAtmosphere(ts) {
     else       { vg.addColorStop(0, "rgba(190,197,204,0)"); vg.addColorStop(1, "rgba(174,182,190,.4)"); }
     ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
   }
-
-  // iOS standalone web apps clip every fixed-position layer out of the
-  // status-bar safe-area band, which only ever paints the flat html
-  // background-color (--sky-0 = stops[0]). The scene varies across that
-  // line, so the band met the scene with a visible seam just below the
-  // Dynamic Island. Painting the top of the finished scene (220px offscreen
-  // bleed + the safe-area strip) back to that same flat color — over the
-  // stars/rain too, hence drawn last — makes the band and the scene meet
-  // seamlessly; body::before and the body::after mask mirror this same
-  // blend geometry in CSS.
-  const blendEnd = 600;
-  const topBlend = ctx.createLinearGradient(0, 0, 0, blendEnd);
-  topBlend.addColorStop(0, stops[0]);
-  topBlend.addColorStop(340 / blendEnd, stops[0]);
-  topBlend.addColorStop(1, hexToTransparent(stops[0]));
-  ctx.fillStyle = topBlend;
-  ctx.fillRect(0, 0, w, blendEnd);
 
   requestAnimationFrame(drawAtmosphere);
 }
@@ -7276,6 +7267,8 @@ function removeMapSource(id) {
 }
 
 function clearWeatherLayers() {
+  // Any alert requests still resolving belong to the layer set being removed.
+  alertLoadSequence++;
   stopRadarAnimation();
   clearTimeout(radarFrameTransitionTimer);
   ["mrms-layer",
@@ -7385,6 +7378,7 @@ async function addRadarLayer() {
   });
   handleOnDeviceFrame({ kind: "radar", ...result });
   renderMrmsLegend();
+  restackWeatherLayers();
   raiseBoundaryLayers();
 }
 
@@ -7776,14 +7770,14 @@ async function detectSatFrameCount() {
 // label layers (see basemapLabelAnchorId), keeping borders and town names
 // legible above all weather data.
 const WEATHER_LAYER_ORDER = [
-  "satellite-layer",
+  "satellite-layer", "on-device-satellite",
   "drought-fill", "drought-line",
   "fire-fill", "fire-line",
   "wpc-rain-fill", "wpc-rain-line",
   "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
   "surface-layer",
   "alerts-fill", "nws-alerts-fill",
-  "mrms-layer",
+  "radar-layer-a", "radar-layer-b", "mrms-layer", "on-device-radar", "on-device-mrms",
   "alerts-line", "nws-alerts-line",
   "lsr-hit",
   "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track", "cyclones-points",
@@ -7883,6 +7877,20 @@ function addWeatherLayer(layerDef) {
     }
   }
   radarMap.addLayer(layerDef, beforeId || basemapLabelAnchorId());
+  restackWeatherLayers();
+}
+
+// Async decoders mount custom WebGL layers outside addWeatherLayer(), and the
+// order their network requests finish is nondeterministic. Rebuild the complete
+// weather stack after any layer lands so alert fills always stay below radar
+// while alert outlines always stay above it.
+function restackWeatherLayers() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  const anchor = basemapLabelAnchorId();
+  WEATHER_LAYER_ORDER.forEach(id => {
+    if (!radarMap.getLayer(id)) return;
+    try { radarMap.moveLayer(id, anchor); } catch {}
+  });
 }
 
 async function addSatelliteLayer() {
@@ -7909,6 +7917,7 @@ async function addSatelliteLayer() {
       onFrame: handleOnDeviceFrame,
     });
     handleOnDeviceFrame({ kind: "satellite", ...result });
+    restackWeatherLayers();
     raiseBoundaryLayers();
   } catch (error) {
     // Keep the existing generated-frame path as a resilience fallback for old
@@ -8555,7 +8564,6 @@ async function nwsAlertFeatureCollection() {
   // margin) so panning anywhere on the continent surfaces alerts; the
   // moveend handler in addAlertsLayer refetches once the view leaves the box.
   const box = desiredAlertFetchBox();
-  alertFetchBox = box;
   const [nwsResult, ecccResult, wwaResult] = await Promise.allSettled([
     getJson(`https://api.weather.gov/alerts/active?point=${loc.lat},${loc.lon}`, { cache: "no-store" }),
     ecccAlertMapFeatures(box),
@@ -8603,7 +8611,14 @@ async function nwsAlertFeatureCollection() {
       });
     });
   }
-  return { type: "FeatureCollection", features };
+  return {
+    collection: { type: "FeatureCollection", features },
+    box,
+    // The regional WWA query is what makes this result representative of the
+    // visible map. If it failed, leave the coverage box unset so the next
+    // camera stop retries instead of treating a point-only response as loaded.
+    regionalLoaded: wwaResult.status === "fulfilled",
+  };
 }
 
 function buildPopupNavHtml(idx, total) {
@@ -8676,42 +8691,18 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
   return buildAlertBodyHtml(feature, idx, popupId).replace("[NAV_SLOT]", buildPopupNavHtml(idx, total));
 }
 
-async function addAlertsLayer() {
+function mountAlertLayers() {
   if (!radarMap || !mapLoaded) return;
-  // Fetch the IEM storm-based warnings (US only) and the NWS/ECCC alert
-  // polygons independently. The IEM endpoint is US-only and often slow, so
-  // awaiting it first would block — or, on failure, skip entirely — the ECCC
-  // alerts that are the sole map source over Canada. Settling each on its own
-  // keeps one source's hiccup from hiding the other.
-  const [iemResult, nwsResult] = await Promise.allSettled([
-    alertPolygonData
-      ? Promise.resolve(alertPolygonData)
-      : fetchOutlookGeoJson(IEM_SBW_URL).then(filterMapColoredWarnings),
-    nwsAlertPolygonData
-      ? Promise.resolve(nwsAlertPolygonData)
-      : nwsAlertFeatureCollection(),
-  ]);
-  if (iemResult.status === "fulfilled") alertPolygonData = iemResult.value;
-  if (nwsResult.status === "fulfilled") nwsAlertPolygonData = nwsResult.value;
-  if (!radarMap || !mapLoaded) return; // map may have been torn down mid-fetch
-
-  // Update sources in place when they already exist: setData swaps the
-  // features without unmounting the layer, so pan refetches never blink.
-  // Always feed existing sources — even an empty set — so stale polygons
-  // clear when panning into a quiet region. Empty sources are still mounted so
-  // switching from Priority to All can reveal already-fetched alerts instantly.
   const emptyCollection = { type: "FeatureCollection", features: [] };
 
-  const iemData = filterAlertCollectionForMap(alertPolygonData || emptyCollection, "iem");
-  const iemSource = radarMap.getSource("alerts-source");
-  if (iemSource) {
-    iemSource.setData(iemData);
-  } else {
-    // maxzoom 10: past z10 Mapbox overzooms existing tiles instead of
-    // re-tiling the polygons for every zoom level, which made the alert
-    // fills blink out for a moment on each zoom step (the source geometry
-    // is only ~110m precision, so nothing visible is lost).
-    radarMap.addSource("alerts-source", { type: "geojson", data: iemData, maxzoom: 10 });
+  if (!radarMap.getSource("alerts-source")) {
+    radarMap.addSource("alerts-source", {
+      type: "geojson",
+      data: filterAlertCollectionForMap(alertPolygonData || emptyCollection, "iem"),
+      maxzoom: 10,
+    });
+  }
+  if (!radarMap.getLayer("alerts-fill")) {
     addWeatherLayer({
       id: "alerts-fill",
       type: "fill",
@@ -8724,6 +8715,8 @@ async function addAlertsLayer() {
         "fill-opacity": 0.3,
       },
     });
+  }
+  if (!radarMap.getLayer("alerts-line")) {
     addWeatherLayer({
       id: "alerts-line",
       type: "line",
@@ -8738,13 +8731,14 @@ async function addAlertsLayer() {
     });
   }
 
-  const nwsData = filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws");
-  const nwsSource = radarMap.getSource("nws-alerts-source");
-  if (nwsSource) {
-    nwsSource.setData(nwsData);
-  } else {
-    // maxzoom 10 for the same zoom-blink reason as alerts-source above.
-    radarMap.addSource("nws-alerts-source", { type: "geojson", data: nwsData, maxzoom: 10 });
+  if (!radarMap.getSource("nws-alerts-source")) {
+    radarMap.addSource("nws-alerts-source", {
+      type: "geojson",
+      data: filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws"),
+      maxzoom: 10,
+    });
+  }
+  if (!radarMap.getLayer("nws-alerts-fill")) {
     addWeatherLayer({
       id: "nws-alerts-fill",
       type: "fill",
@@ -8754,6 +8748,8 @@ async function addAlertsLayer() {
         "fill-opacity": 0.22,
       },
     });
+  }
+  if (!radarMap.getLayer("nws-alerts-line")) {
     addWeatherLayer({
       id: "nws-alerts-line",
       type: "line",
@@ -8765,16 +8761,9 @@ async function addAlertsLayer() {
     });
   }
 
-  // The data fed above is already filtered for the active alert kind, so only
-  // sync layer visibility here. Calling applyAlertKindFilter() would setData
-  // the same collections a second time, and every setData drops the source's
-  // tiles until the worker re-cuts them — a visible blink of the alert
-  // polygons after each zoom/pan refetch.
   ensureAlertLayersVisible();
+  restackWeatherLayers();
 
-  // Cursor changes only — clicks handled by wireUnifiedClickHandler().
-  // Mapbox delegates layer events by id, so wiring before a layer exists is
-  // safe and survives layer re-creation across redraws.
   if (!popupWiredLayers.has("all-alerts")) {
     ["alerts-fill", "nws-alerts-fill"].forEach(layer => {
       radarMap.on("mouseenter", layer, () => { radarMap.getCanvas().style.cursor = "pointer"; });
@@ -8783,15 +8772,11 @@ async function addAlertsLayer() {
     popupWiredLayers.add("all-alerts");
   }
 
-  // Refetch the zone/ECCC alert polygons once the camera leaves the box they
-  // were fetched for, so panning across the continent (or over the Canadian
-  // border) keeps the overlay populated. The layers stay mounted while the
-  // new data loads — setData above swaps it in without a visible gap.
   if (!popupWiredLayers.has("alerts-pan-refresh")) {
     radarMap.on("moveend", async () => {
       if (!activeOverlays.has("Alerts") || alertPanRefreshInFlight) return;
-      if (!radarMap || !mapLoaded || !alertFetchBox) return;
-      if (boxContains(alertFetchBox, desiredAlertFetchBox())) return;
+      if (!radarMap || !mapLoaded) return;
+      if (alertFetchBox && boxContains(alertFetchBox, desiredAlertFetchBox())) return;
       alertPanRefreshInFlight = true;
       try {
         nwsAlertPolygonData = null;
@@ -8803,6 +8788,51 @@ async function addAlertsLayer() {
       }
     });
     popupWiredLayers.add("alerts-pan-refresh");
+  }
+}
+
+async function addAlertsLayer() {
+  if (!radarMap || !mapLoaded || !activeOverlays.has("Alerts")) return;
+  const loadSequence = ++alertLoadSequence;
+
+  // Mount both empty/cached sources immediately. Each provider paints as soon
+  // as it finishes, and the sequence guard prevents an older pan/toggle request
+  // from writing into layers created by a newer redraw.
+  mountAlertLayers();
+  const stillCurrent = () =>
+    loadSequence === alertLoadSequence &&
+    radarMap && mapLoaded && activeOverlays.has("Alerts");
+
+  const iemLoad = (alertPolygonData
+    ? Promise.resolve(alertPolygonData)
+    : fetchOutlookGeoJson(IEM_SBW_URL).then(filterMapColoredWarnings))
+    .then(data => {
+      alertPolygonData = data;
+      if (!stillCurrent()) return;
+      radarMap.getSource("alerts-source")?.setData(filterAlertCollectionForMap(data, "iem"));
+      restackWeatherLayers();
+    });
+
+  const nwsLoad = (nwsAlertPolygonData
+    ? Promise.resolve({
+        collection: nwsAlertPolygonData,
+        box: alertFetchBox,
+        regionalLoaded: Boolean(alertFetchBox),
+      })
+    : nwsAlertFeatureCollection())
+    .then(result => {
+      nwsAlertPolygonData = result.collection;
+      alertFetchBox = result.regionalLoaded ? result.box : null;
+      if (!stillCurrent()) return;
+      radarMap.getSource("nws-alerts-source")?.setData(
+        filterAlertCollectionForMap(result.collection, "nws"),
+      );
+      restackWeatherLayers();
+    });
+
+  const results = await Promise.allSettled([iemLoad, nwsLoad]);
+  if (results.every(result => result.status === "rejected")) {
+    throw new Error("All alert map sources failed to load");
   }
 }
 
@@ -9278,27 +9308,32 @@ function satelliteExtentContains(lon, lat, extent = currentSatExtent()) {
 }
 
 function renderSatelliteSubControls() {
-  const sourceEl = document.querySelector("#satelliteSourceBtns");
+  const sourceEl = document.querySelector("#satelliteSourceSelect");
   const typeEl   = document.querySelector("#satelliteTypeBtns");
-  const sectorEl = document.querySelector("#satelliteSectorBtns");
+  const sectorEl = document.querySelector("#satelliteSectorSelect");
   const sectorRow = document.querySelector("#satelliteSectorRow");
 
   if (sourceEl) {
-    sourceEl.innerHTML = SATELLITE_SOURCES.map(s =>
-      `<button type="button" data-sat-source="${s.id}" title="${safeText(s.note)}" class="${s.id === activeSatelliteSource ? "active" : ""}">${safeText(s.label)}</button>`
-    ).join("");
-    sourceEl.querySelectorAll("button").forEach(btn => {
-      btn.addEventListener("click", () => {
-        if (btn.dataset.satSource === activeSatelliteSource) return;
-        activeSatelliteSource = btn.dataset.satSource;
-        activeSatelliteSector = null; // sectors are per-source
-        activeSatelliteType = satBand().id; // drop bands the new source lacks
-        localStorage.setItem("satelliteSource", activeSatelliteSource);
-        renderSatelliteSubControls();
-        drawRadar(false);
-        fitSatelliteExtent(satSource().extent); // frame the newly selected region
-      });
-    });
+    const standardSources = SATELLITE_SOURCES.filter(s => !s.rawOnly);
+    const rapidScanSources = SATELLITE_SOURCES.filter(s => s.rawOnly);
+    sourceEl.innerHTML = `
+      <optgroup label="Full disk and regional">
+        ${standardSources.map(s => `<option value="${s.id}" title="${safeText(s.note)}">${safeText(s.label)}</option>`).join("")}
+      </optgroup>
+      <optgroup label="Rapid scan (mesoscale and target)">
+        ${rapidScanSources.map(s => `<option value="${s.id}" title="${safeText(s.note)}">${safeText(s.label)}</option>`).join("")}
+      </optgroup>`;
+    sourceEl.value = activeSatelliteSource;
+    sourceEl.onchange = () => {
+      if (sourceEl.value === activeSatelliteSource) return;
+      activeSatelliteSource = sourceEl.value;
+      activeSatelliteSector = null; // storm crops are per-source
+      activeSatelliteType = satBand().id; // drop bands the new source lacks
+      localStorage.setItem("satelliteSource", activeSatelliteSource);
+      renderSatelliteSubControls();
+      drawRadar(false);
+      fitSatelliteExtent(satSource().extent); // frame the newly selected region
+    };
   }
 
   if (typeEl) {
@@ -9330,20 +9365,18 @@ function renderSatelliteSubControls() {
       sectorRow.hidden = true; // no active storms in this feed
     } else {
       sectorRow.hidden = false;
-      const btns = [{ id: null, label: "Full Disk" }, ...sectors]
-        .map(s => `<button type="button" data-sat-sector="${s.id ?? ""}" class="${(s.id ?? null) === activeSatelliteSector ? "active" : ""}">${safeText(s.label)}</button>`)
+      sectorEl.innerHTML = [{ id: null, label: "Full sector" }, ...sectors]
+        .map(s => `<option value="${s.id ?? ""}">${safeText(s.label)}</option>`)
         .join("");
-      sectorEl.innerHTML = btns;
-      sectorEl.querySelectorAll("button").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const id = btn.dataset.satSector || null;
-          if (id === activeSatelliteSector) return;
-          activeSatelliteSector = id;
-          renderSatelliteSubControls();
-          drawRadar(false);
-          fitSatelliteExtent(currentSatExtent(), id ? 60 : 30);
-        });
-      });
+      sectorEl.value = activeSatelliteSector || "";
+      sectorEl.onchange = () => {
+        const id = sectorEl.value || null;
+        if (id === activeSatelliteSector) return;
+        activeSatelliteSector = id;
+        renderSatelliteSubControls();
+        drawRadar(false);
+        fitSatelliteExtent(currentSatExtent(), id ? 60 : 30);
+      };
     }
   }
 }
@@ -9706,6 +9739,7 @@ async function refreshLiveData() {
   document.querySelector("#statusBadge").textContent = "Updating live sources";
   alertPolygonData = null;
   nwsAlertPolygonData = null;
+  alertFetchBox = null;
 
   const [weather, aviation, space, maps, spcForecast, wpcForecast] = await Promise.allSettled([
     // NWS for the US, Environment Canada for Canada, Open-Meteo everywhere else
@@ -10041,6 +10075,7 @@ setInterval(async () => {
     // Refresh alert polygons on the map
     alertPolygonData = null;
     nwsAlertPolygonData = null;
+    alertFetchBox = null;
     if (activeOverlays.has("Alerts")) drawRadar(false);
   } catch (e) {
     console.warn("Alert auto-refresh failed", e);
