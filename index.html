@@ -24,7 +24,7 @@
          that exist but are unstyled and do nothing. A changed URL cannot be
          answered from a cache entry for the old one. Bump all three together on
          every release. -->
-    <link rel="stylesheet" href="styles.css?v=20260731">
+    <link rel="stylesheet" href="styles.css?v=20260731b">
   </head>
   <body data-theme="sunny">
     <canvas id="atmosphereCanvas" aria-hidden="true"></canvas>
@@ -187,11 +187,15 @@
                 </button>
                 <button class="map-hud-btn" id="mapInfoToggle" type="button" aria-expanded="false" aria-controls="mapSidebar">
                   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
-                  Conditions
+                  <span class="hud-label-wide">Conditions</span><span class="hud-label-narrow">Info</span>
                 </button>
                 <button class="map-hud-btn" id="mapFullscreenBtn" type="button" aria-pressed="false" title="Expand the map to the whole screen">
                   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
                   <span id="mapFullscreenLabel" class="hud-label-wide">Fullscreen</span><span id="mapFullscreenLabelShort" class="hud-label-narrow">Full</span>
+                </button>
+                <button class="map-hud-btn" id="mapInspectToggle" type="button" aria-pressed="false" aria-label="Inspect map values" title="Read the exact value under the pointer">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>
+                  <span class="hud-label-wide">Inspect</span><span class="hud-label-narrow">Value</span>
                 </button>
                 <button class="map-locate-btn" id="mapLocateBtn" type="button" title="Live GPS location" aria-label="Show live location on map">
                   <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
@@ -346,6 +350,20 @@
               </div>
             </div>
 
+            <!-- Inspect tool. The crosshair is the touch half: there is no
+                 hover on a phone, so the reading is taken at a fixed sight in
+                 the middle of the map and the map is moved under it. The
+                 readout is shared — it follows the mouse on a pointer device
+                 and docks beside the crosshair on a touch one. -->
+            <div class="map-inspect-crosshair" id="mapInspectCrosshair" hidden aria-hidden="true">
+              <span class="map-inspect-ring"></span>
+              <span class="map-inspect-tick map-inspect-tick-n"></span>
+              <span class="map-inspect-tick map-inspect-tick-s"></span>
+              <span class="map-inspect-tick map-inspect-tick-w"></span>
+              <span class="map-inspect-tick map-inspect-tick-e"></span>
+            </div>
+            <div class="map-inspect-readout" id="mapInspectReadout" role="status" aria-live="polite" hidden></div>
+
             <!-- SPC Legend -->
             <div class="spc-legend-box" id="spcLegendBox" hidden></div>
             <!-- MRMS Legend -->
@@ -434,6 +452,6 @@
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.js"></script>
     <script src="icons.js?v=20260731"></script>
-    <script src="app.js?v=20260731"></script>
+    <script src="app.js?v=20260731b"></script>
   </body>
 </html>

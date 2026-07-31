@@ -715,6 +715,7 @@ let activeBasemap = (() => {
 // can't put the map into a state the UI has no control for.
 const MAP_SETTING_SPECS = {
   coastlines:        { type: "toggle", default: true,     label: "Coastlines",        note: "Outline the land/water edge so offshore storms are unmistakable" },
+  countyBorders:     { type: "toggle", default: true,     label: "County borders",    note: "The lines warnings and zone forecasts are drawn on" },
   stateBorders:      { type: "toggle", default: true,     label: "State borders",     note: "" },
   countryBorders:    { type: "toggle", default: true,     label: "Country borders",   note: "" },
   placeLabels:       { type: "toggle", default: true,     label: "Place names",       note: "" },
@@ -979,6 +980,8 @@ function handleOnDeviceFrame(event) {
     }
   }
   updateRadarLabel();
+  // A different frame means a different number under the sight.
+  refreshInspectReadout();
   // The radar legend reports the extrapolation's state (building, movement,
   // confidence), which changes as frames are appended and as the user scrubs
   // between observed and forecast frames.
@@ -7804,6 +7807,7 @@ function setRadarFrame(index) {
   updateRadarLabel();
   return getOnDeviceWeather()
     .then(api => api.showRadarFrame(radarFrameIndex))
+    .then(result => { refreshInspectReadout(); return result; })
     .catch(error => {
       setFrameTimeLabel(`Radar decode failed: ${error.message}`);
       console.warn("On-device radar frame unavailable", error);
@@ -7942,6 +7946,7 @@ function initMap() {
     mapLoaded = true;
     drawRadar(true);
     wireUnifiedClickHandler();
+    wireInspectTool();
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(pos => {
         updateUserLocationMarker(pos.coords.latitude, pos.coords.longitude);
@@ -8393,42 +8398,108 @@ const WEATHER_LAYER_ORDER = [
 // over saturated radar colours, mounted at the top of the stack where nothing
 // weather-related can cover them.
 const BOUNDARY_SOURCE_ID = "admin-boundaries";
+// The shoreline comes from a different tileset than the admin lines — see
+// addBoundaryLayers for why the streets water polygons can't draw one.
+const SHORELINE_SOURCE_ID = "shoreline-boundaries";
 // Bottom → top. The shoreline sits under the admin lines so a border that runs
-// along a coast still reads as a border.
+// along a coast still reads as a border, and counties sit under the state and
+// country lines they subdivide.
 const BOUNDARY_LAYER_IDS = [
   "coastline-casing", "coastline-line",
-  "admin-state-line", "admin-country-line",
+  "admin-county-line", "admin-state-line", "admin-country-line",
 ];
+
+// How heavy the reference lines are drawn, per basemap tone.
+//
+// The Dark basemap is nearly black, so the lines need a dark casing and bright
+// cores to survive on top of saturated radar colours. Light, Streets and
+// Outdoors are the opposite problem: that same near-black casing, at up to 5px
+// with a bright core on top of it, is a fat opaque ribbon laid over exactly the
+// land the storms are moving across. On those the casing turns into a thin
+// light halo and every line drops roughly a third of its width, which is still
+// plenty of separation against a pale basemap.
+//
+// `width` entries are the tail of an ["interpolate", ["linear"], ["zoom"], …]
+// expression: zoom, px, zoom, px, …
+const BOUNDARY_THEMES = {
+  dark: {
+    coastCasing: { color: "rgba(3, 10, 24, 0.85)",     width: [2, 2.2, 6, 3.4, 10, 5] },
+    coastLine:   { color: "rgba(148, 233, 255, 0.95)", width: [2, 0.9, 6, 1.6, 10, 2.6] },
+    county:      { color: "rgba(214, 227, 245, 0.42)", width: [4, 0.4, 7, 0.7, 10, 1.1, 13, 1.5] },
+    state:       { color: "rgba(226, 236, 250, 0.62)", width: [3, 0.6, 6, 1, 10, 1.6] },
+    country:     { color: "rgba(255, 255, 255, 0.92)", width: [2, 0.9, 6, 1.8, 10, 3] },
+  },
+  light: {
+    // A pale halo instead of a black one: it lifts the line off the basemap
+    // without printing a wide dark band across the radar underneath it.
+    coastCasing: { color: "rgba(255, 255, 255, 0.72)", width: [2, 1.4, 6, 2, 10, 2.8] },
+    coastLine:   { color: "rgba(12, 96, 140, 0.92)",   width: [2, 0.7, 6, 1.1, 10, 1.7] },
+    county:      { color: "rgba(40, 56, 78, 0.42)",    width: [4, 0.35, 7, 0.6, 10, 0.9, 13, 1.2] },
+    state:       { color: "rgba(30, 44, 66, 0.7)",     width: [3, 0.5, 6, 0.8, 10, 1.2] },
+    country:     { color: "rgba(17, 27, 44, 0.9)",     width: [2, 0.7, 6, 1.2, 10, 2] },
+  },
+};
+
+function boundaryTheme() {
+  return activeBasemap === "dark-v11" ? BOUNDARY_THEMES.dark : BOUNDARY_THEMES.light;
+}
+
+function zoomWidth(stops) {
+  return ["interpolate", ["linear"], ["zoom"], ...stops];
+}
 
 function addBoundaryLayers() {
   if (!radarMap || !radarMap.getStyle()) return;
   if (!radarMap.getSource(BOUNDARY_SOURCE_ID)) {
     radarMap.addSource(BOUNDARY_SOURCE_ID, { type: "vector", url: "mapbox://mapbox.mapbox-streets-v8" });
   }
+  if (!radarMap.getSource(SHORELINE_SOURCE_ID)) {
+    radarMap.addSource(SHORELINE_SOURCE_ID, { type: "vector", url: "mapbox://mapbox.country-boundaries-v1" });
+  }
+  const theme = boundaryTheme();
   // Maritime segments are the offshore continuations of a land border; drawing
   // them puts long straight lines out across open ocean radar returns.
   const notMaritime = ["!=", ["get", "maritime"], "true"];
   // Each border feature is published once per worldview; without this filter
   // every disputed boundary draws two or three times, one per interpretation.
   const worldview = ["match", ["get", "worldview"], ["all", "US"], true, false];
+  // The country tileset publishes worldview as either "all" or a list of the
+  // codes a feature belongs to ("US,CN"), so a whole-string match would drop
+  // shared entries; this is the filter Mapbox documents for it.
+  const countryWorldview = ["any",
+    ["==", "all", ["get", "worldview"]],
+    ["in", "US", ["get", "worldview"]],
+  ];
 
   // ── Shoreline ──
-  // Admin borders stop at the water's edge, so a storm moving off the coast used
-  // to cross an unmarked boundary: reflectivity over the ocean looks exactly
-  // like reflectivity over land once a radar layer covers the basemap. Outlining
-  // the streets tileset's water polygons draws the actual land/water edge —
-  // coastlines, bays, the Great Lakes — as its own line, on top of every weather
-  // layer, so it is always obvious which side of the shore a cell is on.
+  // Admin borders stop at the water's edge, so a storm moving off the coast
+  // crosses an unmarked boundary: reflectivity over the ocean looks exactly like
+  // reflectivity over land once a radar layer covers the basemap. This line is
+  // the actual land/water edge, drawn on top of every weather layer, so it is
+  // always obvious which side of the shore a cell is on.
+  //
+  // It is *not* traced from the streets tileset's water polygons, which is the
+  // obvious source and was the original one. Those polygons carry no attributes
+  // at all — the whole tile is a single unnamed multipolygon — so there is no
+  // filter that separates the coast from inland water, and outlining them drew
+  // every river in the country as a bright double line: the Susquehanna, the
+  // Potomac and the entire Chesapeake tributary network competing with the
+  // storms for attention. Country polygons solve it exactly: they exclude
+  // marine water (oceans, bays, sounds, the Great Lakes) and include land that
+  // rivers merely run across, so their outline is the shoreline and nothing
+  // else. The land borders they share with Canada and Mexico are covered by the
+  // country line drawn over them.
   if (!radarMap.getLayer("coastline-casing")) {
     radarMap.addLayer({
       id: "coastline-casing",
       type: "line",
-      source: BOUNDARY_SOURCE_ID,
-      "source-layer": "water",
+      source: SHORELINE_SOURCE_ID,
+      "source-layer": "country_boundaries",
+      filter: countryWorldview,
       layout: { "line-join": "round", "line-cap": "round" },
       paint: {
-        "line-color": "rgba(3, 10, 24, 0.85)",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 6, 3.4, 10, 5],
+        "line-color": theme.coastCasing.color,
+        "line-width": zoomWidth(theme.coastCasing.width),
       },
     });
   }
@@ -8436,14 +8507,36 @@ function addBoundaryLayers() {
     radarMap.addLayer({
       id: "coastline-line",
       type: "line",
-      source: BOUNDARY_SOURCE_ID,
-      "source-layer": "water",
+      source: SHORELINE_SOURCE_ID,
+      "source-layer": "country_boundaries",
+      filter: countryWorldview,
       layout: { "line-join": "round", "line-cap": "round" },
       paint: {
         // A cool cyan reads as "water edge" without competing with the warm
         // reds and oranges of heavy reflectivity.
-        "line-color": "rgba(148, 233, 255, 0.95)",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.9, 6, 1.6, 10, 2.6],
+        "line-color": theme.coastLine.color,
+        "line-width": zoomWidth(theme.coastLine.width),
+      },
+    });
+  }
+
+  // ── County lines ──
+  // No minzoom: counties are how NWS warnings, LSRs and zone forecasts are
+  // addressed, so the grid is worth having at every zoom the tileset publishes
+  // it at rather than appearing only once you are far enough in. It is drawn
+  // thinner and fainter than the state line so a continent-wide view reads as
+  // texture under the borders instead of a mesh over them.
+  if (!radarMap.getLayer("admin-county-line")) {
+    radarMap.addLayer({
+      id: "admin-county-line",
+      type: "line",
+      source: BOUNDARY_SOURCE_ID,
+      "source-layer": "admin",
+      filter: ["all", ["==", ["get", "admin_level"], 2], notMaritime, worldview],
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        "line-color": theme.county.color,
+        "line-width": zoomWidth(theme.county.width),
       },
     });
   }
@@ -8457,9 +8550,9 @@ function addBoundaryLayers() {
       filter: ["all", ["==", ["get", "admin_level"], 1], notMaritime, worldview],
       layout: { "line-join": "round", "line-cap": "round" },
       paint: {
-        "line-color": "rgba(226, 236, 250, 0.62)",
+        "line-color": theme.state.color,
         "line-dasharray": [3, 2],
-        "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.6, 6, 1, 10, 1.6],
+        "line-width": zoomWidth(theme.state.width),
       },
     });
   }
@@ -8472,10 +8565,33 @@ function addBoundaryLayers() {
       filter: ["all", ["<=", ["get", "admin_level"], 0], notMaritime, worldview],
       layout: { "line-join": "round", "line-cap": "round" },
       paint: {
-        "line-color": "rgba(255, 255, 255, 0.92)",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.9, 6, 1.8, 10, 3],
+        "line-color": theme.country.color,
+        "line-width": zoomWidth(theme.country.width),
       },
     });
+  }
+  applyBoundaryTheme();
+}
+
+// Re-assert the per-basemap weights on layers that already exist. addBoundary
+// Layers only paints them at creation time, and the same layers survive a
+// re-draw, so a basemap swap has to push the new theme onto them.
+function applyBoundaryTheme() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  const theme = boundaryTheme();
+  const paints = [
+    ["coastline-casing", theme.coastCasing],
+    ["coastline-line", theme.coastLine],
+    ["admin-county-line", theme.county],
+    ["admin-state-line", theme.state],
+    ["admin-country-line", theme.country],
+  ];
+  for (const [id, spec] of paints) {
+    if (!radarMap.getLayer(id)) continue;
+    try {
+      radarMap.setPaintProperty(id, "line-color", spec.color);
+      radarMap.setPaintProperty(id, "line-width", zoomWidth(spec.width));
+    } catch {}
   }
 }
 
@@ -8501,20 +8617,118 @@ function applyBoundarySettings() {
   if (!radarMap || !radarMap.getStyle()) return;
   setLayerVisible("coastline-casing", mapSettings.coastlines);
   setLayerVisible("coastline-line", mapSettings.coastlines);
+  setLayerVisible("admin-county-line", mapSettings.countyBorders);
   setLayerVisible("admin-state-line", mapSettings.stateBorders);
   setLayerVisible("admin-country-line", mapSettings.countryBorders);
+  applyBoundaryTheme();
   applyPlaceLabelSetting();
 }
 
-// Place names come from the basemap style, so hiding them means walking its
-// symbol layers rather than one of ours.
+// Town names at the basemap's own size are set for reading a street map on a
+// desktop monitor, not for picking your town out from under a radar sweep on a
+// phone. A modest bump keeps them recognisably part of the basemap while making
+// them legible through a translucent weather layer.
+const PLACE_LABEL_SCALE = 1.16;
+// Which symbol layers count as a settlement name. POIs, roads, water and
+// country/state names are left at the basemap's own sizes.
+const SETTLEMENT_LABEL_RE = /settlement|^place-label|town|village|city/;
+// The basemap's own text-size for each layer we have scaled, so repeated calls
+// scale the original rather than compounding on the last result. Keyed by the
+// basemap they were read from, since a style swap replaces every layer.
+let placeLabelBaseSizes = new Map();
+let placeLabelBaseStyle = "";
+
+function expressionUsesZoom(expression) {
+  if (!Array.isArray(expression)) return false;
+  if (expression[0] === "zoom") return true;
+  return expression.some(expressionUsesZoom);
+}
+
+// Multiply what a text-size expression evaluates to, without wrapping it.
+//
+// The obvious ["*", <the basemap's expression>, 1.16] is rejected by the style
+// spec: a ["zoom"] expression is only legal as the direct input of a top-level
+// step/interpolate, so burying the basemap's zoom curve inside a multiply makes
+// the whole property invalid and the size silently stays as it was. Scaling the
+// *outputs* — the numbers each branch resolves to — keeps the zoom curve where
+// the spec requires it and produces the same result.
+//
+// Returns null for a shape this doesn't know how to walk, which leaves that
+// layer at the basemap's own size rather than breaking it.
+function scaleSizeExpression(expression, factor) {
+  if (typeof expression === "number") return expression * factor;
+  if (!Array.isArray(expression)) return null;
+  const scaleAll = (values) => {
+    const out = [];
+    for (const value of values) {
+      const scaled = scaleSizeExpression(value, factor);
+      if (scaled == null) return null;
+      out.push(scaled);
+    }
+    return out;
+  };
+  const op = expression[0];
+  // [op, interpolation, input, stop, output, stop, output, …]
+  if (op === "interpolate" || op === "interpolate-hcl" || op === "interpolate-lab") {
+    const head = expression.slice(0, 3);
+    const stops = expression.slice(3);
+    const outputs = scaleAll(stops.filter((_, index) => index % 2 === 1));
+    if (!outputs) return null;
+    return [...head, ...stops.map((value, index) => (index % 2 === 1 ? outputs[(index - 1) / 2] : value))];
+  }
+  // ["step", input, default, stop, output, stop, output, …]
+  if (op === "step") {
+    const rest = expression.slice(2);
+    const outputs = scaleAll(rest.filter((_, index) => index % 2 === 0));
+    if (!outputs) return null;
+    return [op, expression[1], ...rest.map((value, index) => (index % 2 === 0 ? outputs[index / 2] : value))];
+  }
+  // ["match", input, label, output, …, default]
+  if (op === "match") {
+    const rest = expression.slice(2);
+    const scaled = rest.map((value, index) =>
+      (index % 2 === 1 || index === rest.length - 1) ? scaleSizeExpression(value, factor) : value);
+    if (scaled.some((value, index) =>
+      (index % 2 === 1 || index === rest.length - 1) && value == null)) return null;
+    return [op, expression[1], ...scaled];
+  }
+  // ["case", condition, output, …, default]
+  if (op === "case") {
+    const rest = expression.slice(1);
+    const scaled = rest.map((value, index) =>
+      (index % 2 === 1 || index === rest.length - 1) ? scaleSizeExpression(value, factor) : value);
+    if (scaled.some((value, index) =>
+      (index % 2 === 1 || index === rest.length - 1) && value == null)) return null;
+    return [op, ...scaled];
+  }
+  // Anything else can be multiplied outright, as long as no zoom curve is
+  // hiding inside it.
+  return expressionUsesZoom(expression) ? null : ["*", expression, factor];
+}
+
+// Place names come from the basemap style, so hiding them (and sizing them)
+// means walking its symbol layers rather than one of ours.
 function applyPlaceLabelSetting() {
   if (!radarMap || !radarMap.getStyle()) return;
+  if (placeLabelBaseStyle !== activeBasemap) {
+    placeLabelBaseSizes = new Map();
+    placeLabelBaseStyle = activeBasemap;
+  }
   for (const layer of radarMap.getStyle().layers || []) {
     if (layer.type !== "symbol") continue;
     if (!/label|place|poi|settlement|country|state|marine|water-point/.test(layer.id)) continue;
     try {
       radarMap.setLayoutProperty(layer.id, "visibility", mapSettings.placeLabels ? "visible" : "none");
+    } catch {}
+    if (!SETTLEMENT_LABEL_RE.test(layer.id)) continue;
+    try {
+      if (!placeLabelBaseSizes.has(layer.id)) {
+        placeLabelBaseSizes.set(layer.id, radarMap.getLayoutProperty(layer.id, "text-size") ?? null);
+      }
+      const base = placeLabelBaseSizes.get(layer.id);
+      const scaled = scaleSizeExpression(base, PLACE_LABEL_SCALE);
+      if (scaled == null) continue;
+      radarMap.setLayoutProperty(layer.id, "text-size", scaled);
     } catch {}
   }
 }
@@ -10335,6 +10549,152 @@ function radarValueLabel(data) {
   return `${data.value.toFixed(data.dec ?? 0)}${data.unit ? ` ${data.unit}` : ""}`;
 }
 
+// ─── Inspect tool ────────────────────────────────────────────────────────────
+// A live readout of the value under a point, rather than the click-a-spot,
+// read-a-popup, dismiss-the-popup loop. It takes two shapes because the two
+// kinds of device can't share one:
+//
+//   • Pointer devices track the mouse. The reading follows the cursor, so
+//     sweeping across a cell reads the whole gradient as you go.
+//   • Touch devices have no hover and a finger covers what it is pointing at,
+//     so the sight is fixed at the centre of the map and the map is dragged
+//     under it. That is also why a tap no longer opens the radar-value popup on
+//     touch (see collectPopupItems): the popup answered the same question in a
+//     card that lands right where the crosshair is.
+let inspectMode = false;
+let inspectPointerPoint = null;   // last mouse position, in map-canvas pixels
+let inspectRefreshQueued = false;
+
+function usesTouchInspect() {
+  return window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+}
+
+function inspectElements() {
+  return {
+    button: document.querySelector("#mapInspectToggle"),
+    readout: document.querySelector("#mapInspectReadout"),
+    crosshair: document.querySelector("#mapInspectCrosshair"),
+  };
+}
+
+function setInspectMode(on) {
+  const next = on ?? !inspectMode;
+  if (next === inspectMode) return;
+  inspectMode = next;
+  const { button, readout, crosshair } = inspectElements();
+  button?.classList.toggle("active", inspectMode);
+  button?.setAttribute("aria-pressed", String(inspectMode));
+  if (crosshair) crosshair.hidden = !(inspectMode && usesTouchInspect());
+  if (!inspectMode) {
+    inspectPointerPoint = null;
+    if (readout) { readout.hidden = true; readout.innerHTML = ""; }
+    return;
+  }
+  // A mouse has not moved yet, so there is nothing to read until it does; the
+  // crosshair always has the centre of the map to read. The canvas cursor is
+  // deliberately left alone — the overlay layers set it to a pointer over their
+  // own polygons, and fighting them for it just makes it flicker.
+  refreshInspectReadout();
+}
+
+// Called from the map's own move/mouse events and whenever a new radar frame
+// lands, so the number on screen always describes the frame on screen.
+function refreshInspectReadout() {
+  if (!inspectMode || inspectRefreshQueued) return;
+  inspectRefreshQueued = true;
+  requestAnimationFrame(() => {
+    inspectRefreshQueued = false;
+    if (inspectMode) drawInspectReadout();
+  });
+}
+
+function drawInspectReadout() {
+  const { readout } = inspectElements();
+  if (!readout || !radarMap) return;
+  const touch = usesTouchInspect();
+  if (!touch && !inspectPointerPoint) { readout.hidden = true; return; }
+
+  // The touch sight is nailed to the centre of the map, which is the map's own
+  // centre coordinate; the pointer one has to be unprojected from the cursor.
+  const point = inspectPointerPoint;
+  const lngLat = touch ? radarMap.getCenter() : radarMap.unproject([point.x, point.y]);
+
+  let reading = null;
+  try { reading = radarActive ? sampleRadarValue(lngLat) : null; } catch {}
+
+  const coords = `${lngLat.lat.toFixed(3)}°, ${lngLat.lng.toFixed(3)}°`;
+  let title = "Inspect";
+  let value = "--";
+  let sub = coords;
+  if (!radarActive) {
+    value = "No radar";
+    sub = "Turn on the Radar layer to read values";
+  } else if (!reading || reading.noData) {
+    title = onDeviceWeatherApi?.currentState?.()?.radar?.product?.label || "Radar";
+    value = "No data";
+  } else {
+    title = reading.product || "Radar";
+    value = reading.precipType || radarValueLabel(reading);
+    const parts = [reading.precipType ? radarValueLabel(reading) : "", reading.site || "", coords];
+    sub = parts.filter(Boolean).join(" · ");
+  }
+
+  readout.hidden = false;
+  readout.classList.toggle("is-centred", touch);
+  readout.innerHTML = `
+    <span class="map-inspect-label">${safeText(title)}</span>
+    <span class="map-inspect-value">${safeText(value)}</span>
+    <span class="map-inspect-sub">${safeText(sub)}</span>`;
+
+  if (touch) {
+    // Docked just under the crosshair; the CSS centres it.
+    readout.style.left = "";
+    readout.style.top = "";
+    return;
+  }
+  positionInspectReadout(readout, point);
+}
+
+// Sit the card beside the cursor, flipping to the other side (or above) rather
+// than letting it run off the edge of the map.
+function positionInspectReadout(readout, point) {
+  const stage = document.querySelector("#mapStage");
+  if (!stage) return;
+  const gap = 16;
+  const stageBox = stage.getBoundingClientRect();
+  const box = readout.getBoundingClientRect();
+  let left = point.x + gap;
+  let top = point.y + gap;
+  if (left + box.width > stageBox.width - 8) left = point.x - gap - box.width;
+  if (top + box.height > stageBox.height - 8) top = point.y - gap - box.height;
+  readout.style.left = `${Math.max(8, left)}px`;
+  readout.style.top = `${Math.max(8, top)}px`;
+}
+
+// Wired once, when the map is first built.
+function wireInspectTool() {
+  if (!radarMap || popupWiredLayers.has("inspect")) return;
+  popupWiredLayers.add("inspect");
+
+  radarMap.on("mousemove", event => {
+    if (!inspectMode || usesTouchInspect()) return;
+    inspectPointerPoint = { x: event.point.x, y: event.point.y };
+    refreshInspectReadout();
+  });
+  radarMap.on("mouseout", () => {
+    if (!inspectMode || usesTouchInspect()) return;
+    inspectPointerPoint = null;
+    const { readout } = inspectElements();
+    if (readout) readout.hidden = true;
+  });
+  // The touch sight reads whatever is under the middle of the map, so it has to
+  // follow the map rather than the finger — and on a pointer device a pan or a
+  // zoom moves the ground out from under a cursor that never moved.
+  radarMap.on("move", () => refreshInspectReadout());
+}
+
+document.querySelector("#mapInspectToggle")?.addEventListener("click", () => setInspectMode());
+
 // A radar reading is a single fact: what is at this spot, right now. The popup
 // says the product, the reading, and the time the frame is valid for — the
 // clock is the only context a reading needs.
@@ -10447,8 +10807,11 @@ async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
   }
 
   // The radar reading under the click goes first, so it is what a plain map
-  // click shows.
-  if (radarActive && !preferredLsrFeature) {
+  // click shows — on a pointer device. On touch the Inspect toggle is how a
+  // value is read, and its crosshair and card sit exactly where this popup
+  // would open, so a tap is left to the alerts and reports it is the only way
+  // to reach.
+  if (radarActive && !preferredLsrFeature && !usesTouchInspect()) {
     try {
       const reading = sampleRadarValue(lngLat);
       if (reading && !reading.noData) items.unshift({ type: "radar", data: reading });
