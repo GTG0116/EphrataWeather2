@@ -1,4 +1,7 @@
-const CACHE_NAME = "weather-portal-v15";
+// Bump on every release. The name is the cache's identity, so changing it is
+// what makes activate() drop the previous release's copies of the app shell —
+// otherwise a visitor who goes offline is served the old code indefinitely.
+const CACHE_NAME = "weather-portal-v16";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -40,9 +43,16 @@ self.addEventListener("install", event => {
   // deploy for a while, which silently failed install on fresh devices and
   // with it every push notification (no service worker, no push). One bad
   // asset must never take down installation.
+  //
+  // cache: "reload" makes each request skip the browser's HTTP cache. Without
+  // it the precache is filled from whatever the CDN told the browser to hold on
+  // to earlier, so a service worker built for this release could quietly stock
+  // itself with the previous one's app.js and styles.css.
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => Promise.allSettled(APP_SHELL.map(asset => cache.add(asset))))
+      .then(cache => Promise.allSettled(
+        APP_SHELL.map(asset => cache.add(new Request(asset, { cache: "reload" })))
+      ))
       .then(() => self.skipWaiting())
   );
 });
@@ -57,8 +67,16 @@ self.addEventListener("activate", event => {
 
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
+  // Network first, cache only as the offline fallback. ignoreSearch matters
+  // because index.html requests its scripts with a ?v= release stamp while the
+  // precache holds the bare paths — without it an offline load would miss,
+  // fall through to the index.html fallback, and hand the page HTML where it
+  // asked for JavaScript.
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request).then(response => response || caches.match("./index.html")))
+    fetch(event.request).catch(() =>
+      caches.match(event.request, { ignoreSearch: true })
+        .then(response => response || caches.match("./index.html"))
+    )
   );
 });
 

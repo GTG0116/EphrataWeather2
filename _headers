@@ -1,0 +1,57 @@
+# Cloudflare Pages response headers.
+#
+# The default policy gave index.html "max-age=0, must-revalidate" but served
+# app.js, styles.css and everything under /js/ with a four-hour browser cache.
+# That combination is only safe when asset filenames change on every build.
+# This site ships stable filenames, so a deploy handed returning visitors fresh
+# HTML alongside up-to-four-hour-old code — markup for features whose CSS and
+# JavaScript had not arrived yet.
+#
+# Everything therefore revalidates. This is not the same as re-downloading:
+# every response still carries an ETag, so an unchanged file costs one
+# conditional request and comes back as an empty 304. Only genuinely immutable
+# files (the icons, whose content is tied to their filename) keep a long TTL.
+
+/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+# The service worker decides when everything else is refreshed, so it must never
+# itself be answered from a cache — a stale copy pins the whole app to the
+# release it was built against.
+/sw.js
+  Cache-Control: no-cache
+
+# The app shell. Called out explicitly rather than left to /* so the intent
+# survives someone later relaxing the catch-all.
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+/app.js
+  Cache-Control: public, max-age=0, must-revalidate
+/styles.css
+  Cache-Control: public, max-age=0, must-revalidate
+/icons.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+# The decoder/nowcast modules are loaded by dynamic import, so their URLs carry
+# no release stamp and this is the only thing keeping them in step with app.js.
+/js/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Icons and logos change only by being replaced wholesale, and are big enough to
+# be worth keeping on a phone.
+/icon-192.png
+  Cache-Control: public, max-age=2592000
+/icon-512.png
+  Cache-Control: public, max-age=2592000
+/apple-touch-icon.png
+  Cache-Control: public, max-age=2592000
+/favicon-32.png
+  Cache-Control: public, max-age=2592000
+/favicon-64.png
+  Cache-Control: public, max-age=2592000
+/icon.svg
+  Cache-Control: public, max-age=2592000
+/EphrataWeatherLogo.png
+  Cache-Control: public, max-age=2592000
+/logos/*
+  Cache-Control: public, max-age=2592000
