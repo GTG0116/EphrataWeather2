@@ -41,52 +41,90 @@ export function makeScale(segments) {
 }
 
 // Convert single-color stops into segments (each gradients to the next stop).
+// A stop may carry its own alpha as a fourth channel; without one it is opaque.
 function stopsToSegments(stops) {
-  return stops.map((s) => ({ v: s.v, c1: [...s.c, 255], c2: null }));
+  return stops.map((s) => ({ v: s.v, c1: s.c.length > 3 ? [...s.c] : [...s.c, 255], c2: null }));
 }
 
-const s = (v, c) => ({ v, c });
+// `disp` carries an imperial display conversion applied only to the *labels and
+// readouts* (legend ticks, cursor / inspect values) — the color scale and the
+// physical values stay native, so colours are unaffected. value_shown =
+// value*factor + offset.
+const MS_TO_MPH = 2.2369363;
+const MS_TO_KT = 1.9438445;
 
-// Reflectivity (dBZ) — classic NWS reflectivity ramp.
+const s = (v, c) => ({ v, c });
+// Velocity tables are authored in knots (how a velocity scale is read) but the
+// moment itself is m/s, so the stop values are converted on the way in.
+const kt = (v, c) => ({ v: v / MS_TO_KT, c });
+
+// Reflectivity (dBZ), 5 → 85. Greens carry the light-to-moderate returns and get
+// *darker* with intensity, so the bright colours are reserved for what matters:
+// yellow through red for a convective core, white/pink at 60, violet past 70,
+// and brown at the very top where only hail contamination reaches. Anything
+// under 5 dBZ is transparent (alpha 0) rather than a colour — the first LUT step
+// is what every below-scale value clamps to, so a colour there would paint the
+// whole clear-air field.
 const REF_STOPS = [
-  s(-30, [0, 0, 0]),
-  s(5, [4, 233, 231]),
-  s(10, [1, 159, 244]),
-  s(15, [3, 0, 244]),
-  s(20, [2, 253, 2]),
-  s(25, [1, 197, 1]),
-  s(30, [0, 142, 0]),
-  s(35, [253, 248, 2]),
-  s(40, [229, 188, 0]),
-  s(45, [253, 149, 0]),
-  s(50, [253, 0, 0]),
-  s(55, [212, 0, 0]),
-  s(60, [188, 0, 0]),
-  s(65, [248, 0, 253]),
-  s(70, [152, 84, 198]),
-  s(75, [253, 253, 253]),
+  s(4.7, [166, 182, 152, 0]),
+  s(5, [166, 182, 152]),
+  s(10, [128, 154, 112]),
+  s(15, [99, 134, 89]),
+  s(20, [72, 113, 67]),
+  s(25, [48, 91, 48]),
+  s(30, [28, 67, 31]),
+  s(34.9, [11, 40, 15]),
+  s(35, [255, 255, 10]),
+  s(40, [255, 200, 0]),
+  s(45, [255, 130, 0]),
+  s(50, [255, 8, 0]),
+  s(55, [190, 0, 0]),
+  s(57, [120, 0, 35]),
+  s(59, [236, 220, 236]),
+  s(60, [252, 206, 240]),
+  s(65, [255, 150, 226]),
+  s(69.9, [255, 74, 198]),
+  s(70, [152, 72, 226]),
+  s(75, [138, 28, 234]),
+  s(79.9, [126, 0, 210]),
+  s(80, [146, 74, 10]),
+  s(85, [58, 26, 0]),
 ];
 
-// Velocity (m/s) — green inbound, red outbound, grey near zero. The scale runs
-// out to ±70 m/s (≈136 kt) so that once the dealiaser unfolds a super typhoon's
-// eyewall, the extreme winds beyond the ordinary ±40 m/s range read as distinct
-// bright colours instead of all clamping to a single top swatch.
+// The reflectivity ramp is shared with the MRMS reflectivity fields (mrms.js)
+// so every dBZ product on the map reads identically.
+export const REFLECTIVITY_STOPS = REF_STOPS;
+
+// Velocity (m/s natively, authored and shown in kt) — inbound runs green → cyan
+// → blue → violet → magenta, outbound dark red → red → pink → orange → brown,
+// with grey either side of zero. It reaches ±120 kt so that a dealiased super
+// typhoon eyewall still lands on distinct colours instead of clamping to the
+// top swatch.
 const VEL_STOPS = [
-  s(-70, [200, 255, 200]),
-  s(-55, [90, 255, 90]),
-  s(-40, [0, 224, 0]),
-  s(-30, [0, 160, 0]),
-  s(-20, [0, 96, 0]),
-  s(-10, [0, 200, 200]),
-  s(-1, [80, 110, 110]),
-  s(0, [110, 110, 110]),
-  s(1, [110, 80, 80]),
-  s(10, [200, 0, 0]),
-  s(20, [160, 0, 0]),
-  s(30, [128, 0, 0]),
-  s(40, [255, 160, 0]),
-  s(55, [255, 220, 0]),
-  s(70, [255, 255, 210]),
+  kt(-120, [255, 64, 255]),
+  kt(-108, [206, 0, 240]),
+  kt(-96, [148, 0, 226]),
+  kt(-84, [84, 0, 206]),
+  kt(-72, [26, 36, 214]),
+  kt(-62, [0, 118, 236]),
+  kt(-52, [0, 206, 236]),
+  kt(-46, [0, 234, 168]),
+  kt(-38, [0, 236, 70]),
+  kt(-26, [0, 224, 0]),
+  kt(-14, [0, 176, 0]),
+  kt(-8, [124, 132, 128]),
+  kt(0, [148, 152, 148]),
+  kt(8, [132, 124, 124]),
+  kt(16, [110, 0, 0]),
+  kt(28, [188, 0, 0]),
+  kt(40, [255, 0, 0]),
+  kt(48, [255, 56, 128]),
+  kt(56, [255, 126, 190]),
+  kt(62, [226, 188, 142]),
+  kt(76, [236, 200, 116]),
+  kt(90, [255, 158, 38]),
+  kt(106, [228, 88, 0]),
+  kt(120, [128, 28, 0]),
 ];
 
 // Storm-relative velocity (m/s native, shown in kt) — green inbound, red
@@ -169,13 +207,6 @@ const KDP_STOPS = [
   s(7.0, [130, 45, 0]),
 ];
 
-// `disp` carries an imperial display conversion applied only to the *labels and
-// readouts* (legend ticks, cursor / inspect values) — the color scale and the
-// physical values stay native, so colours are unaffected. value_shown =
-// value*factor + offset.
-const MS_TO_MPH = 2.2369363;
-const MS_TO_KT = 1.9438445;
-
 function product(id, name, unit, moment, stops, disp) {
   const scale = makeScale(stopsToSegments(stops));
   const dispUnit = (disp && disp.unit) || unit;
@@ -197,7 +228,7 @@ function product(id, name, unit, moment, stops, disp) {
 
 export const PRODUCTS = {
   REF: product('REF', 'Reflectivity', 'dBZ', 'REF', REF_STOPS),
-  VEL: product('VEL', 'Velocity', 'm/s', 'VEL', VEL_STOPS, { unit: 'mph', factor: MS_TO_MPH }),
+  VEL: product('VEL', 'Velocity', 'm/s', 'VEL', VEL_STOPS, { unit: 'kt', factor: MS_TO_KT }),
   // Storm-relative velocity reads the VEL moment (it's derived from it), then
   // applies its own storm-relative colour scale and knot display.
   SRV: product('SRV', 'Storm Rel. Velocity', 'm/s', 'VEL', SRV_STOPS, { unit: 'kt', factor: MS_TO_KT }),

@@ -848,7 +848,7 @@ let activeUnifiedPopupNav = null;
 let alertPopupCounter = 0;
 const ON_DEVICE_RADAR_PRODUCTS = {
   nexrad_ref: { label: "Reflectivity", unit: "dBZ", dec: 0 },
-  nexrad_vel: { label: "Velocity", unit: "mph", dec: 0 },
+  nexrad_vel: { label: "Velocity", unit: "kt", dec: 0 },
   nexrad_sw:  { label: "Spectrum Width", unit: "mph", dec: 0 },
   nexrad_rho: { label: "Correlation Coeff.", unit: "ρHV", dec: 2 },
   nexrad_zdr: { label: "Differential Reflectivity", unit: "dB", dec: 1 },
@@ -856,8 +856,8 @@ const ON_DEVICE_RADAR_PRODUCTS = {
   nexrad_kdp: { label: "Specific Differential Phase", unit: "°/km", dec: 1 },
 };
 const ON_DEVICE_RADAR_LEGENDS = {
-  nexrad_ref: { title: "NEXRAD REFLECTIVITY", gradient: "linear-gradient(90deg,#04e9e7,#0101f4,#02fd02,#fdf802,#fd9500,#fd0000,#bc0000,#f800fd,#fdfdfd)", ticks: ["5", "20", "35", "50", "65", "75 dBZ"] },
-  nexrad_vel: { title: "NEXRAD VELOCITY", gradient: "linear-gradient(90deg,#c8ffc8,#00a000,#006000,#00c8c8,#6e6e6e,#c80000,#800000,#ffa000,#ffffd2)", ticks: ["−155", "−70", "0", "70", "155 mph"] },
+  nexrad_ref: { title: "NEXRAD REFLECTIVITY", gradient: "linear-gradient(90deg,#a6b698,#30431f,#ffff0a,#ff8200,#ff0800,#be0000,#fccef0,#984be2,#3a1a00)", ticks: ["5", "25", "45", "65", "85 dBZ"] },
+  nexrad_vel: { title: "NEXRAD VELOCITY", gradient: "linear-gradient(90deg,#ff40ff,#5400ce,#0076ec,#00ec46,#949894,#bc0000,#ff7ebe,#ff9e26,#801c00)", ticks: ["−120", "−60", "0", "60", "120 kt"] },
   nexrad_sw:  { title: "SPECTRUM WIDTH", gradient: "linear-gradient(90deg,#00003c,#0078ff,#00dc78,#e6e600,#ff7800,#ff0000)", ticks: ["0", "10", "20", "35", "45 mph"] },
   nexrad_rho: { title: "CORRELATION COEFFICIENT", gradient: "linear-gradient(90deg,#323232,#969696,#4646d7,#00c8c8,#3cdc50,#f0f000,#ff6400,#ff0000,#ff91e1)", ticks: ["0.2", "0.5", "0.8", "0.95", "1.0"] },
   nexrad_zdr: { title: "DIFFERENTIAL REFLECTIVITY", gradient: "linear-gradient(90deg,#3c3c3c,#0000b4,#00a0a0,#00c800,#e6e600,#ff7800,#ff0000,#ff00ff)", ticks: ["−4", "0", "2", "4", "8 dB"] },
@@ -9043,6 +9043,53 @@ async function fetchCyclones() {
   return { storms };
 }
 
+// ── Intensity, derived from the wind rather than taken from the feed ─────────
+// The classification and colour a warning centre ships with a fix describe that
+// centre's own scale, and in the west Pacific they disagree with the wind speed
+// in the very same record: JTWC calls everything from 64 kt to 155 kt a
+// "Typhoon" (with one colour for all of it), and the forecast points inherit
+// whatever the current fix was tagged with rather than being re-classified at
+// the wind they are forecasting. The maximum sustained wind is the one number
+// both JTWC and NHC actually publish per point, so every label and colour on
+// the overlay is computed from it here — a 130 kt typhoon reads as the Category
+// 4 equivalent it is, and a forecast point that weakens changes colour.
+const SAFFIR_SIMPSON = [
+  { minKt: 137, cat: 5, color: "#ff6060" },
+  { minKt: 113, cat: 4, color: "#ff8f20" },
+  { minKt: 96,  cat: 3, color: "#ffc140" },
+  { minKt: 83,  cat: 2, color: "#ffe775" },
+  { minKt: 64,  cat: 1, color: "#ffffcc" },
+];
+const TROPICAL_STORM_STYLE = { label: "Tropical Storm", color: "#00faf4" };
+const TROPICAL_DEPRESSION_STYLE = { label: "Tropical Depression", color: "#5ebaff" };
+
+// What a hurricane-force tropical cyclone is called in the basin it is in. The
+// Saffir–Simpson number is an equivalence everywhere outside the Atlantic and
+// east Pacific, but it is the scale readers know, so it is shown for all of them.
+function cycloneBasinTerm(basinCode = "", basinName = "") {
+  const text = `${basinCode} ${basinName}`.toUpperCase();
+  // "WEST" alone is not enough — the south-west Indian Ocean is a cyclone basin.
+  if (/\bWP\b|WEST\w*\s+(NORTH\s+)?PACIFIC/.test(text)) return "Typhoon";
+  if (/\bIO\b|\bSH\b|INDIAN|SOUTHERN/.test(text)) return "Cyclone";
+  return "Hurricane";
+}
+
+// { label, color } for one fix or forecast point, from its sustained wind (kt).
+function cycloneIntensity(windKt, basinCode, basinName) {
+  const wind = Number(windKt);
+  if (!Number.isFinite(wind)) return { label: "", color: TROPICAL_DEPRESSION_STYLE.color };
+  const step = SAFFIR_SIMPSON.find(entry => wind >= entry.minKt);
+  if (!step) {
+    const style = wind >= 34 ? TROPICAL_STORM_STYLE : TROPICAL_DEPRESSION_STYLE;
+    return { label: style.label, color: style.color };
+  }
+  const term = cycloneBasinTerm(basinCode, basinName);
+  // "Hurricane (Cat 3)" in the Atlantic, where the scale is native; elsewhere the
+  // number is an equivalence and says so.
+  const suffix = term === "Hurricane" ? `Cat ${step.cat}` : `Cat ${step.cat} equivalent`;
+  return { label: `${term} (${suffix})`, color: step.color };
+}
+
 // Approximate geographic circle (nautical-mile radius) as a GeoJSON ring.
 function cycloneCircleRing(lon, lat, radiusNm, steps = 64) {
   const km = radiusNm * 1.852;
@@ -9067,7 +9114,10 @@ function buildCycloneFeatures(data) {
   for (const storm of (data.storms || [])) {
     const fc = Array.isArray(storm.forecast) ? storm.forecast : [];
     const cur = storm.current || fc.find(p => p.tau === 0) || fc[0];
-    const trackColor = (cur && cur.intensity_color) || "#38bdf8";
+    const basinCode = storm.basin || "";
+    const basinName = storm.basin_name || "";
+    const intensityOf = point => cycloneIntensity(point?.wind_kt, basinCode, basinName);
+    const trackColor = cur ? intensityOf(cur).color : "#38bdf8";
 
     if (fc.length > 1) {
       tracks.push({
@@ -9078,16 +9128,17 @@ function buildCycloneFeatures(data) {
     }
 
     fc.forEach(p => {
+      const intensity = intensityOf(p);
       points.push({
         type: "Feature",
         properties: {
-          color: p.intensity_color || trackColor,
+          color: intensity.color,
           isCurrent: p.tau === 0,
           tau: p.tau,
           name: storm.name || storm.id,
           id: storm.id,
-          basin: storm.basin_name || storm.basin || "",
-          classification: p.classification_label || "",
+          basin: basinName || basinCode,
+          classification: intensity.label,
           wind_kt: p.wind_kt, wind_mph: p.wind_mph, wind_kmh: p.wind_kmh,
           pressure_mb: p.pressure_mb, datetime: p.datetime,
           lat: p.lat, lon: p.lon,
@@ -9203,7 +9254,7 @@ function buildCyclonePopup(p) {
         <div class="popup-subtitle">${safeText([p.id, p.basin].filter(Boolean).join(" · "))}</div>
       </div>
     </div>
-    <div class="popup-chip-row">${tag}${finalTag}${p.classification ? `<span class="popup-chip">${safeText(p.classification)}</span>` : ""}</div>
+    <div class="popup-chip-row">${tag}${finalTag}${p.classification ? `<span class="popup-chip" style="background:${color}22;color:${color};border-color:${color}66">${safeText(p.classification)}</span>` : ""}</div>
     <div class="popup-reading">
       <span class="popup-reading-value" style="color:${color}">${safeText(String(p.wind_kt))} kt</span>
       <span class="popup-reading-sub">${safeText([mph, press].filter(Boolean).join(" · "))}</span>
@@ -10558,9 +10609,11 @@ function radarValueLabel(data) {
 //     sweeping across a cell reads the whole gradient as you go.
 //   • Touch devices have no hover and a finger covers what it is pointing at,
 //     so the sight is fixed at the centre of the map and the map is dragged
-//     under it. That is also why a tap no longer opens the radar-value popup on
-//     touch (see collectPopupItems): the popup answered the same question in a
-//     card that lands right where the crosshair is.
+//     under it.
+//
+// It is also the *only* way to read a value: a map click no longer opens a
+// radar-value popup (see collectPopupItems), which answered the same question
+// once and then had to be dismissed.
 let inspectMode = false;
 let inspectPointerPoint = null;   // last mouse position, in map-canvas pixels
 let inspectRefreshQueued = false;
@@ -10695,40 +10748,6 @@ function wireInspectTool() {
 
 document.querySelector("#mapInspectToggle")?.addEventListener("click", () => setInspectMode());
 
-// A radar reading is a single fact: what is at this spot, right now. The popup
-// says the product, the reading, and the time the frame is valid for — the
-// clock is the only context a reading needs.
-function buildRadarPixelHtml(data) {
-  const time = data.time ? new Date(data.time) : null;
-  const clock = time && !Number.isNaN(time.getTime())
-    ? time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-    : "";
-  const subtitle = [
-    data.site || "",
-    data.forecast && data.leadMinutes ? `+${data.leadMinutes} min outlook` : "",
-    clock,
-  ].filter(Boolean).join(" · ");
-  // Precipitation type leads with the type; the rate that set its shade is the
-  // supporting line underneath.
-  const headline = data.precipType || radarValueLabel(data);
-  const support = data.precipType ? radarValueLabel(data) : "";
-  return `
-    <div class="popup-header">
-      <div class="popup-icon popup-mrms">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><polyline points="16 16 12 20 8 16"/><line x1="12" y1="12" x2="12" y2="20"/></svg>
-      </div>
-      <div>
-        <div class="popup-title">${safeText(data.product || "Radar")}</div>
-        ${subtitle ? `<div class="popup-subtitle">${safeText(subtitle)}</div>` : ""}
-      </div>
-    </div>
-    [NAV_SLOT]
-    <div class="popup-reading">
-      <span class="popup-reading-value">${safeText(headline)}</span>
-      ${support ? `<span class="popup-reading-sub">${safeText(support)}</span>` : ""}
-    </div>`;
-}
-
 // ─── Overlay popup content builders ──────────────────────────────────────────
 
 function buildOverlayItemHtml(feature) {
@@ -10773,7 +10792,7 @@ function buildOverlayItemHtml(feature) {
 
 // ─── Unified click handler ────────────────────────────────────────────────────
 
-async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
+async function collectPopupItems(point, preferredLsrFeature = null) {
   const items = [];
 
   if (preferredLsrFeature) items.push({ type: "lsr", feature: preferredLsrFeature });
@@ -10806,18 +10825,11 @@ async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
       .forEach(f => items.push({ type: "alert", feature: f }));
   }
 
-  // The radar reading under the click goes first, so it is what a plain map
-  // click shows — on a pointer device. On touch the Inspect toggle is how a
-  // value is read, and its crosshair and card sit exactly where this popup
-  // would open, so a tap is left to the alerts and reports it is the only way
-  // to reach.
-  if (radarActive && !preferredLsrFeature && !usesTouchInspect()) {
-    try {
-      const reading = sampleRadarValue(lngLat);
-      if (reading && !reading.noData) items.unshift({ type: "radar", data: reading });
-    } catch {}
-  }
-
+  // Reading the value under a spot is the Inspect tool's job, on every device —
+  // it tracks the cursor (or the crosshair) and answers continuously, where a
+  // popup answered once and then had to be dismissed. So a click here is only
+  // ever about the things a popup is the only way to reach: alerts, storm
+  // reports and outlook polygons.
   return items;
 }
 
@@ -10840,7 +10852,6 @@ function showPopupItems(lngLat, items) {
 
   const buildItem = (item, idx, total) => {
     const nav = buildPopupNavHtml(idx, total);
-    if (item.type === "radar") return buildRadarPixelHtml(item.data).replace("[NAV_SLOT]", nav);
     if (item.type === "lsr") return buildLsrItemHtml(item.feature).replace("[NAV_SLOT]", nav);
     if (item.type === "overlay") return buildOverlayItemHtml(item.feature).replace("[NAV_SLOT]", nav);
     const alertIdx = alertFeatures.indexOf(item.feature);
@@ -10859,7 +10870,7 @@ function showPopupItems(lngLat, items) {
 }
 
 async function showUnifiedMapPopup(lngLat, point, preferredLsrFeature = null) {
-  const items = await collectPopupItems(lngLat, point, preferredLsrFeature);
+  const items = await collectPopupItems(point, preferredLsrFeature);
   showPopupItems(lngLat, items);
 }
 
