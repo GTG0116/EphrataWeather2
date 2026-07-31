@@ -54,6 +54,22 @@ const DEFAULTS = Object.freeze({
   maxTrendDbzPerMinute: 0.30,
   trendTauMinutes: 10,
   maxTrendDeltaDbz: 4,
+  // Growth and decay are not symmetric. A convective cell takes tens of minutes
+  // to build and can collapse in ten, so caps tight enough to stop a noisy
+  // two-scan trend from exploding a storm are far too tight to let a dying one
+  // fade — and a forecast that cannot let rain stop keeps painting rain over
+  // ground that has already dried out. Both the rate a decay is believed at and
+  // the total drop it may accumulate are therefore looser than their growth
+  // counterparts. The asymmetry is modest on purpose: it is enough to let a
+  // collapsing cell go away over half an hour, not enough for one noisy scan
+  // pair to erase a storm.
+  maxDecayDbzPerMinute: 0.55,
+  maxDecayDeltaDbz: 8,
+  // Marshall–Palmer Z = a·R^b. Used to move between reflectivity and rain rate
+  // so the smoothing below can be done in the units precipitation is actually
+  // measured in.
+  zrCoefficient: 200,
+  zrExponent: 1.6,
   // Trajectories are integrated in steps no longer than this, so a parcel
   // follows a curving/accelerating flow field instead of one straight jump.
   advectionStepMinutes: 5,
@@ -778,9 +794,13 @@ function localMotionField(
 
       dx[index] = refined.dxSub / intervalMinutes;
       dy[index] = refined.dySub / intervalMinutes;
+      // Asymmetric: a measured decay is trusted further than a measured growth.
+      // See maxDecayDbzPerMinute — a cell that is falling apart between two
+      // scans really can lose reflectivity that fast, whereas a growth signal
+      // of the same size is far more often a tracking artefact.
       trend[index] = clamp(
         tendency.trend,
-        -config.maxTrendDbzPerMinute,
+        -config.maxDecayDbzPerMinute,
         config.maxTrendDbzPerMinute,
       ) * trendConfidence;
       areaTrend[index] = tendency.areaTrend * trendConfidence;
@@ -1245,6 +1265,23 @@ function boxBlurNaN(input, width, height, radius, floorValue) {
   return output;
 }
 
+/* ── Reflectivity ↔ rain rate ────────────────────────────────────────────────
+   Z = a·R^b (Marshall–Palmer), with dBZ = 10·log₁₀ Z. Exported so callers that
+   want a precipitation estimate out of a forecast frame use the same relation
+   the smoothing below is built on. */
+export function reflectivityToRainRate(dbz, options = {}) {
+  const config = configured(options);
+  if (!Number.isFinite(dbz)) return NaN;
+  const z = Math.pow(10, dbz / 10);
+  return Math.pow(z / config.zrCoefficient, 1 / config.zrExponent);
+}
+
+export function rainRateToReflectivity(rate, options = {}) {
+  const config = configured(options);
+  if (!Number.isFinite(rate) || rate <= 0) return MATCH_FLOOR_DBZ;
+  return 10 * Math.log10(config.zrCoefficient * Math.pow(rate, config.zrExponent));
+}
+
 // Damp the forecast by spatial scale instead of blurring it uniformly.
 //
 // Extrapolation skill is not one number: the large-scale rain pattern is very
@@ -1255,24 +1292,45 @@ function boxBlurNaN(input, width, height, radius, floorValue) {
 // the system while giving up the cell-by-cell detail it genuinely cannot know.
 // The band widths come from the position error, so a well-tracked field is cut
 // far less than a marginal one.
+//
+// All of that happens in *rain rate*, not in dBZ. dBZ is 10·log₁₀ Z, so
+// averaging dBZ takes a geometric mean of Z — always below the arithmetic one,
+// and further below it the more the values in the window differ. Smoothing a
+// reflectivity field in dBZ therefore destroys precipitation as a pure artefact
+// of the smoothing, and because the smoothing radius grows with lead time the
+// loss compounds: the 30-minute frame was reporting materially less water than
+// the field it was built from, which is exactly the accumulation a viewer reads
+// off the future half of the timeline. Converting to rain rate first makes each
+// box mean conserve water, so a forecast frame redistributes the observed
+// precipitation instead of quietly evaporating it.
 function dampenByScale(values, width, height, leadMinutes, radius, quality, config) {
   if (radius < 1) return values;
-  const floorValue = config.echoThreshold - 15;
-  const meso = boxBlurNaN(values, width, height, radius, floorValue);
-  const large = boxBlurNaN(meso, width, height, radius * 3, floorValue);
+  const toRate = (dbz) => Math.pow(Math.pow(10, dbz / 10) / config.zrCoefficient, 1 / config.zrExponent);
+  const toDbz = (rate) =>
+    rate > 0 ? 10 * Math.log10(config.zrCoefficient * Math.pow(rate, config.zrExponent)) : MATCH_FLOOR_DBZ;
+
+  const rates = new Float32Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    rates[i] = Number.isFinite(value) ? toRate(value) : NaN;
+  }
+  const floorRate = toRate(config.echoThreshold - 15);
+  const meso = boxBlurNaN(rates, width, height, radius, floorRate);
+  const large = boxBlurNaN(meso, width, height, radius * 3, floorRate);
   // Confidence stretches both timescales rather than changing the shape of the
   // decay: tracking a storm well means its detail stays believable for longer.
   const stretch = 0.55 + 0.9 * quality;
   const smallWeight = Math.exp(-leadMinutes / (config.smallScaleTauMinutes * stretch));
   const mesoWeight = Math.exp(-leadMinutes / (config.mesoScaleTauMinutes * stretch));
   for (let i = 0; i < values.length; i++) {
-    const value = values[i];
+    const rate = rates[i];
     const middle = meso[i];
     const broad = large[i];
-    if (!Number.isFinite(value) || !Number.isFinite(middle) || !Number.isFinite(broad)) {
+    if (!Number.isFinite(rate) || !Number.isFinite(middle) || !Number.isFinite(broad)) {
       continue;
     }
-    values[i] = broad + (middle - broad) * mesoWeight + (value - middle) * smallWeight;
+    const blended = broad + (middle - broad) * mesoWeight + (rate - middle) * smallWeight;
+    values[i] = toDbz(blended);
   }
   return values;
 }
@@ -1487,9 +1545,12 @@ export function advectReflectivityStream(latestGrid, motion, leadsMinutes, optio
         const rate = field.trendRateDbzPerMinute2
           ? sampleField(field, field.trendRateDbzPerMinute2, x, y)
           : 0;
+        // Asymmetric on purpose — see maxDecayDeltaDbz. Growth stays tightly
+        // capped so a noisy trend cannot invent a storm; decay is given more
+        // room so a collapsing cell is allowed to actually go away.
         tendencyDbz[index] = clamp(
           (trend * steadyMinutes + rate * rateMinutes) * trendScale,
-          -config.maxTrendDeltaDbz,
+          -config.maxDecayDeltaDbz,
           config.maxTrendDeltaDbz,
         );
         areaTrend[index] = field.areaTrendPerMinute

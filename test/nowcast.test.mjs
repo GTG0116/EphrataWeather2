@@ -9,6 +9,8 @@ import {
   cropLatLonGrid,
   downsampleReflectivityGrid,
   prepareReflectivityNowcast,
+  rainRateToReflectivity,
+  reflectivityToRainRate,
 } from '../js/nowcast.js';
 import { prepareGridTexture } from '../js/gridLayer.js';
 import { MRMS_PRODUCTS } from '../js/mrms.js';
@@ -95,6 +97,19 @@ function maximum(grid) {
     if (Number.isFinite(sample)) value = Math.max(value, sample);
   }
   return value;
+}
+
+// Total precipitation rate over the grid, in mm/h·cells. Rain rate — not dBZ —
+// is the conserved quantity, so this is what a forecast frame has to preserve.
+// Sub-threshold noise is excluded so the sum reflects actual echo.
+function totalRainRate(grid, threshold = 15) {
+  let total = 0;
+  for (const sample of grid.values) {
+    if (Number.isFinite(sample) && sample >= threshold) {
+      total += reflectivityToRainRate(sample);
+    }
+  }
+  return total;
 }
 
 function normalOptions(now) {
@@ -500,4 +515,105 @@ test('a lead advected in a series matches the same lead advected alone', () => {
       if (Number.isFinite(a)) assert.ok(Math.abs(a - b) < 1e-4);
     }
   }
+});
+
+test('the scale damping carries the observed precipitation forward instead of smoothing it away', () => {
+  // The scale damping is what makes a 30-minute frame an honest envelope rather
+  // than a crisp lie, but done in dBZ it also quietly deletes water: averaging
+  // 10·log₁₀ Z is a geometric mean of Z, always below the arithmetic one, and
+  // further below it the wider the smoothing window gets. Total rain rate is the
+  // quantity that has to survive.
+  //
+  // Probability matching is switched off here on purpose. It re-imposes the
+  // undamped histogram, which hides a mass leak in the *total* while still
+  // having moved the rain to the wrong cells to get there — so the damping has
+  // to be measured on its own.
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 8 * MINUTE);
+  const previous = makeGrid({ width: 200, height: 130, time: previousTime });
+  addBlob(previous, 60, 55, 58, 12);
+  addBlob(previous, 130, 80, 52, 10);
+  addBlob(previous, 95, 35, 46, 8);
+  // No intensity change between the scans, so any change in total precipitation
+  // is the extrapolation's own doing rather than a trend it measured.
+  const latest = translated(previous, 5, 0, 0, latestTime);
+
+  const result = buildReflectivityNowcast(previous, latest, {
+    ...normalOptions(latestTime),
+    maxWidth: 200,
+    maxHeight: 130,
+    probabilityMatch: false,
+  });
+  assert.equal(result.accepted, true, result.reason);
+
+  const observed = totalRainRate(result.baseGrid);
+  assert.ok(observed > 0, 'the observed field should carry some rain');
+  for (const frame of result.forecasts) {
+    const ratio = totalRainRate(frame) / observed;
+    assert.ok(
+      ratio > 0.9 && ratio < 1.15,
+      `+${frame.leadMinutes} min holds ${ratio.toFixed(3)}x the observed rain rate`,
+    );
+  }
+  // The longest lead is smoothed the hardest, so it is where a dBZ-space blur
+  // lost the most — better than 40% of the domain's rain at +30 min.
+  const longest = totalRainRate(result.forecasts.at(-1)) / observed;
+  assert.ok(longest > 0.9, `+30 min holds only ${longest.toFixed(3)}x the observed rain`);
+});
+
+test('a collapsing storm is allowed to fade further than a building one is allowed to grow', () => {
+  // Cells build over tens of minutes and collapse in ten; a symmetric cap tight
+  // enough to stop a noisy trend from inventing a storm cannot let a dying one
+  // go away, so the caps are deliberately asymmetric.
+  const latestTime = new Date(Date.now() - MINUTE);
+  const previousTime = new Date(latestTime.getTime() - 10 * MINUTE);
+
+  const decaying = makeGrid({ time: previousTime });
+  addBlob(decaying, 37, 33, 58, 11);
+  addBlob(decaying, 80, 54, 49, 8);
+  const decayed = buildReflectivityNowcast(
+    decaying, translated(decaying, -3, 2, -8, latestTime), normalOptions(latestTime),
+  );
+
+  const building = makeGrid({ time: previousTime });
+  addBlob(building, 35, 34, 44, 11);
+  addBlob(building, 82, 49, 39, 7);
+  const built = buildReflectivityNowcast(
+    building, translated(building, 4, -1, 8, latestTime), normalOptions(latestTime),
+  );
+
+  assert.equal(decayed.accepted, true, decayed.reason);
+  assert.equal(built.accepted, true, built.reason);
+
+  const drop = maximum(decayed.baseGrid) - maximum(decayed.forecasts.at(-1));
+  const rise = maximum(built.forecasts.at(-1)) - maximum(built.baseGrid);
+  assert.ok(rise > 0, `a strengthening storm should strengthen, got ${rise.toFixed(2)} dBZ`);
+  assert.ok(
+    rise <= 4.1,
+    `growth stays capped at maxTrendDeltaDbz, got ${rise.toFixed(2)} dBZ`,
+  );
+  // Both storms were given an equal and opposite 0.8 dBZ/min change between the
+  // scans, so a symmetric cap would hold the fall to roughly the rise. It has to
+  // clear the growth cap outright, or a decaying cell can never actually fade.
+  assert.ok(
+    drop > 5.5,
+    `a collapsing storm should fall past the growth cap, got ${drop.toFixed(2)} dBZ`,
+  );
+  assert.ok(
+    drop > rise,
+    `decay should outrun growth: fell ${drop.toFixed(2)} dBZ, rose ${rise.toFixed(2)} dBZ`,
+  );
+});
+
+test('reflectivity and rain rate round-trip through the published Z-R relation', () => {
+  for (const dbz of [15, 25, 35, 45, 55]) {
+    const rate = reflectivityToRainRate(dbz);
+    assert.ok(rate > 0, `${dbz} dBZ should be a positive rain rate`);
+    assert.ok(Math.abs(rainRateToReflectivity(rate) - dbz) < 1e-6);
+  }
+  // Monotone, and anchored to the textbook Marshall-Palmer values.
+  assert.ok(reflectivityToRainRate(45) > reflectivityToRainRate(35));
+  assert.ok(Math.abs(reflectivityToRainRate(40) - 11.53) < 0.1);
+  // No-data cells stay no-data rather than becoming a rate of zero.
+  assert.ok(Number.isNaN(reflectivityToRainRate(Number.NaN)));
 });
