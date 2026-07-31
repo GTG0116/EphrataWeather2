@@ -6,17 +6,25 @@
 // The bucket is CORS-enabled for listing and GET, like the radar/satellite ones.
 
 import { decodeGrib2 } from './grib2.js';
-import { makeScale } from './products.js';
+import { makeScale, REFLECTIVITY_STOPS } from './products.js';
 
 const BUCKET = 'https://noaa-mrms-pds.s3.amazonaws.com';
 
-const s = (v, c) => ({ v, c1: [...c, 255], c2: null });
+const s = (v, c) => ({ v, c1: c.length > 3 ? [...c] : [...c, 255], c2: null });
+// Inches for the tables that are read in inches (hail size, rainfall totals) —
+// MRMS reports both in mm, so the authored thresholds convert on the way in.
+const IN_TO_MM = 25.4;
+const inch = (v, c) => s(v * IN_TO_MM, c);
+// A ramp's own end points, so the value→code encoding the grid layer does spans
+// exactly the range the colour table was authored for (see buildTexture).
+const rampLo = (ramp) => ramp[0].v;
+const rampHi = (ramp) => ramp[ramp.length - 1].v;
 
-// Reflectivity ramp (matches the radar REF look) for the composite product.
-const REFL = [
-  s(5, [4, 233, 231]), s(15, [3, 0, 244]), s(25, [1, 197, 1]), s(35, [253, 248, 2]),
-  s(45, [253, 149, 0]), s(55, [212, 0, 0]), s(65, [248, 0, 253]), s(75, [253, 253, 253]),
-];
+// Reflectivity — literally the single-site radar ramp (js/products.js), so a
+// composite dBZ field and a base-reflectivity sweep are the same colours.
+const REFL = REFLECTIVITY_STOPS.map(({ v, c }) => s(v, c));
+const REFL_LO = rampLo(REFL);
+const REFL_HI = rampHi(REFL);
 // Rotation / shear ramp (blue→yellow→red→magenta) for AzShear & rotation tracks.
 // MRMS packs azimuthal shear in native units of 10⁻³ s⁻¹ (so a decoded value of
 // 20 ≈ 0.020 s⁻¹, a strong mesocyclone), on the 0.005° super-res grid. We colour
@@ -25,22 +33,81 @@ const ROT = [
   s(2, [40, 40, 70]), s(4, [0, 120, 220]), s(8, [0, 200, 120]),
   s(12, [230, 220, 0]), s(16, [255, 120, 0]), s(24, [220, 0, 0]), s(40, [255, 0, 255]),
 ];
-// Hail size (mm) ramp.
+// Hail size (MESH), authored in inches over 0–4". Sub-marginal hail stays in
+// greys, the severe threshold (1") is where the ramp turns yellow, and the
+// destructive sizes past 2.75" run pink → magenta → violet.
 const HAIL = [
-  s(0, [90, 150, 255]), s(20, [0, 200, 120]), s(30, [230, 220, 0]),
-  s(45, [255, 120, 0]), s(60, [220, 0, 0]), s(100, [255, 0, 255]),
+  inch(0, [20, 20, 20]),
+  inch(0.15, [92, 92, 92]),
+  inch(0.30, [148, 148, 148]),
+  inch(0.42, [206, 206, 206]),
+  inch(0.50, [112, 200, 236]),
+  inch(0.60, [62, 168, 240]),
+  inch(0.75, [28, 96, 244]),
+  inch(0.88, [150, 196, 110]),
+  inch(1.00, [255, 255, 0]),
+  inch(1.50, [255, 244, 0]),
+  inch(1.75, [255, 206, 0]),
+  inch(2.00, [255, 148, 0]),
+  inch(2.25, [252, 40, 0]),
+  inch(2.50, [228, 0, 0]),
+  inch(2.75, [190, 0, 36]),
+  inch(3.00, [255, 0, 220]),
+  inch(3.50, [214, 0, 255]),
+  inch(4.00, [126, 0, 255]),
 ];
-// Probability (%) ramp.
+const HAIL_LO = rampLo(HAIL);
+const HAIL_HI = rampHi(HAIL);
+// Probability (%) ramp — the generic one, used by probability-of-severe-hail.
 const PROB = [
   s(0, [40, 40, 70]), s(20, [0, 120, 220]), s(40, [0, 200, 120]),
   s(60, [230, 220, 0]), s(80, [255, 120, 0]), s(100, [220, 0, 0]),
 ];
-// Precipitation accumulation (mm) ramp.
-const QPE = [
-  s(0.2, [120, 200, 255]), s(5, [0, 120, 240]), s(15, [0, 200, 120]),
-  s(30, [230, 220, 0]), s(60, [255, 120, 0]), s(100, [220, 0, 0]),
-  s(150, [180, 0, 90]), s(250, [255, 0, 255]), s(762, [255, 0, 255]),
+// Lightning probability (%) — greyscale through the low probabilities so the
+// map underneath still reads, then yellow from 40 %, orange through the 70s and
+// red → magenta where a strike is close to certain.
+const LTGPROB = [
+  s(0, [10, 10, 10]),
+  s(15, [92, 92, 92]),
+  s(28, [190, 190, 190]),
+  s(36, [206, 214, 128]),
+  s(43, [232, 234, 56]),
+  s(50, [255, 255, 0]),
+  s(60, [255, 220, 0]),
+  s(70, [255, 150, 0]),
+  s(80, [255, 20, 0]),
+  s(90, [255, 0, 120]),
+  s(100, [255, 0, 255]),
 ];
+// Precipitation accumulation, authored in inches over 0–50". Greens for the
+// first inch, then the warm colours through 5", violet and pink out to 18", and
+// blues that darken toward black for the tropical-cyclone totals past 20".
+const QPE = [
+  inch(0, [214, 244, 208]),
+  inch(0.25, [156, 214, 140]),
+  inch(0.60, [92, 178, 92]),
+  inch(1.00, [22, 92, 32]),
+  inch(1.05, [12, 52, 18]),
+  inch(1.10, [255, 255, 0]),
+  inch(2.00, [255, 160, 0]),
+  inch(3.00, [230, 0, 0]),
+  inch(4.00, [160, 0, 0]),
+  inch(5.00, [104, 0, 40]),
+  inch(6.00, [96, 0, 128]),
+  inch(7.00, [140, 0, 202]),
+  inch(10.0, [190, 60, 236]),
+  inch(14.0, [234, 130, 246]),
+  inch(18.0, [246, 192, 250]),
+  inch(18.5, [140, 206, 246]),
+  inch(25.0, [92, 172, 236]),
+  inch(30.0, [58, 128, 220]),
+  inch(35.0, [38, 88, 190]),
+  inch(40.0, [24, 58, 150]),
+  inch(45.0, [14, 34, 100]),
+  inch(50.0, [4, 10, 40]),
+];
+const QPE_LO = rampLo(QPE);
+const QPE_HI = rampHi(QPE);
 // Echo-top height (km) ramp - short/warm storms blue, tall (severe) tops red to
 // magenta. The final color waits until ~75 kft instead of topping out near 60 kft.
 const ETOP = [
@@ -211,11 +278,11 @@ function precipTypeProduct() {
 
 export const MRMS_PRODUCTS = {
   // ---- Reflectivity variants ----
-  REFC: product('REFC', 'MergedReflectivityQCComposite_00.50', 'Composite Reflectivity', 'dBZ', 5, 75, 5, REFL),
-  LLREF: product('LLREF', 'LowLevelCompositeReflectivity_00.50', 'Low-Level Composite Refl.', 'dBZ', 5, 75, 5, REFL),
-  RALA: product('RALA', 'MergedReflectivityAtLowestAltitude_00.50', 'Refl. at Lowest Altitude', 'dBZ', 5, 75, 5, REFL),
-  REF0C: product('REF0C', 'Reflectivity_0C_00.50', 'Reflectivity at 0°C', 'dBZ', 5, 75, 5, REFL),
-  REFM20C: product('REFM20C', 'Reflectivity_-20C_00.50', 'Reflectivity at −20°C', 'dBZ', 5, 75, 5, REFL),
+  REFC: product('REFC', 'MergedReflectivityQCComposite_00.50', 'Composite Reflectivity', 'dBZ', REFL_LO, REFL_HI, 5, REFL),
+  LLREF: product('LLREF', 'LowLevelCompositeReflectivity_00.50', 'Low-Level Composite Refl.', 'dBZ', REFL_LO, REFL_HI, 5, REFL),
+  RALA: product('RALA', 'MergedReflectivityAtLowestAltitude_00.50', 'Refl. at Lowest Altitude', 'dBZ', REFL_LO, REFL_HI, 5, REFL),
+  REF0C: product('REF0C', 'Reflectivity_0C_00.50', 'Reflectivity at 0°C', 'dBZ', REFL_LO, REFL_HI, 5, REFL),
+  REFM20C: product('REFM20C', 'Reflectivity_-20C_00.50', 'Reflectivity at −20°C', 'dBZ', REFL_LO, REFL_HI, 5, REFL),
   // ---- Echo tops ----
   ET18: product('ET18', 'EchoTop_18_00.50', '18 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
   ET30: product('ET30', 'EchoTop_30_00.50', '30 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
@@ -237,15 +304,15 @@ export const MRMS_PRODUCTS = {
   ROTML6H: product('ROTML6H', 'RotationTrackML360min_00.50', '6-hr Rotation Track 3–6 km', '10⁻³ s⁻¹', 2, 40, 2, ROT),
   ROTML24H: product('ROTML24H', 'RotationTrackML1440min_00.50', '24-hr Rotation Track 3–6 km', '10⁻³ s⁻¹', 2, 40, 2, ROT),
   // ---- Hail ----
-  MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
-  MESH1H: product('MESH1H', 'MESH_Max_60min_00.50', '1-hr Max Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
-  MESH6H: product('MESH6H', 'MESH_Max_360min_00.50', '6-hr Max Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
-  MESH24H: product('MESH24H', 'MESH_Max_1440min_00.50', '24-hr Max Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
+  MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', HAIL_LO, HAIL_HI, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
+  MESH1H: product('MESH1H', 'MESH_Max_60min_00.50', '1-hr Max Hail Size', 'mm', HAIL_LO, HAIL_HI, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
+  MESH6H: product('MESH6H', 'MESH_Max_360min_00.50', '6-hr Max Hail Size', 'mm', HAIL_LO, HAIL_HI, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
+  MESH24H: product('MESH24H', 'MESH_Max_1440min_00.50', '24-hr Max Hail Size', 'mm', HAIL_LO, HAIL_HI, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
   POSH: product('POSH', 'POSH_00.50', 'Prob. of Severe Hail', '%', 0, 100, 1, PROB),
-  SHI: product('SHI', 'SHI_00.50', 'Severe Hail Index', '', 0, 200, 1, HAIL.map((k) => ({ ...k, v: k.v * 2 }))),
+  SHI: product('SHI', 'SHI_00.50', 'Severe Hail Index', '', HAIL_LO * 2, HAIL_HI * 2, 1, HAIL.map((k) => ({ ...k, v: k.v * 2 }))),
   // ---- Lightning ----
-  LTG30: product('LTG30', 'LightningProbabilityNext30minGrid_scale_1', '30-min CG Lightning Prob.', '%', 0, 100, 1, PROB),
-  LTG60: product('LTG60', 'LightningProbabilityNext60minGrid_scale_1', '60-min CG Lightning Prob.', '%', 0, 100, 1, PROB),
+  LTG30: product('LTG30', 'LightningProbabilityNext30minGrid_scale_1', '30-min CG Lightning Prob.', '%', 0, 100, 1, LTGPROB),
+  LTG60: product('LTG60', 'LightningProbabilityNext60minGrid_scale_1', '60-min CG Lightning Prob.', '%', 0, 100, 1, LTGPROB),
   CGD1: product('CGD1', 'NLDN_CG_001min_AvgDensity_00.00', '1-min CG Lightning Density', 'fl/km²/min', 0, 10, 0.05, LDEN),
   CGD5: product('CGD5', 'NLDN_CG_005min_AvgDensity_00.00', '5-min CG Lightning Density', 'fl/km²/min', 0, 10, 0.05, LDEN),
   CGD15: product('CGD15', 'NLDN_CG_015min_AvgDensity_00.00', '15-min CG Lightning Density', 'fl/km²/min', 0, 10, 0.05, LDEN),
@@ -263,14 +330,14 @@ export const MRMS_PRODUCTS = {
   // ---- Precipitation type + accumulation ----
   PTYPE: precipTypeProduct(),
   PRATE: product('PRATE', 'PrecipRate_00.00', 'Precip Rate', 'mm/hr', 0, 100, 0.2, PRATE, { unit: 'in/hr', factor: MM_TO_IN }),
-  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE12H: product('QPE12H', 'MultiSensor_QPE_12H_Pass2_00.00', '12-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE12H: product('QPE12H', 'MultiSensor_QPE_12H_Pass2_00.00', '12-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', QPE_LO, QPE_HI, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   // ---- Flash-flood-guidance exceedance (custom: radar QPE minus FFG) ----
   // Uses the radar-only QPE that FLASH itself compares against guidance, so the
   // recovered FFG (= QPE ÷ ratio) and the overage are internally consistent.

@@ -23,7 +23,7 @@ import { createSatelliteLayer } from './satelliteLayer.js';
 
 export const RADAR_PRODUCTS = {
   nexrad_ref: { decoderId: 'REF', label: 'Reflectivity', unit: 'dBZ' },
-  nexrad_vel: { decoderId: 'VEL', label: 'Velocity', unit: 'mph' },
+  nexrad_vel: { decoderId: 'VEL', label: 'Velocity', unit: 'kt' },
   nexrad_sw:  { decoderId: 'SW',  label: 'Spectrum Width', unit: 'mph' },
   nexrad_rho: { decoderId: 'RHO', label: 'Correlation Coeff.', unit: 'ρHV' },
   nexrad_zdr: { decoderId: 'ZDR', label: 'Differential Refl.', unit: 'dB' },
