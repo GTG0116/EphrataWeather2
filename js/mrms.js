@@ -85,6 +85,75 @@ const EXCEED = [
   s(25, [255, 70, 0]), s(50, [210, 0, 0]), s(90, [150, 0, 90]), s(127, [255, 0, 255]),
 ];
 
+// ---------------------------------------------------------------------------
+// Precipitation type (derived, decoded in the browser like every other product).
+//
+// A precip-type map is three MRMS fields on one 0.01° grid: PrecipFlag says
+// whether the surface is seeing rain or snow, Model_WetBulbTemp says whether
+// rain falling onto a freezing surface is freezing rain (the flag has no
+// category of its own for it), and PrecipRate is the intensity the colour reads
+// out. The grid layer draws a single scalar through a single colour table, so
+// the three are folded into one value: the band index (0 rain, 1 freezing,
+// 2 snow) plus where the rate sits inside that band, 0..1. The colour table is
+// the three ramps laid end to end, so 1.4 is moderate freezing rain.
+// ---------------------------------------------------------------------------
+export const PRECIP_TYPE_BANDS = [
+  { id: 'rain', label: 'Rain', lo: 0.2, hi: 75,
+    colors: [[0, 255, 157], [0, 216, 95], [30, 140, 0], [255, 255, 0], [255, 155, 0], [255, 0, 0]] },
+  { id: 'ice', label: 'Freezing Rain / Sleet', lo: 0.1, hi: 15,
+    colors: [[255, 77, 255], [224, 0, 223], [176, 0, 170], [122, 0, 120]] },
+  { id: 'snow', label: 'Snow', lo: 0.05, hi: 8,
+    colors: [[0, 255, 255], [120, 242, 255], [182, 213, 255], [216, 209, 255]] },
+];
+
+// MRMS PrecipFlag categories. Everything liquid is one of the rain codes; the
+// separation into freezing rain comes from the wet-bulb field below.
+const FLAG_SNOW = new Set([3, 4]);
+const FLAG_RAIN = new Set([1, 2, 6, 7, 10, 91, 96]);
+// Rain reaching a surface at or below this wet-bulb temperature (°C) is
+// freezing on contact. Slightly above zero because the wet-bulb grid is a model
+// field on a 0.01° mesh, not a thermometer at the point of impact.
+const FREEZING_WET_BULB_C = 0.5;
+// The readout keeps the rate as hundredths of a mm/hr rather than a second
+// full-precision copy of a 24-million-cell field: 0.01 mm/hr is four decimal
+// places finer than the two the popup prints.
+const RATE_CENTI_MAX = 65535;
+
+// Three ramps end to end over [0, 3), sampled straight into the LUT the grid
+// shader reads. Built here rather than through makeScale because the band edges
+// must be hard steps — a value must never blend from heavy rain into ice.
+function precipTypeScale(steps = 1024) {
+  const rgba = new Uint8Array(steps * 4);
+  const bands = PRECIP_TYPE_BANDS.length;
+  for (let i = 0; i < steps; i++) {
+    const v = (bands * i) / (steps - 1);
+    const bandIndex = Math.min(bands - 1, Math.floor(v));
+    const colors = PRECIP_TYPE_BANDS[bandIndex].colors;
+    const t = Math.min(1, Math.max(0, v - bandIndex));
+    const pos = t * (colors.length - 1);
+    const a = colors[Math.floor(pos)];
+    const b = colors[Math.min(colors.length - 1, Math.floor(pos) + 1)];
+    const f = pos - Math.floor(pos);
+    const o = i * 4;
+    rgba[o] = Math.round(a[0] + (b[0] - a[0]) * f);
+    rgba[o + 1] = Math.round(a[1] + (b[1] - a[1]) * f);
+    rgba[o + 2] = Math.round(a[2] + (b[2] - a[2]) * f);
+    rgba[o + 3] = 255;
+  }
+  return { lo: 0, hi: bands, steps, rgba };
+}
+
+// Where a rate sits inside its band, on a log scale (the way rainfall intensity
+// reads. The top is held a couple of LUT steps short of the band edge: the
+// colour table is sampled at 1024 steps across all three bands, so a value that
+// sits flush against an edge rounds up into the first colour of the next band —
+// the heaviest rain would come out the colour of ice.
+const BAND_FRACTION_MAX = 0.99;
+function bandFraction(band, rate) {
+  const t = Math.log(rate / band.lo) / Math.log(band.hi / band.lo);
+  return t <= 0 ? 0 : t >= BAND_FRACTION_MAX ? BAND_FRACTION_MAX : t;
+}
+
 const MM_TO_IN = 0.0393700787;
 const KM_TO_KFT = 3.2808399; // km → thousands of feet
 // FLASH stores the QPE/FFG field as percent: a decoded value of 105 means a
@@ -110,6 +179,34 @@ function exceedProduct(id, name, qpeFolder, ffgFolder) {
   p.custom = 'ffgx';
   p.ffgFolder = ffgFolder;
   return p;
+}
+
+// The precipitation-type product. Its frames are the PrecipRate folder's, so it
+// scrubs on the 2-minute rate cadence; the flag and wet-bulb fields are paired
+// to each frame by time. `categorical: true` tells the renderer this is a
+// banded field: no smoothing across band edges, no user colour table, and a
+// legend of three ramps rather than one.
+function precipTypeProduct() {
+  return {
+    id: 'PTYPE',
+    folder: 'PrecipRate_00.00',
+    flagFolder: 'PrecipFlag_00.00',
+    wetBulbFolder: 'Model_WetBulbTemp_00.50',
+    name: 'Precip Type',
+    unit: 'in/hr',
+    lo: 0,
+    hi: PRECIP_TYPE_BANDS.length,
+    floor: 0,
+    scale: precipTypeScale(),
+    dispUnit: 'in/hr',
+    dispFactor: 1,
+    dispOffset: 0,
+    custom: 'ptype',
+    categorical: true,
+    // Tells the grid layer this field is banded, so pooling picks the band that
+    // covers a block rather than the highest one in it.
+    bandCount: PRECIP_TYPE_BANDS.length,
+  };
 }
 
 export const MRMS_PRODUCTS = {
@@ -163,7 +260,8 @@ export const MRMS_PRODUCTS = {
   FFG3H: product('FFG3H', 'FLASH_QPE_FFG03H_00.00', '3-hr QPE/FFG Ratio', '', 0, 3, 0.1, FFG),
   FFG6H: product('FFG6H', 'FLASH_QPE_FFG06H_00.00', '6-hr QPE/FFG Ratio', '', 0, 3, 0.1, FFG),
   FFGMAX: product('FFGMAX', 'FLASH_QPE_FFGMAX_00.00', 'Max QPE/FFG Ratio', '', 0, 3, 0.1, FFG),
-  // ---- Precipitation accumulation (rate + multi-sensor QPE accumulations) ----
+  // ---- Precipitation type + accumulation ----
+  PTYPE: precipTypeProduct(),
   PRATE: product('PRATE', 'PrecipRate_00.00', 'Precip Rate', 'mm/hr', 0, 100, 0.2, PRATE, { unit: 'in/hr', factor: MM_TO_IN }),
   QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
@@ -202,7 +300,7 @@ export const MRMS_CATEGORIES = [
   { id: 'rotation', name: 'Rotation', products: ['AZSHEAR', 'AZSHEAR36', 'ROT1H', 'ROT6H', 'ROT24H', 'ROTML1H', 'ROTML6H', 'ROTML24H'] },
   { id: 'hail', name: 'Hail', products: ['MESH', 'MESH1H', 'MESH6H', 'MESH24H', 'POSH', 'SHI'] },
   { id: 'lightning', name: 'Lightning', products: ['LTG30', 'LTG60', 'CGD1', 'CGD5', 'CGD15', 'CGD30'] },
-  { id: 'precip', name: 'Precip Accumulation', products: ['PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
+  { id: 'precip', name: 'Precip Accumulation', products: ['PTYPE', 'PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
   { id: 'ffgx', name: 'FFG Exceedance', products: ['FFGX1', 'FFGX3', 'FFGX6'] },
   { id: 'flooding', name: 'Flooding', products: ['ARI1H', 'ARI3H', 'ARI6H', 'ARI24H', 'ARIMAX', 'FFG1H', 'FFG3H', 'FFG6H', 'FFGMAX'] },
   { id: 'echotops', name: 'Echo Tops', products: ['ET18', 'ET30', 'ET50', 'ET60'] },
@@ -281,20 +379,31 @@ async function nearestFrame(folder, target) {
   return best;
 }
 
-// Two MRMS CONUS grids share the standard 0.01° geometry, so exceedance is a
-// straight cell-for-cell subtraction. If the geometries ever differ, fall back to
-// nearest-neighbour sampling of the ratio grid at each QPE cell centre.
-function ratioAt(ratio, qpe) {
-  const same = ratio.ni === qpe.ni && ratio.nj === qpe.nj &&
-    Math.abs(ratio.lon1 - qpe.lon1) < 1e-4 && Math.abs(ratio.lat1 - qpe.lat1) < 1e-4;
-  if (same) return (i) => ratio.values[i] * FLASH_RATIO_FACTOR;
+// The MRMS CONUS grids share one standard 0.01° geometry, so reading a second
+// field at a first field's cells is a straight index. If the geometries ever
+// differ, fall back to nearest-neighbour: map each `ref` cell centre into `src`,
+// or -1 where it falls outside.
+function alignedIndex(src, ref) {
+  const same = src.ni === ref.ni && src.nj === ref.nj &&
+    Math.abs(src.lon1 - ref.lon1) < 1e-4 && Math.abs(src.lat1 - ref.lat1) < 1e-4;
+  if (same) return (i) => i;
   return (i) => {
-    const col = i % qpe.ni, row = (i - col) / qpe.ni;
-    const lon = qpe.lon1 + col * qpe.di, lat = qpe.lat1 - row * qpe.dj;
-    const ci = Math.round((lon - ratio.lon1) / ratio.di);
-    const cj = Math.round((ratio.lat1 - lat) / ratio.dj);
-    if (ci < 0 || ci >= ratio.ni || cj < 0 || cj >= ratio.nj) return NaN;
-    return ratio.values[cj * ratio.ni + ci] * FLASH_RATIO_FACTOR;
+    const col = i % ref.ni, row = (i - col) / ref.ni;
+    const lon = ref.lon1 + col * ref.di, lat = ref.lat1 - row * ref.dj;
+    const ci = Math.round((lon - src.lon1) / src.di);
+    const cj = Math.round((src.lat1 - lat) / src.dj);
+    if (ci < 0 || ci >= src.ni || cj < 0 || cj >= src.nj) return -1;
+    return cj * src.ni + ci;
+  };
+}
+
+// The FLASH ratio at each QPE cell, converted from its stored percentage to the
+// physical ratio the exceedance maths works in.
+function ratioAt(ratio, qpe) {
+  const at = alignedIndex(ratio, qpe);
+  return (i) => {
+    const j = at(i);
+    return j < 0 ? NaN : ratio.values[j] * FLASH_RATIO_FACTOR;
   };
 }
 
@@ -348,6 +457,86 @@ async function loadMrmsExceedance(productId, qpeKey, onProgress) {
   return grid;
 }
 
+// Load one precipitation-type frame: the rate grid at `rateKey`, classified by
+// the PrecipFlag and wet-bulb grids nearest that time. The rate array is encoded
+// in place — a CONUS field is ~100 MB, so the frame carries one of them plus a
+// hundredths-of-a-mm/hr copy for the readout, not three.
+let freezingMask = null; // { key, mask, geometry } for the last wet-bulb frame used
+async function loadMrmsPrecipType(rateKey, onProgress, signal) {
+  const prod = MRMS_PRODUCTS.PTYPE;
+  const target = timeForKey(rateKey) || new Date();
+  const step = (base, span) => (p) => onProgress && onProgress(base + p * span);
+
+  // Wet bulb first, reduced immediately to a freezing/not-freezing mask so the
+  // full field is not held alongside the other two. It is published hourly
+  // against a 2-minute rate cadence, so every frame in a loop shares one — hence
+  // the single-entry memo rather than a download and decode per frame.
+  let freezing = null;
+  let freezingAt = null;
+  const wetBulbFrame = await nearestFrame(prod.wetBulbFolder, target).catch(() => null);
+  if (wetBulbFrame && freezingMask?.key === wetBulbFrame.key) {
+    ({ mask: freezing, geometry: freezingAt } = freezingMask);
+  } else if (wetBulbFrame) {
+    const wetBulb = await decodeGrib2(await fetchMrms(wetBulbFrame.key, step(0, 0.25), signal));
+    freezing = new Uint8Array(wetBulb.values.length);
+    for (let i = 0; i < freezing.length; i++) {
+      const t = wetBulb.values[i];
+      freezing[i] = Number.isFinite(t) && t > -900 && t <= FREEZING_WET_BULB_C ? 1 : 0;
+    }
+    freezingAt = { ni: wetBulb.ni, nj: wetBulb.nj, lon1: wetBulb.lon1, lat1: wetBulb.lat1, di: wetBulb.di, dj: wetBulb.dj };
+    wetBulb.values = new Float32Array(0);
+    freezingMask = { key: wetBulbFrame.key, mask: freezing, geometry: freezingAt };
+  }
+
+  const flagFrame = await nearestFrame(prod.flagFolder, target);
+  if (!flagFrame) throw new Error('no precipitation-type frame');
+  const flag = await decodeGrib2(await fetchMrms(flagFrame.key, step(0.25, 0.35), signal));
+  const rate = await decodeGrib2(await fetchMrms(rateKey, step(0.6, 0.4), signal));
+
+  const flagAt = alignedIndex(flag, rate);
+  const iceAt = freezing ? alignedIndex(freezingAt, rate) : null;
+  const values = rate.values;
+  const rateCenti = new Uint16Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    const mmPerHour = values[i];
+    values[i] = NaN;
+    if (!(mmPerHour > 0)) continue;
+    const fj = flagAt(i);
+    const code = fj < 0 ? 0 : flag.values[fj];
+    let bandIndex;
+    if (FLAG_SNOW.has(code)) bandIndex = 2;
+    else if (FLAG_RAIN.has(code)) {
+      const ij = iceAt ? iceAt(i) : -1;
+      bandIndex = ij >= 0 && freezing[ij] ? 1 : 0;
+    } else continue;
+    const band = PRECIP_TYPE_BANDS[bandIndex];
+    if (mmPerHour < band.lo) continue;
+    values[i] = bandIndex + bandFraction(band, mmPerHour);
+    rateCenti[i] = Math.min(RATE_CENTI_MAX, Math.round(mmPerHour * 100));
+  }
+  flag.values = new Float32Array(0);
+
+  return {
+    ...rate,
+    values,
+    rateCenti,
+    product: prod,
+    time: timeForKey(rateKey),
+    flagTime: flagFrame.time || null,
+    key: rateKey,
+  };
+}
+
+// What a click on the precipitation-type map landed on: the type itself and the
+// rate that set its shade. Returns null where nothing is falling.
+export function precipTypeReading(grid, index) {
+  const encoded = grid?.values?.[index];
+  if (!Number.isFinite(encoded)) return null;
+  const band = PRECIP_TYPE_BANDS[Math.min(PRECIP_TYPE_BANDS.length - 1, Math.floor(encoded))];
+  const mmPerHour = (grid.rateCenti?.[index] || 0) / 100;
+  return { type: band.label, rate: mmPerHour * MM_TO_IN, unit: 'in/hr' };
+}
+
 export async function fetchMrms(key, onProgress, signal) {
   const res = await fetch(`${BUCKET}/${key}`, { signal });
   if (!res.ok) throw new Error(`MRMS download failed: ${res.status}`);
@@ -373,6 +562,7 @@ export async function fetchMrms(key, onProgress, signal) {
 export async function loadMrms(productId, key, onProgress, signal) {
   const prod = MRMS_PRODUCTS[productId];
   if (prod && prod.custom === 'ffgx') return loadMrmsExceedance(productId, key, onProgress);
+  if (prod && prod.custom === 'ptype') return loadMrmsPrecipType(key, onProgress, signal);
   const bytes = await fetchMrms(key, onProgress, signal);
   const grid = await decodeGrib2(bytes);
   if (prod && prod.valueFactor != null && prod.valueFactor !== 1) {

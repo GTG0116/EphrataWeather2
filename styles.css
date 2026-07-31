@@ -485,16 +485,15 @@ h3 {
 }
 
 /* One row per town: the row itself picks the place, the trailing star saves it
-   to favorites without dismissing the dropdown. */
+   to favorites without dismissing the dropdown. The two are separate buttons,
+   so the highlight follows the pointer onto whichever one it is over — hovering
+   the row as a whole would promise that a click anywhere in it does the same
+   thing, which is exactly what the star does not do. */
 .location-suggestion {
   display: flex;
   align-items: center;
   gap: 2px;
   border-radius: 14px;
-}
-
-.location-suggestion:hover {
-  background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.05));
 }
 
 .location-suggestion-heading {
@@ -522,6 +521,12 @@ h3 {
   display: grid;
   gap: 2px;
   padding: 8px 10px;
+  transition: background 140ms ease;
+}
+
+.location-suggestion-pick:hover,
+.location-suggestion-pick:focus-visible {
+  background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.05));
 }
 
 .location-suggestion-pick strong,
@@ -541,14 +546,17 @@ h3 {
   padding: 0;
   color: var(--muted);
   opacity: 0.65;
-  transition: color 140ms ease, opacity 140ms ease, transform 140ms ease;
+  transition: color 140ms ease, opacity 140ms ease, background 140ms ease;
 }
 
 .location-favorite-btn svg { fill: none; }
 
-.location-favorite-btn:hover {
+/* The star's own square lights up, so what a click here would hit is obvious. */
+.location-favorite-btn:hover,
+.location-favorite-btn:focus-visible {
   opacity: 1;
-  transform: scale(1.12);
+  background: color-mix(in srgb, #fbbf24 20%, rgba(255, 255, 255, 0.06));
+  color: #fbbf24;
 }
 
 /* A saved town keeps a filled amber star whether or not the row is hovered. */
@@ -4103,6 +4111,8 @@ body.modal-open {
 
 .popup-mrms {
   color: rgba(56, 189, 248, 0.9);
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.32);
 }
 
 .legend-title {
@@ -4303,21 +4313,26 @@ body.modal-open {
 /* ═══════════════════════════════════════════════
    MAPBOX POPUP ANIMATIONS & STYLING
 ═══════════════════════════════════════════════ */
+/* The popup element itself carries the width from POPUP_MAX_WIDTH in app.js —
+   a viewport-relative box, so a phone never gets one running off the screen —
+   and the content simply fills it. */
 .mapboxgl-popup-content {
   background: rgba(6, 12, 30, 0.96) !important;
   border: 1px solid rgba(255, 255, 255, 0.18) !important;
-  border-radius: 12px !important;
-  padding: 11px 13px !important;
+  border-radius: 16px !important;
+  padding: 13px 15px 14px !important;
   color: #f8fbff !important;
   font-family: "Inter", system-ui, sans-serif !important;
-  font-size: 0.84rem !important;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05) !important;
+  font-size: 0.86rem !important;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255,255,255,0.05) !important;
   backdrop-filter: blur(20px) !important;
-  max-width: 290px !important;
-  /* Keep popups short enough to fit the visible map on phones — taller
-     popups forced panning the map down to read or dismiss them. */
-  max-height: 42vh !important;
+  width: 100% !important;
+  max-width: none !important;
+  /* Keep popups short enough to fit the visible map — a taller one forces
+     panning the map down just to read or dismiss it. */
+  max-height: min(46vh, 420px) !important;
   overflow-y: auto !important;
+  overscroll-behavior: contain !important;
   animation: popupIn 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both !important;
 }
 
@@ -4334,9 +4349,9 @@ body.modal-open {
 
 .mapboxgl-popup-close-button {
   color: rgba(255, 255, 255, 0.55) !important;
-  font-size: 18px !important;
-  width: 28px !important;
-  height: 28px !important;
+  font-size: 20px !important;
+  width: 30px !important;
+  height: 30px !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
@@ -4363,15 +4378,16 @@ body.modal-open {
 .popup-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   margin-bottom: 10px;
-  padding-bottom: 8px;
+  padding-bottom: 9px;
+  padding-right: 26px;   /* clear of the close button */
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .popup-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border-radius: 10px;
   display: flex;
   align-items: center;
@@ -4382,16 +4398,41 @@ body.modal-open {
 
 .popup-title {
   font-weight: 700;
-  font-size: 0.88rem;
+  font-size: 0.92rem;
+  line-height: 1.25;
   color: #f8fbff;
   flex: 1;
-  padding-right: 24px;
 }
 
 .popup-subtitle {
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   color: rgba(232, 240, 255, 0.6);
-  margin-top: 1px;
+  margin-top: 2px;
+}
+
+/* The answer to "what is here?" — one reading, big enough to read at arm's
+   length, with any second line (a precipitation rate under its type) beneath. */
+.popup-reading {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.popup-reading-value {
+  font-size: 1.32rem;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.popup-reading-sub {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: rgba(232, 240, 255, 0.68);
 }
 
 .popup-stat {
@@ -4457,6 +4498,15 @@ body.modal-open {
   gap: 4px;
 }
 
+.popup-chip-row + .popup-reading,
+.popup-chip-row + .popup-stat {
+  margin-top: 9px;
+}
+
+.popup-reading + .popup-stat {
+  margin-top: 7px;
+}
+
 .popup-chip {
   display: inline-block;
   max-width: 100%;
@@ -4494,9 +4544,10 @@ body.modal-open {
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: #e8f0ff;
   border-radius: 50%;
-  width: 28px;
-  height: 28px;
-  font-size: 1.15rem;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  font-size: 1.2rem;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -4518,6 +4569,43 @@ body.modal-open {
   min-width: 40px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+/* On a phone the popup is a panel over the map rather than a tooltip beside a
+   point: it uses the width it is given, the reading grows, and every control in
+   it is a real touch target. */
+@media (max-width: 600px) {
+  .mapboxgl-popup-content {
+    padding: 14px 15px 15px !important;
+    font-size: 0.9rem !important;
+    max-height: min(52vh, 460px) !important;
+  }
+
+  .mapboxgl-popup-close-button {
+    width: 34px !important;
+    height: 34px !important;
+    font-size: 22px !important;
+  }
+
+  .popup-header { padding-right: 30px; }
+
+  .popup-title { font-size: 0.98rem; }
+
+  .popup-subtitle { font-size: 0.8rem; }
+
+  .popup-reading { padding: 11px 13px; }
+
+  .popup-reading-value { font-size: 1.5rem; }
+
+  .popup-reading-sub { font-size: 0.86rem; }
+
+  .popup-key, .popup-val { font-size: 0.86rem; }
+
+  .popup-chip { font-size: 0.76rem; padding: 3px 10px; }
+
+  .popup-nav-btn { width: 38px; height: 38px; }
+
+  .popup-alert-details-btn { min-height: 42px; font-size: 0.86rem; }
 }
 
 /* ═══════════════════════════════════════════════
@@ -4861,32 +4949,6 @@ body.modal-open {
 .ctrl-btn-group button small {
   opacity: 0.7;
   font-size: 0.68em;
-}
-
-/* Experimental products (e.g. satellite precip rate) — flagged so the data is
-   never mistaken for a validated, operational product. */
-.ctrl-btn-group button.is-experimental {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.ctrl-btn-group button .exp-badge {
-  padding: 1px 4px;
-  border: 1px solid rgba(120, 200, 255, 0.45);
-  border-radius: 5px;
-  background: rgba(120, 200, 255, 0.14);
-  color: #78c8ff;
-  font-size: 0.62em;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  line-height: 1.35;
-}
-
-.ctrl-btn-group button.is-experimental.active .exp-badge {
-  border-color: rgba(255, 160, 64, 0.5);
-  background: rgba(255, 160, 64, 0.16);
-  color: #ffa040;
 }
 
 /* ==========================================================================

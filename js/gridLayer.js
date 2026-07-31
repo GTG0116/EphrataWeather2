@@ -149,10 +149,22 @@ function buildTexture(grid, product, packed = false) {
   const data = packed ? null : new Uint8Array(W * H * 4);
   const { lo, hi, floor } = product;
   const span = hi - lo || 1;
+  // A banded field (precipitation type) is not a scalar, so max-pooling it would
+  // pick whichever band sorts highest rather than the one that actually covers
+  // the block — dragging the rain/snow line sideways by a pooled cell or two.
+  // Those pool by majority band, then by peak intensity inside it.
+  const bands = product.bandCount || 0;
+  const bandWidth = bands ? span / bands : 0;
+  const bandCounts = bands ? new Int32Array(bands) : null;
+  const bandPeaks = bands ? new Float64Array(bands) : null;
 
   for (let oy = 0; oy < H; oy++) {
     for (let ox = 0; ox < W; ox++) {
       let best = -Infinity;
+      if (bands) {
+        bandCounts.fill(0);
+        bandPeaks.fill(-Infinity);
+      }
       for (let r = 0; r < factor; r++) {
         const sy = oy * factor + r;
         if (sy >= nj) break;
@@ -161,8 +173,20 @@ function buildTexture(grid, product, packed = false) {
           const sx = ox * factor + c;
           if (sx >= ni) break;
           const v = values[base + c];
-          if (v > best) best = v;
+          if (bands) {
+            if (!(v >= floor)) continue;
+            const b = Math.min(bands - 1, Math.max(0, Math.floor((v - lo) / bandWidth)));
+            bandCounts[b]++;
+            if (v > bandPeaks[b]) bandPeaks[b] = v;
+          } else if (v > best) best = v;
         }
+      }
+      if (bands) {
+        let winner = -1;
+        for (let b = 0; b < bands; b++) {
+          if (bandCounts[b] > 0 && (winner < 0 || bandCounts[b] > bandCounts[winner])) winner = b;
+        }
+        best = winner < 0 ? -Infinity : bandPeaks[winner];
       }
       if (!(best >= floor) || Number.isNaN(best)) continue; // leave code 0 (missing)
       let t = (best - lo) / span;

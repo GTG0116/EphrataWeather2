@@ -120,14 +120,11 @@ const SATELLITE_SOURCES = [
   { id: "himawaritarget", label: "Himawari Target", note: "Rapid-scan steerable target sector", rawOnly: true, extent: [  90,  180, -50, 50], sectorScheme: null,       proj: "geostationary" },
 ];
 // `sources` (when present) restricts a band to the feeds that publish it.
-// `experimental` flags products the upstream renderer is still validating.
 const SATELLITE_BANDS = [
   { id: "geocolor",   label: "GeoColor",    file: "geocolor"    },
   { id: "infrared",   label: "Infrared",    file: "infrared"    },
   { id: "watervapor", label: "Water Vapor", file: "water_vapor" },
   { id: "visible",    label: "Visible",     file: "visible"     },
-  { id: "precip",     label: "Precip Rate", file: "precip",     sources: ["goes19fd", "goes19conus", "goes19meso1", "goes19meso2", "goes18", "goes18meso1", "goes18meso2"], experimental: true,
-    note: "Experimental — GOES rainfall-rate estimate, not a substitute for radar" },
 ];
 
 // ─── Tropical cyclones overlay (JTWC + NHC, GitHub-generated) ──────────────────
@@ -147,59 +144,44 @@ const DROUGHT_URLS = [
   "https://idpgis.ncep.noaa.gov/arcgis/rest/services/NWS_Climate_Outlooks/cpc_usdm/MapServer/0/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
 ];
 
-// ─── MRMS Radar (EphrataWeather/MRMS on GitHub) ───────────────────────────────
-// The generator now publishes each frame as smoothed filled contour bands in
-// GeoJSON rather than a pixel raster. Every feature is one band polygon whose
-// properties carry the band's fill colour ('c') and its value range ('v0' low,
-// 'v1' high, null on the open-ended top band). Drawing them as real vector
-// fills keeps the radar sharp at any zoom — the old PNGs broke up into blocky
-// pixels past the source resolution — and lets a click read the exact band
-// straight out of the rendered feature instead of decoding an image pixel.
-const MRMS_BASE = "https://raw.githubusercontent.com/EphrataWeather/MRMS/main/public/data/";
-const MRMS_FRAMES = 15; // frames 0-14, index 0 = latest
+// ─── MRMS Radar ───────────────────────────────────────────────────────────────
+// Every product here is decoded in the browser from the NOAA MRMS bucket (see
+// js/mrms.js); this table is only what the page has to say about each one —
+// its name, the unit its readout prints, and how many decimals.
 const MRMS_PRODUCTS = {
-  rate:      { label: "Precip Type",     getGeo: i => i === 0 ? "master.geojson" : `master_${i}.geojson`, getMeta: i => `metadata_${i}.json`,           unit: "in/hr", dec: 2, typed: true },
+  rate:      { label: "Precip Type",     unit: "in/hr", dec: 2 },
   // Reflectivity's timeline runs past now: the on-device decoder appends
   // extrapolated frames after the observed ones, so the future radar lives
   // inside this product instead of being a separate thing to switch to.
-  refl:      { label: "Reflectivity",    getGeo: i => `refl_${i}.geojson`,                                getMeta: i => `metadata_refl_${i}.json`,      unit: "dBZ",   dec: 0, nowcast: true },
-  mesh:      { label: "Hail (MESH)",     getGeo: i => `mesh_${i}.geojson`,                                getMeta: i => `metadata_mesh_${i}.json`,      unit: "in",    dec: 2 },
-  qpe6h:     { label: "6-Hr Precip",     getGeo: i => `qpe6h_${i}.geojson`,                               getMeta: i => `metadata_qpe6h_${i}.json`,     unit: "in",    dec: 2 },
-  qpe24h:    { label: "24-Hr Precip",    getGeo: i => `qpe24h_${i}.geojson`,                              getMeta: i => `metadata_qpe24h_${i}.json`,    unit: "in",    dec: 2 },
-  lightning: { label: "Lightning Prob",  getGeo: i => `lightning_${i}.geojson`,                           getMeta: i => `metadata_lightning_${i}.json`, unit: "%",     dec: 0 },
-  rotation:  { label: "Azimuthal Shear", getGeo: i => `rotation_${i}.geojson`,                            getMeta: i => `metadata_rotation_${i}.json`,  unit: "s⁻¹",   dec: 3 },
+  refl:      { label: "Reflectivity",    unit: "dBZ",   dec: 0, nowcast: true },
+  mesh:      { label: "Hail (MESH)",     unit: "in",    dec: 2 },
+  qpe6h:     { label: "6-Hr Precip",     unit: "in",    dec: 2 },
+  qpe24h:    { label: "24-Hr Precip",    unit: "in",    dec: 2 },
+  lightning: { label: "Lightning Prob",  unit: "%",     dec: 0 },
+  rotation:  { label: "Azimuthal Shear", unit: "s⁻¹",   dec: 3 },
 };
 
-// The "rate" product contours rain, snow and ice against three separate colour
-// tables and merges them into one file, so a band's fill colour is the only
-// thing that says which precipitation type it came from. Colours mirror
-// RAIN/SNOW/ICE_COLORS in the generator's process_mrms.py.
-const MRMS_RATE_TYPE_BY_COLOR = (() => {
-  const map = {};
-  const add = (colors, type) => colors.forEach(c => { map[c.toLowerCase()] = type; });
-  add(["#00fb90", "#00cc00", "#009900", "#006600", "#ffff00", "#ffcc00", "#ff9100", "#ff5500", "#ff0000", "#cc0000"], "Rain");
-  add(["#00ffff", "#80ffff", "#ffffff", "#adc5ff", "#5a82ff"], "Snow");
-  add(["#ff00ff", "#d100d1", "#910091", "#4b0082", "#2d004b"], "Freezing Rain/Sleet");
-  return map;
-})();
 const MRMS_LEGENDS = {
+  // Three ramps, one per precipitation type — the colours and the rates they
+  // span mirror PRECIP_TYPE_BANDS in js/mrms.js, which is what actually paints
+  // the map. Snow and ice rates are liquid equivalent, as MRMS reports them.
   rate: {
     title: "PRECIP TYPE",
     sections: [
       {
         label: "RAIN (IN/HR)",
-        gradient: "linear-gradient(90deg, #00ff9d 0%, #00d85f 28%, #1e8c00 43%, #ffff00 62%, #ff9b00 78%, #ff0000 100%)",
-        ticks: ["0.02\"", "0.12\"", "0.50\"", "2.0\"", "5.0\""],
+        gradient: "linear-gradient(90deg, #00ff9d 0%, #00d85f 20%, #1e8c00 40%, #ffff00 60%, #ff9b00 80%, #ff0000 100%)",
+        ticks: ["0.01\"", "0.06\"", "0.41\"", "2.95\""],
       },
       {
         label: "FREEZING RAIN / SLEET (IN/HR)",
-        gradient: "linear-gradient(90deg, #ff4dff 0%, #e000df 45%, #b000aa 72%, #7a0078 100%)",
-        ticks: ["Light", "Heavy"],
+        gradient: "linear-gradient(90deg, #ff4dff 0%, #e000df 33%, #b000aa 67%, #7a0078 100%)",
+        ticks: ["0.004\"", "0.05\"", "0.59\""],
       },
       {
-        label: "SNOW (IN/HR)",
-        gradient: "linear-gradient(90deg, #00ffff 0%, #78f2ff 42%, #b6d5ff 72%, #d8d1ff 100%)",
-        ticks: ["0.004\"", "0.04\"", "0.24\""],
+        label: "SNOW (LIQUID IN/HR)",
+        gradient: "linear-gradient(90deg, #00ffff 0%, #78f2ff 33%, #b6d5ff 67%, #d8d1ff 100%)",
+        ticks: ["0.002\"", "0.025\"", "0.31\""],
       },
     ],
   },
@@ -738,16 +720,28 @@ const MAP_SETTING_SPECS = {
   placeLabels:       { type: "toggle", default: true,     label: "Place names",       note: "" },
   legend:            { type: "toggle", default: true,     label: "Show legend",       note: "" },
   scrubber:          { type: "toggle", default: true,     label: "Bottom time slider",note: "" },
-  alertBorders:      { type: "choice", default: "bold",   label: "Alert border weight",
+  alertBorders:      { type: "choice", default: "normal", label: "Alert border weight",
                        options: [["normal", "Normal"], ["bold", "Bold"], ["max", "Maximum"]] },
   animationSpeed:    { type: "choice", default: "normal", label: "Animation speed",
                        options: [["slow", "Slow"], ["normal", "Normal"], ["fast", "Fast"]] },
 };
 
+// Alert outlines used to default to "Bold". Every saved settings object carries
+// a value for every key, so a browser that had ever changed any map setting kept
+// the old default forever — this drops that one stored value once, so the new
+// default reaches people who never chose bold deliberately. Picking Bold again
+// sticks: the flag is written whether or not anything was changed.
+const ALERT_BORDER_DEFAULT_MIGRATION = "mapSettingsAlertBorderNormalDefault";
 let mapSettings = (() => {
   const resolved = {};
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem("mapSettings") || "{}") || {}; } catch {}
+  try {
+    if (!localStorage.getItem(ALERT_BORDER_DEFAULT_MIGRATION)) {
+      localStorage.setItem(ALERT_BORDER_DEFAULT_MIGRATION, "1");
+      if (saved.alertBorders === "bold") delete saved.alertBorders;
+    }
+  } catch {}
   for (const [key, spec] of Object.entries(MAP_SETTING_SPECS)) {
     const value = saved[key];
     if (spec.type === "toggle") resolved[key] = typeof value === "boolean" ? value : spec.default;
@@ -843,6 +837,10 @@ let currentSunset  = null;   // actual Date object
 let currentSunTimesByDate = new Map(); // local YYYY-MM-DD → { sunriseDate, sunsetDate }
 let metarStationOverride = null; // user-specified METAR station ID
 let popupWiredLayers = new Set(); // track which layers have popup handlers
+// Mapbox writes this straight onto the popup element, so it is what actually
+// bounds a popup's width. Phones get the viewport minus a margin instead of a
+// fixed pixel box that used to run off the side of a narrow screen.
+const POPUP_MAX_WIDTH = "min(330px, calc(100vw - 28px))";
 let alertPopupRegistry = new Map(); // popupId → alert features array (for _viewAlertFromMapFeature)
 let activeUnifiedPopup = null;
 let activeUnifiedPopupNav = null;
@@ -870,10 +868,6 @@ let activeMrmsProduct = (() => {
   if (activeRadarMode === "single") return ON_DEVICE_RADAR_PRODUCTS[saved] ? saved : "nexrad_ref";
   return MRMS_PRODUCTS[saved] ? saved : "refl";
 })();
-let mrmsTimeCache = {};        // `${product}_${frameIdx}` → time string
-let mrmsGeoCache = {};         // `${product}_${frameIdx}` → parsed FeatureCollection
-let mrmsFrameCountCache = {};  // product → number of frames published in the rolling buffer
-
 let onDeviceWeatherApi = null;
 let onDeviceWeatherPromise = null;
 let onDeviceRadarFrameInfo = [];
@@ -881,26 +875,16 @@ let onDeviceSatelliteFrameInfo = [];
 let onDeviceRadarSite = null;
 let lastAutoFittedSatelliteFrame = null;
 
-function usesOnDeviceRadar(product = activeMrmsProduct) {
-  return Boolean(
-    ON_DEVICE_RADAR_PRODUCTS[product] ||
-    (MRMS_PRODUCTS[product] && !(activeRadarMode === "mrms" && product === "rate"))
-  );
-}
-
-// The generated precipitation-type contours combine observed MRMS rate with
-// HRRR categorical precipitation-type forecast fields. Keep that product on
-// its purpose-built contour path while every other MRMS product uses the raw
-// browser decoder.
-function usesGeneratedPrecipType(product = activeMrmsProduct) {
+// Precipitation type is a banded field — three colour ramps, one per type —
+// rather than one ramp over one range, so it gets its own legend and takes no
+// user colour table.
+function isPrecipTypeProduct(product = activeMrmsProduct) {
   return activeRadarMode === "mrms" && product === "rate";
 }
 
 // Which MRMS product extends its own timeline into the future.
 function mrmsProductHasNowcast(product = activeMrmsProduct) {
-  return activeRadarMode === "mrms" &&
-    Boolean(MRMS_PRODUCTS[product]?.nowcast) &&
-    usesOnDeviceRadar(product);
+  return activeRadarMode === "mrms" && Boolean(MRMS_PRODUCTS[product]?.nowcast);
 }
 
 function getOnDeviceWeather() {
@@ -929,14 +913,9 @@ function decodedFrameLabel(frame, site = "") {
 }
 
 function handleOnDeviceStatus(status) {
-  if (status.kind === "radar" && (
-    satelliteActive ||
-    !radarActive ||
-    !usesOnDeviceRadar()
-  )) return;
+  if (status.kind === "radar" && (satelliteActive || !radarActive)) return;
   if (status.kind === "satellite" && !satelliteActive) return;
-  const active = status.kind === "satellite" ? satelliteActive : (radarActive && usesOnDeviceRadar());
-  if (!active || status.phase === "ready") return;
+  if (status.phase === "ready") return;
   const pct = Number.isFinite(status.progress) ? ` ${Math.round(status.progress * 100)}%` : "";
   setFrameTimeLabel(`${status.detail || status.phase}${pct}`);
 }
@@ -945,7 +924,6 @@ function handleOnDeviceFrame(event) {
   if (event.kind === "radar" && (
     satelliteActive ||
     !radarActive ||
-    !usesOnDeviceRadar() ||
     (event.mode && event.mode !== activeRadarMode) ||
     (event.productKey && event.productKey !== activeMrmsProduct)
   )) return;
@@ -1845,7 +1823,7 @@ function updateUserLocationMarker(lat, lon) {
   } else {
     const el = document.createElement("div");
     el.className = "user-location-dot";
-    const popup = new mapboxgl.Popup({ offset: 12 }).setHTML(`
+    const popup = new mapboxgl.Popup({ offset: 12, maxWidth: POPUP_MAX_WIDTH }).setHTML(`
       <div class="popup-header">
         <div class="popup-icon" style="background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.35);">🎯</div>
         <div>
@@ -7643,34 +7621,6 @@ function radarLayerForLocation(location = selectedLocation) {
   return "conus_base_reflectivity_mosaic";
 }
 
-function mrmsFrameArray(count = MRMS_FRAMES) {
-  // Returns [count-1, ..., 1, 0] so slider 0=oldest, slider max=latest(mrmsIdx=0)
-  return Array.from({ length: count }, (_, i) => count - 1 - i);
-}
-
-// How many frames of the active product the generator has actually published.
-// The rolling buffer is contiguous (frame 0 is always the newest), so walking
-// up from 1 until the first 404 finds the end in a couple of requests instead
-// of probing all MRMS_FRAMES slots.
-async function detectMrmsFrameCount(product = activeMrmsProduct) {
-  if (mrmsFrameCountCache[product]) return mrmsFrameCountCache[product];
-  const cfg = MRMS_PRODUCTS[product];
-  let count = 1; // frame 0 is assumed to exist
-  for (let i = 1; i < MRMS_FRAMES; i++) {
-    let res;
-    try {
-      res = await fetch(MRMS_BASE + cfg.getGeo(i), { method: "HEAD", cache: "no-store" });
-    } catch {
-      break; // network/CORS hiccup — keep whatever we have confirmed so far
-    }
-    if (!res.ok) break; // genuine 404 → end of the rolling buffer
-    count = i + 1;
-  }
-  mrmsFrameCountCache[product] = count;
-  return count;
-}
-
-
 function setPlayButtonsEnabled(enabled) {
   document.querySelectorAll("#radarPlayButton, #mapFramePlayButton").forEach(btn => { btn.disabled = !enabled; });
 }
@@ -7786,42 +7736,6 @@ function renderMapSidebar() {
   `;
 }
 
-function mrmsGeoUrl(mrmsIdx, product = activeMrmsProduct) {
-  return MRMS_BASE + MRMS_PRODUCTS[product].getGeo(mrmsIdx);
-}
-
-// Fetch (and memoise) one frame's contour bands. Frames are handed to Mapbox as
-// parsed objects rather than URLs so scrubbing the timeline re-shows a cached
-// frame instantly instead of re-downloading and blanking the map.
-async function loadMrmsFrame(mrmsIdx, product = activeMrmsProduct) {
-  const key = `${product}_${mrmsIdx}`;
-  if (mrmsGeoCache[key]) return mrmsGeoCache[key];
-  const data = await getJson(mrmsGeoUrl(mrmsIdx, product));
-  mrmsGeoCache[key] = data;
-  return data;
-}
-
-// Warm the rest of the buffer in the background so scrubbing the timeline — or
-// pressing Play — shows a cached frame instantly instead of stuttering on each
-// frame's download. Started as soon as the latest frame is on the map rather
-// than waiting for the user to hit Play, and re-entrant: a product switch
-// mid-prefetch abandons the previous walk on its next step.
-let mrmsPrewarmSequence = 0;
-function prewarmMrmsFrames() {
-  const product = activeMrmsProduct;
-  const token = ++mrmsPrewarmSequence;
-  (async () => {
-    // Let the visible frame finish first; warming must never delay it.
-    await new Promise(resolve => setTimeout(resolve, 250));
-    for (const idx of radarFrames) {
-      // Product switched, or a newer prefetch took over.
-      if (product !== activeMrmsProduct || token !== mrmsPrewarmSequence) return;
-      if (!radarActive || satelliteActive) return;
-      await loadMrmsFrame(idx, product).catch(() => {});
-    }
-  })();
-}
-
 // The timeline exists twice: the full row inside the Layers panel and the bare
 // slider docked at the bottom of the map. Both are driven from the same state,
 // so every update goes through here to keep them in lockstep.
@@ -7868,99 +7782,38 @@ function updateRadarLabel() {
     return;
   }
 
-  if (usesOnDeviceRadar()) {
-    if (!onDeviceRadarFrameInfo.length) {
-      const max = Number(document.querySelector("#mapFrameSlider")?.max || 0);
-      syncFrameSliders({ value: max });
-      setFrameTimeLabel("Latest");
-      return;
-    }
-    syncFrameSliders({ value: radarFrameIndex });
-    const frame = onDeviceRadarFrameInfo[radarFrameIndex];
-    setFrameTimeLabel(
-      decodedFrameLabel(
-        frame,
-        activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
-      ),
-      { forecast: Boolean(frame?.forecast) },
-    );
-    return;
-  }
-
-  if (!radarFrames.length) {
+  if (!onDeviceRadarFrameInfo.length) {
     const max = Number(document.querySelector("#mapFrameSlider")?.max || 0);
     syncFrameSliders({ value: max });
     setFrameTimeLabel("Latest");
     return;
   }
   syncFrameSliders({ value: radarFrameIndex });
-  const mrmsIdx = Array.isArray(radarFrames) && radarFrames.length ? radarFrames[radarFrameIndex] : 0;
-  if (mrmsIdx === 0) { setFrameTimeLabel("Latest"); return; }
-  const key = `${activeMrmsProduct}_${mrmsIdx}`;
-  if (mrmsTimeCache[key]) { setFrameTimeLabel(mrmsTimeCache[key]); return; }
-  // Placeholder until the frame's metadata arrives with its real valid time.
-  // Frames are not published on a fixed cadence, so don't guess minutes.
-  setFrameTimeLabel(`−${mrmsIdx} frame${mrmsIdx > 1 ? "s" : ""}`);
-  // Lazily fetch time from metadata
-  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
-  const capturedIdx = mrmsIdx;
-  const capturedProduct = activeMrmsProduct;
-  fetch(`${MRMS_BASE}${cfg.getMeta(capturedIdx)}`)
-    .then(r => r.json())
-    .then(meta => {
-      if (meta.time) {
-        mrmsTimeCache[key] = meta.time;
-        if (
-          radarActive &&
-          !satelliteActive &&
-          usesGeneratedPrecipType() &&
-          activeMrmsProduct === capturedProduct &&
-          radarFrames[radarFrameIndex] === capturedIdx
-        ) {
-          setFrameTimeLabel(meta.time);
-        }
-      }
-    })
-    .catch(() => {});
+  const frame = onDeviceRadarFrameInfo[radarFrameIndex];
+  setFrameTimeLabel(
+    decodedFrameLabel(
+      frame,
+      activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
+    ),
+    { forecast: Boolean(frame?.forecast) },
+  );
 }
 
 function setRadarFrame(index) {
-  if (usesOnDeviceRadar()) {
-    radarFrameIndex = Math.max(0, Math.min(radarFrames.length - 1, Number(index)));
-    updateRadarLabel();
-    return getOnDeviceWeather()
-      .then(api => api.showRadarFrame(radarFrameIndex))
-      .catch(error => {
-        setFrameTimeLabel(`Radar decode failed: ${error.message}`);
-        console.warn("On-device radar frame unavailable", error);
-      });
-  }
   radarFrameIndex = Math.max(0, Math.min(radarFrames.length - 1, Number(index)));
-  if (radarMap && mapLoaded && radarActive) {
-    const src = radarMap.getSource("mrms-source");
-    if (src) {
-      const mrmsIdx = radarFrames[radarFrameIndex];
-      const product = activeMrmsProduct;
-      // Load the bands first and only then swap them in, so a slow frame leaves
-      // the previous one on screen instead of flashing an empty map.
-      loadMrmsFrame(mrmsIdx, product)
-        .then(data => {
-          if (product !== activeMrmsProduct) return;          // product switched mid-load
-          if (radarFrames[radarFrameIndex] !== mrmsIdx) return; // scrubbed past this frame
-          radarMap.getSource("mrms-source")?.setData(data);
-        })
-        .catch(() => {});
-    }
-  }
   updateRadarLabel();
+  return getOnDeviceWeather()
+    .then(api => api.showRadarFrame(radarFrameIndex))
+    .catch(error => {
+      setFrameTimeLabel(`Radar decode failed: ${error.message}`);
+      console.warn("On-device radar frame unavailable", error);
+    });
 }
 
 function setRainfallOpacity(pct) {
   radarOpacity = pct / 100;
   if (onDeviceWeatherApi) onDeviceWeatherApi.setOpacity(radarOpacity);
   if (radarMap && mapLoaded) {
-    if (radarMap.getLayer("mrms-layer"))
-      radarMap.setPaintProperty("mrms-layer", "fill-opacity", radarOpacity);
     if (radarMap.getLayer("satellite-layer"))
       radarMap.setPaintProperty("satellite-layer", "raster-opacity", radarOpacity);
   }
@@ -7981,8 +7834,7 @@ function clearWeatherLayers() {
   alertLoadSequence++;
   stopRadarAnimation();
   clearTimeout(radarFrameTransitionTimer);
-  ["mrms-layer",
-   "radar-layer-a", "radar-layer-b",
+  ["radar-layer-a", "radar-layer-b",
    "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
    "drought-fill", "drought-line",
    "alerts-fill", "alerts-halo", "alerts-casing", "alerts-line",
@@ -7995,8 +7847,7 @@ function clearWeatherLayers() {
    "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track",
    "cyclones-points", "cyclones-labels",
   ].forEach(removeMapLayer);
-  ["mrms-source",
-   "radar-source-a", "radar-source-b",
+  ["radar-source-a", "radar-source-b",
    "spc-source",
    "drought-source",
    "alerts-source", "nws-alerts-source",
@@ -8123,13 +7974,12 @@ async function addRadarLayer(relocate = false) {
     radarActive &&
     activeRadarMode === requestedMode &&
     activeMrmsProduct === requestedProduct &&
-    (requestedMode !== "single" || !requestedSite || selectedRadarSite === requestedSite) &&
-    usesOnDeviceRadar()
+    (requestedMode !== "single" || !requestedSite || selectedRadarSite === requestedSite)
   );
   const radarOwnsTimeline = () => requestIsCurrent() && !satelliteActive;
   const api = await getOnDeviceWeather();
   if (!requestIsCurrent()) return;
-  api.setVisibility({ radar: radarActive && usesOnDeviceRadar(), satellite: satelliteActive });
+  api.setVisibility({ radar: radarActive, satellite: satelliteActive });
   api.setOpacity(radarOpacity);
   try {
     await api.loadRadar({
@@ -8156,63 +8006,6 @@ async function addRadarLayer(relocate = false) {
   renderMrmsLegend();
   restackWeatherLayers();
   raiseBoundaryLayers();
-}
-
-async function addMrmsLayer() {
-  const product = activeMrmsProduct;
-  onDeviceRadarFrameInfo = [];
-  onDeviceRadarSite = null;
-  onDeviceWeatherApi?.setVisibility({ radar: false, satellite: satelliteActive });
-  const count = await detectMrmsFrameCount(product);
-  if (!radarMap || !radarMap.getStyle() || !radarActive) return; // bailed mid-await
-  if (product !== activeMrmsProduct) return;                     // product switched mid-await
-
-  radarFrames = mrmsFrameArray(count);
-  radarFrameIndex = radarFrames.length - 1; // latest = mrmsIdx 0
-  // A single-frame buffer has nothing to scrub through; the row stays visible
-  // so the timestamp readout still shows, but the control goes inert.
-  if (!satelliteActive) {
-    syncFrameSliders({
-      max: Math.max(0, radarFrames.length - 1),
-      value: radarFrameIndex,
-      disabled: radarFrames.length < 2,
-    });
-    setPlayButtonsEnabled(radarFrames.length >= 2);
-  }
-
-  const mrmsIdx = radarFrames[radarFrameIndex]; // 0 = latest
-  const data = await loadMrmsFrame(mrmsIdx, product).catch(() => null);
-  if (!data) return;
-  if (!radarMap || !radarMap.getStyle() || !radarActive) return;
-  if (product !== activeMrmsProduct) return;
-  if (radarMap.getSource("mrms-source")) return; // already mounted
-
-  radarMap.addSource("mrms-source", { type: "geojson", data });
-  addWeatherLayer({
-    id: "mrms-layer",
-    type: "fill",
-    source: "mrms-source",
-    paint: {
-      // Each band carries its own colour, so the fill is driven straight from
-      // the feature instead of a step expression that would have to duplicate
-      // the generator's colour tables here.
-      "fill-color": ["coalesce", ["get", "c"], "rgba(0,0,0,0)"],
-      "fill-opacity": radarOpacity,
-      // Bands butt directly against one another; outlining every polygon would
-      // draw a seam between neighbouring colours.
-      "fill-antialias": true,
-    },
-  });
-  updateRadarLabel();
-  renderMrmsLegend();
-
-  // Update the product select to reflect current product
-  const sel = document.querySelector("#mrmsProductSelect");
-  if (sel) sel.value = activeMrmsProduct;
-
-  // The latest frame is drawn; pull the rest of the loop down behind it so
-  // scrubbing back through the timeline never waits on a download.
-  prewarmMrmsFrames();
 }
 
 async function addSpcLayer() {
@@ -8583,7 +8376,7 @@ const WEATHER_LAYER_ORDER = [
   "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
   "surface-layer",
   "alerts-fill", "nws-alerts-fill",
-  "radar-layer-a", "radar-layer-b", "mrms-layer", "on-device-radar", "on-device-mrms",
+  "radar-layer-a", "radar-layer-b", "on-device-radar", "on-device-mrms",
   "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
   "alerts-halo", "alerts-casing", "alerts-line",
   "lsr-hit",
@@ -8829,7 +8622,7 @@ async function addSatelliteLayer() {
   try {
     const api = await getOnDeviceWeather();
     if (!requestIsCurrent()) return;
-    api.setVisibility({ radar: radarActive && usesOnDeviceRadar(), satellite: satelliteActive });
+    api.setVisibility({ radar: radarActive, satellite: satelliteActive });
     api.setOpacity(radarOpacity);
     await api.loadSatellite({
       map: radarMap,
@@ -9165,7 +8958,7 @@ function wireCyclonePopups() {
   radarMap.on("click", "cyclones-points", e => {
     const p = e.features?.[0]?.properties;
     if (!p) return;
-    new mapboxgl.Popup({ offset: 12, maxWidth: "320px" })
+    new mapboxgl.Popup({ offset: 12, maxWidth: POPUP_MAX_WIDTH })
       .setLngLat([Number(p.lon), Number(p.lat)])
       .setHTML(buildCyclonePopup(p))
       .addTo(radarMap);
@@ -9177,29 +8970,32 @@ function buildCyclonePopup(p) {
   const isCur = p.isCurrent === true || p.isCurrent === "true";
   const tau = Number(p.tau);
   const tag = isCur
-    ? `<span style="background:${color}22;color:${color};border:1px solid ${color}66;padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">Current</span>`
-    : `<span style="background:rgba(148,163,184,0.18);color:#cbd5e1;border:1px solid rgba(148,163,184,0.4);padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">+${tau}h Forecast</span>`;
+    ? `<span class="popup-chip" style="background:${color}22;color:${color};border-color:${color}66">Current</span>`
+    : `<span class="popup-chip">+${tau}h forecast</span>`;
   const finalTag = (Number(p.isFinal) === 1 && isCur)
-    ? ` <span style="background:rgba(239,68,68,0.18);color:#fca5a5;border:1px solid rgba(239,68,68,0.5);padding:1px 7px;border-radius:999px;font-size:0.7rem;font-weight:800">Final Warning</span>` : "";
+    ? `<span class="popup-chip" style="background:rgba(239,68,68,0.18);color:#fca5a5;border-color:rgba(239,68,68,0.5)">Final warning</span>` : "";
   const lat = Number(p.lat), lon = Number(p.lon);
   const pos = `${Math.abs(lat).toFixed(1)}°${lat >= 0 ? "N" : "S"}, ${Math.abs(lon).toFixed(1)}°${lon >= 0 ? "E" : "W"}`;
-  const when = p.datetime ? new Date(p.datetime).toUTCString().replace(/:00 GMT$/, " UTC") : "—";
-  const press = Number(p.pressure_mb) > 0 ? `${p.pressure_mb} mb` : "—";
+  const when = p.datetime
+    ? new Date(p.datetime).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: "UTC" }) + " UTC"
+    : "—";
+  const press = Number(p.pressure_mb) > 0 ? `${p.pressure_mb} mb` : "";
+  const mph = numericWind(p.wind_mph) != null ? fmtWind(numericWind(p.wind_mph)) : `${p.wind_mph} mph`;
   return `
-    <div style="min-width:200px">
-      <div style="border-left:4px solid ${color};padding-left:8px;margin-bottom:6px">
-        <div style="font-weight:800;font-size:0.95rem">${safeText(p.name)} <small style="color:var(--muted)">${safeText(p.id || "")}</small></div>
-        <div style="font-size:0.74rem;color:var(--muted)">${safeText(p.basin || "")}</div>
+    <div class="popup-header">
+      <div class="popup-icon" style="background:${color}22;border:1px solid ${color}66;color:${color}">🌀</div>
+      <div>
+        <div class="popup-title">${safeText(p.name)}</div>
+        <div class="popup-subtitle">${safeText([p.id, p.basin].filter(Boolean).join(" · "))}</div>
       </div>
-      <div style="margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px">${tag}${finalTag}</div>
-      <div style="font-size:0.78rem;color:${color};font-weight:700;margin-bottom:4px">${safeText(p.classification || "")}</div>
-      <table style="font-size:0.78rem;width:100%;border-collapse:collapse">
-        <tr><td style="color:var(--muted);padding:1px 0">Time</td><td style="text-align:right">${safeText(when)}</td></tr>
-        <tr><td style="color:var(--muted);padding:1px 0">Position</td><td style="text-align:right">${pos}</td></tr>
-        <tr><td style="color:var(--muted);padding:1px 0">Max Wind</td><td style="text-align:right"><strong style="color:${color}">${safeText(p.wind_kt)} kt</strong> <span style="color:var(--muted)">${numericWind(p.wind_mph) != null ? safeText(fmtWind(numericWind(p.wind_mph))) : safeText(p.wind_mph) + " mph"}</span></td></tr>
-        <tr><td style="color:var(--muted);padding:1px 0">Pressure</td><td style="text-align:right">${press}</td></tr>
-      </table>
-    </div>`;
+    </div>
+    <div class="popup-chip-row">${tag}${finalTag}${p.classification ? `<span class="popup-chip">${safeText(p.classification)}</span>` : ""}</div>
+    <div class="popup-reading">
+      <span class="popup-reading-value" style="color:${color}">${safeText(String(p.wind_kt))} kt</span>
+      <span class="popup-reading-sub">${safeText([mph, press].filter(Boolean).join(" · "))}</span>
+    </div>
+    <div class="popup-stat"><span class="popup-key">Position</span><span class="popup-val">${pos}</span></div>
+    <div class="popup-stat"><span class="popup-key">Valid</span><span class="popup-val">${safeText(when)}</span></div>`;
 }
 
 function fitCyclonesInView() {
@@ -9257,22 +9053,33 @@ function lsrIconConfig(properties = {}) {
   return { ...icon, label: typetext ? titleCaseAlertName(typetext.toLowerCase()) : category.label };
 }
 
+// A storm report is what was seen, where, and when. The magnitude leads when
+// there is one — that is the number people came for — and the observer's remark
+// follows underneath, where a long one wraps instead of becoming the title.
 function buildLsrItemHtml(feature) {
   const p = feature.properties || {};
   const cfg = lsrIconConfig(p);
+  const time = p.valid
+    ? new Date(p.valid).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : "";
+  const place = p.city || p.county || "";
+  const magnitude = p.magnitude
+    ? `${String(p.magnitude)}${p.magUnit ? ` ${p.magUnit}` : ""}`.trim()
+    : "";
   return `
     <div class="popup-header">
       <div class="popup-icon" style="background:${cfg.color}22;border:1px solid ${cfg.color}66;color:${cfg.color}"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">${cfg.svg}</svg></div>
       <div>
-        <div class="popup-title">${safeText(p.remark || cfg.label)}</div>
-        <div class="popup-subtitle">${safeText(cfg.label)} — Local Storm Report</div>
+        <div class="popup-title">${safeText(cfg.label)}</div>
+        <div class="popup-subtitle">${safeText([place, time].filter(Boolean).join(" · ") || "Storm report")}</div>
       </div>
     </div>
     [NAV_SLOT]
-    <div class="popup-stat"><span class="popup-key">Location</span><span class="popup-val">${safeText(p.city || p.county || "--")}</span></div>
-    ${p.magnitude ? `<div class="popup-stat"><span class="popup-key">Magnitude</span><span class="popup-val">${safeText(String(p.magnitude))} ${safeText(p.magUnit || "")}</span></div>` : ""}
-    <div class="popup-stat"><span class="popup-key">Source</span><span class="popup-val">${safeText(p.source || "Public")}</span></div>
-    ${p.valid ? `<div class="popup-stat"><span class="popup-key">Time</span><span class="popup-val">${new Date(p.valid).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}</span></div>` : ""}`;
+    <div class="popup-reading">
+      <span class="popup-reading-value">${safeText(magnitude || cfg.label)}</span>
+      ${p.source ? `<span class="popup-reading-sub">Reported by ${safeText(p.source)}</span>` : ""}
+    </div>
+    ${p.remark ? `<div class="popup-note">${safeText(p.remark)}</div>` : ""}`;
 }
 
 function lsrTypeKey(properties = {}) {
@@ -9934,7 +9741,7 @@ function drawRadar(relocate = false) {
   clearWeatherLayers();
   if (onDeviceWeatherApi) {
     onDeviceWeatherApi.setVisibility({
-      radar: radarActive && usesOnDeviceRadar(),
+      radar: radarActive,
       satellite: satelliteActive,
     });
   }
@@ -9942,9 +9749,7 @@ function drawRadar(relocate = false) {
   // beneath, and re-asserted after the async adds settle.
   addBoundaryLayers();
 
-  if (radarActive && usesGeneratedPrecipType())
-    addMrmsLayer().catch(e => console.warn("Precipitation type unavailable", e));
-  else if (radarActive)
+  if (radarActive)
     addRadarLayer(relocate).catch(e => console.warn("Radar unavailable", e));
   syncRadarSiteMarkers().catch(e => console.warn("Radar sites unavailable", e));
   if (activeOverlays.has("SPC"))          addSpcLayer().catch(e => console.warn("SPC unavailable", e));
@@ -9957,7 +9762,7 @@ function drawRadar(relocate = false) {
   if (satelliteActive)                    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
-  mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
+  mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14, maxWidth: POPUP_MAX_WIDTH }).setHTML(buildLocationPopup(selectedLocation.name)));
   // The adds above are async; give them a turn to land before restacking and
   // re-applying the user's map preferences over the rebuilt stack.
   setTimeout(() => { raiseBoundaryLayers(); applyMapSettings(); }, 0);
@@ -9974,10 +9779,10 @@ function animateRadarLayer() {
   const frames = sat ? satFrames : radarFrames;
   if ((sat ? !satelliteActive : !radarActive) || !frames.length) return;
   setPlayingUi(true);
-  // The buffer is already warming from when the layer mounted; re-arming here
-  // covers the case where a frame failed on the first pass.
-  const decodedLocally = sat ? onDeviceSatelliteFrameInfo.length > 0 : usesOnDeviceRadar();
-  if (!sat && !decodedLocally) prewarmMrmsFrames();
+  // Radar is always decoded here; satellite still has a published-frame path.
+  // A locally decoded frame is awaited before the next step is armed, so a slow
+  // frame delays playback instead of stacking decodes up behind it.
+  const decodedLocally = sat ? onDeviceSatelliteFrameInfo.length > 0 : true;
   if (!decodedLocally) {
     radarAnimationTimer = setInterval(() => {
     // Animate oldest→newest, wrapping back to the oldest after the latest frame.
@@ -10338,12 +10143,8 @@ function renderSatelliteSubControls() {
   if (typeEl) {
     const activeBandId = satBand().id;
     typeEl.innerHTML = satBandsFor(satSource()).map(b => {
-      const cls = [b.id === activeBandId ? "active" : "", b.experimental ? "is-experimental" : ""]
-        .filter(Boolean).join(" ");
-      const badge = b.experimental ? `<span class="exp-badge" aria-hidden="true">EXP</span>` : "";
       const title = b.note ? ` title="${safeText(b.note)}"` : "";
-      const label = b.experimental ? `${b.label} (experimental)` : b.label;
-      return `<button type="button" data-sat-type="${b.id}" class="${cls}"${title} aria-label="${safeText(label)}">${safeText(b.label)}${badge}</button>`;
+      return `<button type="button" data-sat-type="${b.id}" class="${b.id === activeBandId ? "active" : ""}"${title}>${safeText(b.label)}</button>`;
     }).join("");
     typeEl.querySelectorAll("button").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -10437,7 +10238,7 @@ function renderRadarSubControls() {
   });
   sel.value = activeMrmsProduct;
   const paletteRow = document.querySelector(".radar-palette-row");
-  if (paletteRow) paletteRow.hidden = usesGeneratedPrecipType();
+  if (paletteRow) paletteRow.hidden = isPrecipTypeProduct();
   const palette = onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct);
   const paletteName = document.querySelector("#radarPaletteName");
   if (paletteName) paletteName.textContent = palette?.name || "Default";
@@ -10454,9 +10255,9 @@ function renderMrmsLegend() {
   if (!box) return;
   if (!radarActive || !mapSettings.legend) { box.hidden = true; return; }
   box.hidden = false;
-  const livePalette = usesOnDeviceRadar()
-    ? onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct)
-    : null;
+  // A banded product reports no single ramp, so it falls through to its own
+  // multi-ramp key below.
+  const livePalette = onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct);
   if (livePalette) {
     const cfg = activeRadarMode === "single"
       ? ON_DEVICE_RADAR_PRODUCTS[activeMrmsProduct]
@@ -10476,7 +10277,7 @@ function renderMrmsLegend() {
       </div>`;
     return;
   }
-  if (usesOnDeviceRadar()) {
+  if (activeRadarMode === "single") {
     const legend = ON_DEVICE_RADAR_LEGENDS[activeMrmsProduct];
     box.innerHTML = legend ? `
       <div class="legend-title">${safeText(legend.title)}</div>
@@ -10508,7 +10309,7 @@ function renderMrmsLegend() {
   `;
 }
 
-// ─── Contour band sampling ───────────────────────────────────────────────────
+// ─── Map click readouts ──────────────────────────────────────────────────────
 
 async function loadImgCors(url) {
   return new Promise((resolve, reject) => {
@@ -10520,75 +10321,52 @@ async function loadImgCors(url) {
   });
 }
 
-// Read the radar value under a click. The frames are vector contour bands, so
-// the band the user tapped is already on the map with its value range attached
-// — asking Mapbox which feature is under the point is exact and instant, where
-// the old raster path had to download a companion value PNG and decode a pixel.
-function sampleMrmsValue(point, lngLat = null) {
-  if (usesOnDeviceRadar()) {
-    return lngLat && onDeviceWeatherApi
-      ? onDeviceWeatherApi.sampleRadar(lngLat.lng, lngLat.lat)
-      : null;
-  }
-  if (!radarMap?.getLayer("mrms-layer")) return null;
-  const hits = radarMap.queryRenderedFeatures(point, { layers: ["mrms-layer"] });
-  if (!hits.length) return { noData: true };
-
-  const cfg = MRMS_PRODUCTS[activeMrmsProduct];
-  // Mapbox returns the topmost rendered feature first. Bands are emitted low
-  // value → high value (and, for the precip-type product, rain then snow then
-  // ice), so the first hit is the one actually visible at this point.
-  const props = hits[0].properties || {};
-  const color = String(props.c || "").toLowerCase();
-  const low   = Number(props.v0);
-  const high  = props.v1 === null || props.v1 === undefined || props.v1 === "" ? null : Number(props.v1);
-
-  return {
-    source: cfg.typed ? "MRMS + HRRR" : "MRMS",
-    product: cfg.label,
-    unit: cfg.unit,
-    color: /^#[0-9a-f]{6}$/.test(color) ? color : null,
-    low: Number.isFinite(low) ? low : null,
-    high: Number.isFinite(high) ? high : null,
-    dec: cfg.dec,
-    // Only the precip-rate product mixes several colour tables into one file.
-    precipType: cfg.typed ? MRMS_RATE_TYPE_BY_COLOR[color] || null : null,
-    method: cfg.typed ? "MRMS rate intensity · HRRR forecast precipitation type" : null,
-  };
+// Read the radar value under a click. Every product is decoded in the browser,
+// so the answer is the grid cell (or radar gate) itself — no companion file to
+// download, no colour to reverse-engineer.
+function sampleRadarValue(lngLat) {
+  if (!lngLat || !onDeviceWeatherApi) return null;
+  return onDeviceWeatherApi.sampleRadar(lngLat.lng, lngLat.lat);
 }
 
-// "0.20 – 0.50 in/hr" for a closed band, "3.00+ in/hr" for the open-ended top.
-function mrmsBandLabel(data) {
-  const fmt = v => v.toFixed(data.dec);
-  if (data.low === null) return `Detected${data.unit ? ` (${data.unit})` : ""}`;
-  if (data.exact) return `${fmt(data.low)} ${data.unit}`;
-  if (data.high === null) return `${fmt(data.low)}+ ${data.unit}`;
-  return `${fmt(data.low)} – ${fmt(data.high)} ${data.unit}`;
+// "0.16 in/hr", "47 dBZ" — the number that was clicked on, and nothing else.
+function radarValueLabel(data) {
+  if (!Number.isFinite(data.value)) return "--";
+  return `${data.value.toFixed(data.dec ?? 0)}${data.unit ? ` ${data.unit}` : ""}`;
 }
 
+// A radar reading is a single fact: what is at this spot, right now. The popup
+// says the product, the reading, and the time the frame is valid for — the
+// clock is the only context a reading needs.
 function buildRadarPixelHtml(data) {
-  const swatch = data.color || "#38bdf8";
-  const iconBg = `background:${swatch}33;border:1px solid ${swatch}88`;
-  const sampleKind = data.extrapolated
-    ? "Extrapolated Grid Cell"
-    : data.exact ? "Decoded Gate" : "Contour Band";
-  const typeRow = data.precipType
-    ? `<div class="popup-stat"><span class="popup-key">Type</span><span class="popup-val">${safeText(data.precipType)}</span></div>`
+  const time = data.time ? new Date(data.time) : null;
+  const clock = time && !Number.isNaN(time.getTime())
+    ? time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : "";
+  const subtitle = [
+    data.site || "",
+    data.forecast && data.leadMinutes ? `+${data.leadMinutes} min outlook` : "",
+    clock,
+  ].filter(Boolean).join(" · ");
+  // Precipitation type leads with the type; the rate that set its shade is the
+  // supporting line underneath.
+  const headline = data.precipType || radarValueLabel(data);
+  const support = data.precipType ? radarValueLabel(data) : "";
   return `
     <div class="popup-header">
-      <div class="popup-icon popup-mrms" style="${iconBg}">
+      <div class="popup-icon popup-mrms">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><polyline points="16 16 12 20 8 16"/><line x1="12" y1="12" x2="12" y2="20"/></svg>
       </div>
       <div>
-        <div class="popup-title">${safeText(data.source || "MRMS")} ${safeText(data.product)}</div>
-        <div class="popup-subtitle">${data.site ? `${safeText(data.site)} · ` : ""}${sampleKind}</div>
+        <div class="popup-title">${safeText(data.product || "Radar")}</div>
+        ${subtitle ? `<div class="popup-subtitle">${safeText(subtitle)}</div>` : ""}
       </div>
     </div>
     [NAV_SLOT]
-    ${typeRow}
-    <div class="popup-stat"><span class="popup-key">Value</span><span class="popup-val">${safeText(mrmsBandLabel(data))}</span></div>
-    <div class="popup-note">${safeText(data.method || "NOAA/MRMS — EphrataWeather")}</div>`;
+    <div class="popup-reading">
+      <span class="popup-reading-value">${safeText(headline)}</span>
+      ${support ? `<span class="popup-reading-sub">${safeText(support)}</span>` : ""}
+    </div>`;
 }
 
 // ─── Overlay popup content builders ──────────────────────────────────────────
@@ -10596,48 +10374,39 @@ function buildRadarPixelHtml(data) {
 function buildOverlayItemHtml(feature) {
   const f = feature.properties || {};
   const lid = feature.layer?.id || "";
+  // Each overlay answers one question: what does this area mean here. Title,
+  // which outlook it came from, and the level — nothing about who publishes it.
+  const overlay = (icon, iconStyle, title, subtitle, reading) => `
+    <div class="popup-header">
+      <div class="popup-icon" style="${iconStyle}">${icon}</div>
+      <div>
+        <div class="popup-title">${safeText(title)}</div>
+        <div class="popup-subtitle">${safeText(subtitle)}</div>
+      </div>
+    </div>
+    [NAV_SLOT]
+    <div class="popup-reading"><span class="popup-reading-value">${safeText(reading)}</span></div>`;
+
   if (lid === "spc-fill") {
     const typeLabel = activeSpcType === "cat" ? "Categorical" : activeSpcType.charAt(0).toUpperCase() + activeSpcType.slice(1);
-    const risk = spcPopupLabel(f);
-    return `<div class="popup-header">
-        <div class="popup-icon popup-spc" style="background:rgba(250,204,21,0.15);border:1px solid rgba(250,204,21,0.35);">⚡</div>
-        <div><div class="popup-title">SPC Day ${activeSpcDay} Outlook</div><div class="popup-subtitle">${safeText(typeLabel)}</div></div>
-      </div>
-      [NAV_SLOT]
-      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(risk)}</span></div>
-      <div class="popup-note">Storm Prediction Center — NOAA</div>`;
+    return overlay("⚡", "background:rgba(250,204,21,0.15);border:1px solid rgba(250,204,21,0.35);",
+      `SPC Day ${activeSpcDay} Outlook`, `${typeLabel} risk`, spcPopupLabel(f));
   }
   if (lid === "drought-fill") {
-    const cat = f.CATEGORY || "";
-    return `<div class="popup-header">
-        <div class="popup-icon" style="background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.35);">🌵</div>
-        <div><div class="popup-title">U.S. Drought Monitor</div><div class="popup-subtitle">USDA / NOAA / UNL</div></div>
-      </div>
-      [NAV_SLOT]
-      <div class="popup-stat"><span class="popup-key">Classification</span><span class="popup-val">${safeText(droughtLabel(cat))}</span></div>
-      <div class="popup-note">Updated weekly. Data: drought.gov</div>`;
+    return overlay("🌵", "background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.35);",
+      "Drought Monitor", "Weekly classification", droughtLabel(f.CATEGORY || ""));
   }
   if (lid === "fire-fill") {
     const label = f.LABEL || "Fire Weather Area";
     const labelNice = { ELEVATED: "Elevated", CRITICAL: "Critical", EXTREME: "Extreme" }[label] ?? (label.charAt(0) + label.slice(1).toLowerCase());
-    return `<div class="popup-header">
-        <div class="popup-icon popup-fire" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);">🔥</div>
-        <div><div class="popup-title">SPC Fire Weather Outlook</div><div class="popup-subtitle">Day ${activeFireDay} Forecast</div></div>
-      </div>
-      [NAV_SLOT]
-      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNice)}</span></div>
-      <div class="popup-note">Monitor local alerts and fire restrictions.</div>`;
+    return overlay("🔥", "background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);",
+      "Fire Weather Outlook", `Day ${activeFireDay}`, labelNice);
   }
   if (lid === "wpc-rain-fill") {
     const label = f.LABEL || "Unknown";
     const labelNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
-    return `<div class="popup-header">
-        <div class="popup-icon" style="background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);">🌧️</div>
-        <div><div class="popup-title">WPC Excessive Rainfall</div><div class="popup-subtitle">Day ${activeWpcDay} Outlook</div></div>
-      </div>
-      [NAV_SLOT]
-      <div class="popup-stat"><span class="popup-key">Risk Level</span><span class="popup-val">${safeText(labelNames[label] || label)}</span></div>
-      <div class="popup-note">WPC Day ${activeWpcDay} Excessive Rainfall Outlook — NOAA</div>`;
+    return overlay("🌧️", "background:rgba(102,212,255,0.15);border:1px solid rgba(102,212,255,0.35);",
+      "Excessive Rainfall", `Day ${activeWpcDay} outlook`, labelNames[label] || label);
   }
   return `<div class="popup-header"><div><div class="popup-title">Map Feature</div></div></div>[NAV_SLOT]`;
 }
@@ -10677,12 +10446,12 @@ async function collectPopupItems(lngLat, point, preferredLsrFeature = null) {
       .forEach(f => items.push({ type: "alert", feature: f }));
   }
 
-  // Collect the radar contour band under the click (put first so it's the
-  // default view for map clicks)
+  // The radar reading under the click goes first, so it is what a plain map
+  // click shows.
   if (radarActive && !preferredLsrFeature) {
     try {
-      const band = sampleMrmsValue(point, lngLat);
-      if (band && !band.noData) items.unshift({ type: "radar", data: band });
+      const reading = sampleRadarValue(lngLat);
+      if (reading && !reading.noData) items.unshift({ type: "radar", data: reading });
     } catch {}
   }
 
@@ -10698,7 +10467,7 @@ function showPopupItems(lngLat, items) {
   const alertFeatures = items.filter(x => x.type === "alert").map(x => x.feature);
   alertPopupRegistry.set(popupId, alertFeatures);
 
-  const popup = new mapboxgl.Popup({ offset: 8 }).setLngLat(lngLat).addTo(radarMap);
+  const popup = new mapboxgl.Popup({ offset: 8, maxWidth: POPUP_MAX_WIDTH }).setLngLat(lngLat).addTo(radarMap);
   activeUnifiedPopup = popup;
   popup.on("close", () => {
     alertPopupRegistry.delete(popupId);
@@ -11032,8 +10801,6 @@ document.querySelector("#mrmsProductSelect")?.addEventListener("change", event =
     activeMrmsProduct
   );
   radarLatestResetKey = `${activeRadarMode}:${activeMrmsProduct}`;
-  mrmsGeoCache = {};        // Drop the previous product's contour frames
-  mrmsTimeCache = {};       // Frame timestamps are per product too
   onDeviceRadarFrameInfo = [];
   radarFrames = [];
   radarFrameIndex = 0;
