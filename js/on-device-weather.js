@@ -8,7 +8,7 @@
 import { listVolumes, fetchVolume, nearestSite, RADARS } from './s3.js';
 import { PRODUCTS, makeScale, parsePal } from './products.js';
 import { createRadarLayer } from './radarLayer.js';
-import { MRMS_PRODUCTS, listMrms, loadMrms } from './mrms.js';
+import { MRMS_PRODUCTS, listMrms, loadMrms, precipTypeReading } from './mrms.js';
 import { createGridLayer } from './gridLayer.js';
 import {
   NOWCAST_MAX_LEAD_MINUTES,
@@ -18,8 +18,7 @@ import {
 } from './nowcast.js';
 import { SATELLITES, SECTORS, listScenes, sceneBBox } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, clearSceneCache } from './satClient.js';
-import { bandsFor, buildRGBA, SAT_PRECIP_ID } from './satProducts.js';
-import { computePrecipRate } from './satPrecip.js';
+import { bandsFor, buildRGBA } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 
 export const RADAR_PRODUCTS = {
@@ -42,7 +41,9 @@ export const MRMS_RADAR_PRODUCTS = {
   qpe24h:    { decoderId: 'QPE24H',   label: '24-Hr Precip', unit: 'in' },
   lightning: { decoderId: 'LTG30',    label: 'Lightning Probability', unit: '%' },
   rotation:  { decoderId: 'AZSHEAR',  label: 'Azimuthal Shear', unit: '10⁻³ s⁻¹' },
-  rate:      { decoderId: 'PRATE',    label: 'Precipitation Rate', unit: 'in/hr' },
+  // Precipitation type is derived in the browser from three MRMS fields (see
+  // mrms.js): the rate sets the shade, the flag and wet-bulb set the band.
+  rate:      { decoderId: 'PTYPE',    label: 'Precip Type', unit: 'in/hr' },
 };
 
 export const SATELLITE_PRODUCTS = {
@@ -50,7 +51,6 @@ export const SATELLITE_PRODUCTS = {
   infrared: 'C13',
   watervapor: 'C09',
   visible: 'C02',
-  precip: SAT_PRECIP_ID,
 };
 
 export const SATELLITE_SOURCES = {
@@ -241,11 +241,14 @@ function ensureRadarLayer(map, beforeId) {
   return radarLayer;
 }
 
-function ensureMrmsLayer(map, beforeId) {
+// A banded field (precipitation type) is drawn crisp: the smoothing blend runs
+// through the colour table, so blurring across a rain/snow edge would paint a
+// stripe of the band that lies between them.
+function ensureMrmsLayer(map, beforeId, product = null) {
   if (!mrmsLayer) mrmsLayer = createGridLayer(MRMS_LAYER_ID);
   mountLayer(map, mrmsLayer, beforeId);
   mrmsLayer.setOpacity(opacity);
-  mrmsLayer.setSmooth(MRMS_SMOOTH_LEVEL);
+  mrmsLayer.setSmooth(product?.categorical ? 0 : MRMS_SMOOTH_LEVEL);
   return mrmsLayer;
 }
 
@@ -449,7 +452,7 @@ async function showMrmsRadar(index, sequence = ++radarSequence) {
   };
   if (radarVisible && activeMap) {
     radarLayer?.clear();
-    ensureMrmsLayer(activeMap, anchorId).setGrid(grid, product);
+    ensureMrmsLayer(activeMap, anchorId, product).setGrid(grid, product);
   }
   shownRadar = {
     mode: 'mrms',
@@ -1124,10 +1127,6 @@ async function prepareSatelliteFrame(sourceKey, productKey, frame, bbox, sequenc
   } else {
     await ensureBandsAsync(scene, source.satKey, source.sectorKey, bandsFor(decoderId));
   }
-  if (decoderId === SAT_PRECIP_ID) {
-    emitStatus('satellite', 'deriving', 'Estimating rain rate', 1);
-    scene.channels.RR = computePrecipRate(scene);
-  }
   const rgba = buildRGBA(scene, decoderId, { enhanceIR: true });
   let visibleSamples = 0;
   let maxSample = 0;
@@ -1436,6 +1435,9 @@ function circularDifference(a, b) {
   return Math.min(d, 360 - d);
 }
 
+// What is under a click: the product, the value there, and when it was valid.
+// Nothing about how the field was fetched or decoded — the popup is a readout,
+// not a provenance note.
 export function sampleRadar(lon, lat) {
   const shown = shownRadar;
   if (!shown || !Number.isFinite(lon) || !Number.isFinite(lat)) return null;
@@ -1444,26 +1446,27 @@ export function sampleRadar(lon, lat) {
     const col = Math.round((lon - grid.lon1) / grid.di);
     const row = Math.round((grid.lat1 - lat) / grid.dj);
     if (col < 0 || col >= grid.ni || row < 0 || row >= grid.nj) return { noData: true };
-    const native = grid.values[row * grid.ni + col];
-    if (!Number.isFinite(native)) return { noData: true };
-    const value = native * (shown.product.dispFactor || 1) + (shown.product.dispOffset || 0);
+    const index = row * grid.ni + col;
     const forecast = Boolean(shown.forecast?.forecast);
-    const lead = Number(shown.forecast?.leadMinutes) || 0;
-    const summary = shown.forecast?.summary || nowcastSummary;
-    return {
-      source: forecast ? 'MRMS extrapolation' : 'MRMS · decoded on this device',
+    const base = {
       site: '',
-      product: forecast ? `${productInfo.label} (+${lead} min)` : productInfo.label,
+      product: productInfo.label,
+      forecast,
+      leadMinutes: forecast ? Number(shown.forecast?.leadMinutes) || 0 : 0,
+      time: shown.forecast?.time || grid.time || null,
+    };
+    if (shown.product.categorical) {
+      const reading = precipTypeReading(grid, index);
+      if (!reading) return { noData: true };
+      return { ...base, precipType: reading.type, value: reading.rate, unit: reading.unit, dec: 2 };
+    }
+    const native = grid.values[index];
+    if (!Number.isFinite(native)) return { noData: true };
+    return {
+      ...base,
+      value: native * (shown.product.dispFactor || 1) + (shown.product.dispOffset || 0),
       unit: productInfo.unit,
-      low: value,
-      high: value,
-      exact: !forecast,
-      extrapolated: forecast,
       dec: productInfo.unit === 'in' || productInfo.unit === 'in/hr' ? 2 : 0,
-      color: null,
-      method: forecast
-        ? `${summary?.text || 'Storm motion extrapolation'} · experimental, not an official forecast`
-        : null,
     };
   }
   const { sweep, site, product, productInfo } = shown;
@@ -1487,15 +1490,15 @@ export function sampleRadar(lon, lat) {
   const value = nativeValue * (product.dispFactor || 1) + (product.dispOffset || 0);
   const decimals = productInfo.unit === 'ρHV' ? 2 : productInfo.unit === 'dB' ? 1 : 0;
   return {
-    source: 'NEXRAD Level II',
     site: radarSite?.[0] || '',
     product: productInfo.label,
     unit: productInfo.unit,
-    low: value,
-    high: value,
-    exact: true,
+    value,
     dec: decimals,
-    color: null,
+    forecast: false,
+    leadMinutes: 0,
+    time: radarFrameMeta?.time || null,
+    elevation: sweep.elevation,
   };
 }
 
@@ -1526,7 +1529,7 @@ function rememberDefaultColorTable(product) {
 function repaintRadarProduct(product) {
   if (!shownRadar || shownRadar.product !== product || !radarVisible || !activeMap) return;
   if (shownRadar.mode === 'mrms') {
-    ensureMrmsLayer(activeMap, anchorId).setGrid(shownRadar.grid, product);
+    ensureMrmsLayer(activeMap, anchorId, product).setGrid(shownRadar.grid, product);
   } else {
     ensureRadarLayer(activeMap, anchorId).setSweep(shownRadar.sweep, product, shownRadar.site);
   }
@@ -1534,7 +1537,9 @@ function repaintRadarProduct(product) {
 
 export function applyRadarPalette({ mode = radarMode, productKey = radarProductKey, text, name = 'Custom palette' } = {}) {
   const product = radarProduct(mode, productKey);
-  if (!product) throw new Error('This radar product does not support custom color tables');
+  // A banded product's colour table is three ramps whose edges carry meaning,
+  // so a single-ramp .pal cannot replace it.
+  if (!product || product.categorical) throw new Error('This radar product does not support custom color tables');
   const pal = parsePal(String(text || ''));
   if (!pal.segments || pal.segments.length < 2) throw new Error('The color table needs at least two color stops');
   rememberDefaultColorTable(product);
@@ -1566,9 +1571,11 @@ export function resetRadarPalette({ mode = radarMode, productKey = radarProductK
   return radarPalette(mode, productKey);
 }
 
+// The single ramp + range a legend draws. Banded products have no single ramp,
+// so they report none and the page falls back to their own multi-ramp key.
 export function radarPalette(mode = radarMode, productKey = radarProductKey) {
   const product = radarProduct(mode, productKey);
-  if (!product?.scale?.rgba) return null;
+  if (!product?.scale?.rgba || product.categorical) return null;
   const colors = [];
   const count = 9;
   for (let i = 0; i < count; i++) {

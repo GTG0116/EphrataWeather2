@@ -1,7 +1,7 @@
 // Bump on every release. The name is the cache's identity, so changing it is
 // what makes activate() drop the previous release's copies of the app shell —
 // otherwise a visitor who goes offline is served the old code indefinitely.
-const CACHE_NAME = "weather-portal-v16";
+const CACHE_NAME = "weather-portal-v17";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -23,7 +23,6 @@ const APP_SHELL = [
   "./js/hdf5.js",
   "./js/mirs.js",
   "./js/goes.js",
-  "./js/satPrecip.js",
   "./js/satProducts.js",
   "./js/satellite.worker.js",
   "./js/satClient.js",
