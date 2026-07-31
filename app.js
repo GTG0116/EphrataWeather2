@@ -726,6 +726,49 @@ let activeBasemap = (() => {
   const saved = localStorage.getItem("weatherBasemap");
   return BASEMAP_STYLES.some(s => s.id === saved) ? saved : "dark-v11";
 })();
+
+// ─── Map customization ───────────────────────────────────────────────────────
+// Everything the Settings panel can change about how the map itself draws.
+// Values are validated on load so an old or hand-edited localStorage entry
+// can't put the map into a state the UI has no control for.
+const MAP_SETTING_SPECS = {
+  coastlines:        { type: "toggle", default: true,     label: "Coastlines",        note: "Outline the land/water edge so offshore storms are unmistakable" },
+  stateBorders:      { type: "toggle", default: true,     label: "State borders",     note: "" },
+  countryBorders:    { type: "toggle", default: true,     label: "Country borders",   note: "" },
+  placeLabels:       { type: "toggle", default: true,     label: "Place names",       note: "" },
+  legend:            { type: "toggle", default: true,     label: "Show legend",       note: "" },
+  scrubber:          { type: "toggle", default: true,     label: "Bottom time slider",note: "" },
+  alertBorders:      { type: "choice", default: "bold",   label: "Alert border weight",
+                       options: [["normal", "Normal"], ["bold", "Bold"], ["max", "Maximum"]] },
+  animationSpeed:    { type: "choice", default: "normal", label: "Animation speed",
+                       options: [["slow", "Slow"], ["normal", "Normal"], ["fast", "Fast"]] },
+};
+
+let mapSettings = (() => {
+  const resolved = {};
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("mapSettings") || "{}") || {}; } catch {}
+  for (const [key, spec] of Object.entries(MAP_SETTING_SPECS)) {
+    const value = saved[key];
+    if (spec.type === "toggle") resolved[key] = typeof value === "boolean" ? value : spec.default;
+    else resolved[key] = spec.options.some(([id]) => id === value) ? value : spec.default;
+  }
+  return resolved;
+})();
+
+function saveMapSettings() {
+  try { localStorage.setItem("mapSettings", JSON.stringify(mapSettings)); } catch {}
+}
+
+// Alert outlines are already deliberately heavy; this scales the whole
+// halo/casing/line stack together so "Normal" is still readable.
+const ALERT_BORDER_SCALE = { normal: 0.62, bold: 1, max: 1.45 };
+
+// Playback interval for the frame animation.
+const ANIMATION_SPEED_MS = { slow: 1100, normal: RADAR_FRAME_MS, fast: 380 };
+function radarFrameDelay() {
+  return ANIMATION_SPEED_MS[mapSettings.animationSpeed] ?? RADAR_FRAME_MS;
+}
 let activeSatelliteType = "geocolor";
 let activeSatelliteSource = (() => {
   const saved = localStorage.getItem("satelliteSource");
@@ -858,12 +901,6 @@ function mrmsProductHasNowcast(product = activeMrmsProduct) {
   return activeRadarMode === "mrms" &&
     Boolean(MRMS_PRODUCTS[product]?.nowcast) &&
     usesOnDeviceRadar(product);
-}
-
-// The nowcast state reported by the last frame event from the decoder.
-function nowcastInfo() {
-  if (!mrmsProductHasNowcast()) return null;
-  return onDeviceWeatherApi?.nowcastState?.() || null;
 }
 
 function getOnDeviceWeather() {
@@ -1099,61 +1136,114 @@ function isMetric() {
   return unitSystem ? unitSystem === "metric" : autoMetric();
 }
 
-// Convert a stored imperial value into the active display system.
-function uTemp(valueF)      { return valueF == null ? null : (isMetric() ? (valueF - 32) * 5 / 9 : valueF); }
-function uWind(valueMph)    { return valueMph == null ? null : (isMetric() ? valueMph * 1.609344 : valueMph); }
-function uVis(valueMi)      { return valueMi == null ? null : (isMetric() ? valueMi * 1.609344 : valueMi); }
-function uPrecip(valueIn)   { return valueIn == null ? null : (isMetric() ? valueIn * 25.4 : valueIn); }
-function uPressure(valInHg) { return valInHg == null ? null : (isMetric() ? valInHg * 33.8639 : valInHg); }
+// ─── Per-quantity unit overrides ─────────────────────────────────────────────
+// The system toggle sets everything at once; Settings can then pin an
+// individual quantity ("metric, but keep wind in knots"). "auto" means follow
+// the system toggle, which itself follows the location when unset.
+const UNIT_KINDS = {
+  temp:     { label: "Temperature",  imperial: "f",    metric: "c",    options: [["f", "°F"], ["c", "°C"]] },
+  wind:     { label: "Wind speed",   imperial: "mph",  metric: "kmh",  options: [["mph", "mph"], ["kmh", "km/h"], ["kt", "kt"], ["ms", "m/s"]] },
+  precip:   { label: "Precipitation",imperial: "in",   metric: "mm",   options: [["in", "in"], ["mm", "mm"]] },
+  pressure: { label: "Pressure",     imperial: "inhg", metric: "hpa",  options: [["inhg", "inHg"], ["hpa", "hPa"]] },
+  distance: { label: "Distance",     imperial: "mi",   metric: "km",   options: [["mi", "mi"], ["km", "km"]] },
+  height:   { label: "Wave & tide",  imperial: "ft",   metric: "m",    options: [["ft", "ft"], ["m", "m"]] },
+};
 
-function tempUnit()   { return isMetric() ? "°C" : "°F"; }
-function windUnit()   { return isMetric() ? "km/h" : "mph"; }
-function visUnit()    { return isMetric() ? "km" : "mi"; }
-function precipUnit() { return isMetric() ? "mm" : "in"; }
-function pressUnit()  { return isMetric() ? "hPa" : "inHg"; }
+let unitPrefs = (() => {
+  const defaults = Object.fromEntries(Object.keys(UNIT_KINDS).map(kind => [kind, "auto"]));
+  try {
+    const saved = JSON.parse(localStorage.getItem("unitPrefs") || "{}");
+    for (const kind of Object.keys(UNIT_KINDS)) {
+      const value = saved?.[kind];
+      if (value && UNIT_KINDS[kind].options.some(([id]) => id === value)) defaults[kind] = value;
+    }
+  } catch {}
+  return defaults;
+})();
+
+function saveUnitPrefs() {
+  try { localStorage.setItem("unitPrefs", JSON.stringify(unitPrefs)); } catch {}
+}
+
+// The unit actually in force for a quantity, resolving "auto" through the
+// system toggle.
+function unitChoice(kind) {
+  const pref = unitPrefs[kind];
+  const spec = UNIT_KINDS[kind];
+  if (pref && pref !== "auto") return pref;
+  return isMetric() ? spec.metric : spec.imperial;
+}
+
+// Convert a stored imperial value into the active display unit.
+function uTemp(valueF)      { return valueF == null ? null : (unitChoice("temp") === "c" ? (valueF - 32) * 5 / 9 : valueF); }
+function uVis(valueMi)      { return valueMi == null ? null : (unitChoice("distance") === "km" ? valueMi * 1.609344 : valueMi); }
+function uPrecip(valueIn)   { return valueIn == null ? null : (unitChoice("precip") === "mm" ? valueIn * 25.4 : valueIn); }
+function uPressure(valInHg) { return valInHg == null ? null : (unitChoice("pressure") === "hpa" ? valInHg * 33.8639 : valInHg); }
+
+const WIND_FACTORS = { mph: 1, kmh: 1.609344, kt: 0.868976, ms: 0.44704 };
+function uWind(valueMph) {
+  return valueMph == null ? null : valueMph * (WIND_FACTORS[unitChoice("wind")] ?? 1);
+}
+
+function tempUnit()   { return unitChoice("temp") === "c" ? "°C" : "°F"; }
+function windUnit()   { return { mph: "mph", kmh: "km/h", kt: "kt", ms: "m/s" }[unitChoice("wind")]; }
+function visUnit()    { return unitChoice("distance") === "km" ? "km" : "mi"; }
+function precipUnit() { return unitChoice("precip") === "mm" ? "mm" : "in"; }
+function pressUnit()  { return unitChoice("pressure") === "hpa" ? "hPa" : "inHg"; }
 
 // Display formatters: converted, rounded, with optional unit suffix.
 function uTempNum(valueF) { const v = uTemp(valueF); return v == null ? "--" : String(Math.round(v)); }
 function fmtTemp(valueF)  { const v = uTemp(valueF); return v == null ? `--${tempUnit()}` : `${Math.round(v)}${tempUnit()}`; }
-function fmtWind(valueMph){ const v = uWind(valueMph); return v == null ? "--" : `${Math.round(v)} ${windUnit()}`; }
+function fmtWind(valueMph){
+  const v = uWind(valueMph);
+  if (v == null) return "--";
+  // Whole units read fine everywhere except m/s, where 1 unit is a big step.
+  return `${unitChoice("wind") === "ms" ? v.toFixed(1) : Math.round(v)} ${windUnit()}`;
+}
 function fmtVis(valueMi)  { const v = uVis(valueMi); return v == null ? "--" : `${v.toFixed(1)} ${visUnit()}`; }
 function fmtPressure(valInHg) {
   const v = uPressure(valInHg);
   if (v == null) return "--";
-  return isMetric() ? `${Math.round(v)} ${pressUnit()}` : `${v.toFixed(2)} ${pressUnit()}`;
+  return unitChoice("pressure") === "hpa" ? `${Math.round(v)} ${pressUnit()}` : `${v.toFixed(2)} ${pressUnit()}`;
 }
 function fmtPrecip(valueIn, digits) {
   const v = uPrecip(valueIn);
   if (v == null) return "--";
-  const d = digits != null ? digits : (isMetric() ? 1 : 2);
+  const d = digits != null ? digits : (unitChoice("precip") === "mm" ? 1 : 2);
   return `${v.toFixed(d)} ${precipUnit()}`;
 }
 function fmtSnow(valueIn, digits = 1) {
   if (valueIn == null) return "--";
-  return isMetric() ? `${(valueIn * 2.54).toFixed(digits)} cm` : `${valueIn.toFixed(digits)} in`;
+  return unitChoice("precip") === "mm"
+    ? `${(valueIn * 2.54).toFixed(digits)} cm`
+    : `${valueIn.toFixed(digits)} in`;
 }
 
 // Wave, swell and tide heights are carried in feet internally: NOAA CO-OPS and
 // the NWS surf products both publish feet, so metres are converted on arrival.
-function uHeight(valueFt)  { return valueFt == null ? null : (isMetric() ? valueFt * 0.3048 : valueFt); }
-function heightUnit()      { return isMetric() ? "m" : "ft"; }
+function uHeight(valueFt)  { return valueFt == null ? null : (unitChoice("height") === "m" ? valueFt * 0.3048 : valueFt); }
+function heightUnit()      { return unitChoice("height") === "m" ? "m" : "ft"; }
 function fmtHeight(valueFt, digits = 1) {
   const v = uHeight(valueFt);
   return v == null ? "--" : `${v.toFixed(digits)} ${heightUnit()}`;
 }
 
 function updateUnitToggleLabel() {
-  const metric = isMetric();
+  // The toggle's two halves are literally °F and °C, so it tracks the
+  // temperature unit actually in force rather than the system flag — a
+  // Settings override on temperature has to show here too.
+  const celsius = unitChoice("temp") === "c";
   document.querySelectorAll("#unitToggle .unit-opt").forEach(el => {
-    el.classList.toggle("active", (el.dataset.system === "metric") === metric);
+    el.classList.toggle("active", (el.dataset.system === "metric") === celsius);
   });
   const btn = document.querySelector("#unitToggle");
-  if (btn) btn.setAttribute("aria-label", `Units: ${metric ? "metric (°C)" : "imperial (°F)"}. Tap to switch.`);
+  if (btn) btn.setAttribute("aria-label", `Units: ${celsius ? "metric (°C)" : "imperial (°F)"}. Tap to switch.`);
 }
 
 // Re-skin every units-bearing view in place (no network refetch).
 function rerenderUnits() {
   updateUnitToggleLabel();
+  syncScaleControlUnit();
   if (weatherState) {
     renderCurrent();
     renderDaily();
@@ -1162,6 +1252,189 @@ function rerenderUnits() {
   }
   if (coastalState) renderCoastal();
   if (histSelectedDate) renderClimate(histSelectedDate);
+}
+
+/* ============================================================================
+   SETTINGS PANEL
+   One dialog for the two things a user actually wants to pin down: which units
+   every reading is shown in, and how the map draws itself. Both write straight
+   to localStorage and re-render in place — nothing here refetches data.
+============================================================================ */
+const settingsModal = document.querySelector("#settingsModal");
+const settingsBody = document.querySelector("#settingsBody");
+
+function settingsChoiceRow({ label, note, name, value, options }) {
+  return `
+    <div class="settings-row">
+      <div class="settings-row-text">
+        <span class="settings-row-label">${safeText(label)}</span>
+        ${note ? `<span class="settings-row-note">${safeText(note)}</span>` : ""}
+      </div>
+      <div class="settings-choice" role="group" aria-label="${safeText(label)}">
+        ${options.map(([id, optionLabel]) => `
+          <button type="button" class="${id === value ? "active" : ""}"
+            data-setting="${safeText(name)}" data-value="${safeText(id)}"
+            aria-pressed="${id === value}">${safeText(optionLabel)}</button>
+        `).join("")}
+      </div>
+    </div>`;
+}
+
+function settingsToggleRow({ label, note, name, on }) {
+  return `
+    <div class="settings-row">
+      <div class="settings-row-text">
+        <span class="settings-row-label">${safeText(label)}</span>
+        ${note ? `<span class="settings-row-note">${safeText(note)}</span>` : ""}
+      </div>
+      <button type="button" class="settings-switch${on ? " on" : ""}"
+        data-map-toggle="${safeText(name)}" role="switch" aria-checked="${on}"
+        aria-label="${safeText(label)}"><span class="settings-switch-knob"></span></button>
+    </div>`;
+}
+
+function renderSettingsPanel() {
+  if (!settingsBody) return;
+  const unitRows = Object.entries(UNIT_KINDS).map(([kind, spec]) => settingsChoiceRow({
+    label: spec.label,
+    // "Auto" is the interesting case, so spell out what it currently resolves to.
+    note: unitPrefs[kind] === "auto"
+      ? `Following ${isMetric() ? "metric" : "imperial"} (${spec.options.find(([id]) => id === unitChoice(kind))?.[1] || ""})`
+      : "",
+    name: `unit:${kind}`,
+    value: unitPrefs[kind],
+    options: [["auto", "Auto"], ...spec.options],
+  })).join("");
+
+  const mapRows = Object.entries(MAP_SETTING_SPECS).map(([key, spec]) => (
+    spec.type === "toggle"
+      ? settingsToggleRow({ label: spec.label, note: spec.note, name: key, on: mapSettings[key] })
+      : settingsChoiceRow({ label: spec.label, note: spec.note || "", name: `map:${key}`, value: mapSettings[key], options: spec.options })
+  )).join("");
+
+  const favoriteRows = favoriteLocations.length
+    ? `<div class="settings-favorites">
+        ${favoriteLocations.map((item, index) => `
+          <div class="settings-favorite">
+            <span>${safeText(item.name)}</span>
+            <button type="button" data-remove-favorite="${index}" aria-label="Remove ${safeText(item.name)} from favorites">Remove</button>
+          </div>`).join("")}
+      </div>`
+    : `<p class="settings-empty">No favorites yet — tap the star beside a town in the search box to save it.</p>`;
+
+  settingsBody.innerHTML = `
+    <section class="settings-section">
+      <h3>Measurement units</h3>
+      <p class="settings-section-note">
+        The system switch in the header sets everything at once. Pin an individual
+        quantity here to override it.
+      </p>
+      ${settingsChoiceRow({
+        label: "Unit system",
+        note: unitSystem ? "" : "Auto follows the selected location's country",
+        name: "unitSystem",
+        value: unitSystem || "auto",
+        options: [["auto", "Auto"], ["imperial", "Imperial"], ["metric", "Metric"]],
+      })}
+      ${unitRows}
+    </section>
+    <section class="settings-section">
+      <h3>Map</h3>
+      <div class="settings-row settings-row-stack">
+        <div class="settings-row-text">
+          <span class="settings-row-label">Basemap style</span>
+        </div>
+        <div class="settings-choice settings-choice-wrap" role="group" aria-label="Basemap style">
+          ${BASEMAP_STYLES.map(style => `
+            <button type="button" class="${style.id === activeBasemap ? "active" : ""}"
+              data-setting="basemap" data-value="${safeText(style.id)}"
+              aria-pressed="${style.id === activeBasemap}">${safeText(style.label)}</button>
+          `).join("")}
+        </div>
+      </div>
+      ${mapRows}
+    </section>
+    <section class="settings-section">
+      <h3>Favorite locations</h3>
+      ${favoriteRows}
+    </section>
+  `;
+}
+
+function openSettings() {
+  if (!settingsModal) return;
+  renderSettingsPanel();
+  settingsModal.hidden = false;
+  document.documentElement.classList.add("modal-open");
+  document.body.classList.add("modal-open");
+}
+
+function closeSettings() {
+  if (!settingsModal || settingsModal.hidden) return;
+  settingsModal.hidden = true;
+  // The detail modal uses the same page lock, so only release it when nothing
+  // else is open.
+  if (detailModal?.hidden !== false) {
+    document.documentElement.classList.remove("modal-open");
+    document.body.classList.remove("modal-open");
+  }
+}
+
+// A single delegated handler covers every control in the panel.
+function handleSettingsClick(event) {
+  const removeFavorite = event.target.closest("[data-remove-favorite]");
+  if (removeFavorite) {
+    favoriteLocations.splice(Number(removeFavorite.dataset.removeFavorite), 1);
+    saveFavoriteLocations();
+    renderSettingsPanel();
+    return;
+  }
+
+  const toggle = event.target.closest("[data-map-toggle]");
+  if (toggle) {
+    const key = toggle.dataset.mapToggle;
+    mapSettings[key] = !mapSettings[key];
+    saveMapSettings();
+    renderSettingsPanel();
+    applyMapSettings();
+    return;
+  }
+
+  const choice = event.target.closest("[data-setting]");
+  if (!choice) return;
+  const { setting, value } = choice.dataset;
+
+  if (setting === "unitSystem") {
+    unitSystem = value === "auto" ? null : value;
+    if (unitSystem) localStorage.setItem("unitSystem", unitSystem);
+    else localStorage.removeItem("unitSystem");
+    renderSettingsPanel();
+    rerenderUnits();
+    return;
+  }
+
+  if (setting.startsWith("unit:")) {
+    unitPrefs[setting.slice(5)] = value;
+    saveUnitPrefs();
+    renderSettingsPanel();
+    rerenderUnits();
+    return;
+  }
+
+  if (setting.startsWith("map:")) {
+    mapSettings[setting.slice(4)] = value;
+    saveMapSettings();
+    renderSettingsPanel();
+    applyMapSettings();
+    // A speed change should take effect on a loop that is already running.
+    if (setting === "map:animationSpeed" && radarAnimationTimer) animateRadarLayer();
+    return;
+  }
+
+  if (setting === "basemap") {
+    setBasemap(value);
+    renderSettingsPanel();
+  }
 }
 
 function propertyValue(feature, key) {
@@ -1407,8 +1680,14 @@ function hourCloudCover(hour) {
   return cloud != null ? Math.round(Number(cloud)) : null;
 }
 
-async function searchLocations(query) {
-  const data = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=8&language=en&format=json`);
+// The geocoder is asked for more results than the dropdown shows so a favorite
+// that ranks anywhere in the top of the response can still be hoisted to the
+// front — see mergeFavoritesIntoResults.
+const LOCATION_SEARCH_COUNT = 10;
+const LOCATION_SUGGESTION_LIMIT = 8;
+
+async function searchLocations(query, count = LOCATION_SEARCH_COUNT) {
+  const data = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=${count}&language=en&format=json`);
   return (data.results || []).map(item => ({
     lat: item.latitude,
     lon: item.longitude,
@@ -1420,6 +1699,89 @@ async function searchLocations(query) {
     timezone: item.timezone || "America/New_York",
     countryCode: item.country_code || null,
   }));
+}
+
+/* ============================================================================
+   FAVORITE LOCATIONS
+   Starred towns live in localStorage and drive the search dropdown two ways:
+   an empty box lists them straight away, and a favorite that turns up anywhere
+   in a search response is pulled to the top of the results.
+============================================================================ */
+const FAVORITE_LOCATIONS_KEY = "weatherFavoriteLocations";
+const MAX_FAVORITE_LOCATIONS = 24;
+
+// Coordinates come back from the geocoder at full precision but a town saved
+// today and the same town returned tomorrow can differ in the last decimals, so
+// identity is "same name, within ~1 km".
+function favoriteKey(location) {
+  if (!location) return "";
+  const lat = Number(location.lat), lon = Number(location.lon);
+  const rounded = Number.isFinite(lat) && Number.isFinite(lon)
+    ? `${lat.toFixed(2)},${lon.toFixed(2)}`
+    : "";
+  return `${String(location.name || "").trim().toLowerCase()}|${rounded}`;
+}
+
+let favoriteLocations = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FAVORITE_LOCATIONS_KEY) || "[]");
+    return Array.isArray(saved)
+      ? saved.filter(item => item && item.name && Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lon)))
+      : [];
+  } catch {
+    return [];
+  }
+})();
+
+function saveFavoriteLocations() {
+  try {
+    localStorage.setItem(FAVORITE_LOCATIONS_KEY, JSON.stringify(favoriteLocations));
+  } catch {}
+}
+
+function isFavoriteLocation(location) {
+  const key = favoriteKey(location);
+  return Boolean(key) && favoriteLocations.some(item => favoriteKey(item) === key);
+}
+
+// Returns the new starred state so the caller can update its button in place.
+function toggleFavoriteLocation(location) {
+  const key = favoriteKey(location);
+  if (!key) return false;
+  const index = favoriteLocations.findIndex(item => favoriteKey(item) === key);
+  if (index >= 0) {
+    favoriteLocations.splice(index, 1);
+    saveFavoriteLocations();
+    return false;
+  }
+  favoriteLocations.unshift({
+    lat: Number(location.lat),
+    lon: Number(location.lon),
+    name: location.name,
+    timezone: location.timezone || "auto",
+    countryCode: location.countryCode || null,
+  });
+  favoriteLocations = favoriteLocations.slice(0, MAX_FAVORITE_LOCATIONS);
+  saveFavoriteLocations();
+  return true;
+}
+
+// Hoist any favorite that the geocoder returned to the front of the list,
+// keeping the saved copy (it carries the timezone/country the user picked with)
+// and preserving the order the favorites were starred in.
+function mergeFavoritesIntoResults(results) {
+  if (!favoriteLocations.length) return results.slice(0, LOCATION_SUGGESTION_LIMIT);
+  const matchedKeys = new Set();
+  const hoisted = [];
+  for (const favorite of favoriteLocations) {
+    const key = favoriteKey(favorite);
+    if (results.some(result => favoriteKey(result) === key)) {
+      matchedKeys.add(key);
+      hoisted.push(favorite);
+    }
+  }
+  const rest = results.filter(result => !matchedKeys.has(favoriteKey(result)));
+  return hoisted.concat(rest).slice(0, LOCATION_SUGGESTION_LIMIT);
 }
 
 async function reverseGeocode(lat, lon) {
@@ -1513,20 +1875,46 @@ async function locateOnMap() {
   }
 }
 
-function renderLocationSuggestions(results) {
+const FAVORITE_STAR_SVG = `<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><polygon points="12 3 14.9 9.1 21.5 10 16.7 14.7 17.9 21.3 12 18.2 6.1 21.3 7.3 14.7 2.5 10 9.1 9.1"/></svg>`;
+
+// `heading` labels the list when it is showing saved favorites rather than
+// geocoder results, so an empty search box doesn't look like a stale response.
+function renderLocationSuggestions(results, { heading = "" } = {}) {
   locationSuggestionResults = results;
   if (!results.length) {
     locationSuggestions.hidden = true;
     locationSuggestions.innerHTML = "";
     return;
   }
-  locationSuggestions.innerHTML = results.map((item, index) => `
-    <button type="button" role="option" data-suggestion-index="${index}">
-      <strong>${safeText(townName(item))}</strong>
-      <span>${safeText(item.name.replace(`${townName(item)}, `, ""))}</span>
-    </button>
-  `).join("");
+  const rows = results.map((item, index) => {
+    const starred = isFavoriteLocation(item);
+    return `
+    <div class="location-suggestion${starred ? " is-favorite" : ""}">
+      <button type="button" role="option" class="location-suggestion-pick" data-suggestion-index="${index}">
+        <strong>${safeText(townName(item))}</strong>
+        <span>${safeText(item.name.replace(`${townName(item)}, `, ""))}</span>
+      </button>
+      <button type="button" class="location-favorite-btn${starred ? " active" : ""}"
+        data-favorite-index="${index}"
+        aria-pressed="${starred}"
+        title="${starred ? "Remove from favorites" : "Save as favorite"}"
+        aria-label="${starred ? `Remove ${safeText(townName(item))} from favorites` : `Save ${safeText(townName(item))} as a favorite`}">
+        ${FAVORITE_STAR_SVG}
+      </button>
+    </div>`;
+  }).join("");
+  locationSuggestions.innerHTML =
+    (heading ? `<p class="location-suggestion-heading">${safeText(heading)}</p>` : "") + rows;
   locationSuggestions.hidden = false;
+}
+
+// Favorites list shown when the search box is empty. With nothing starred yet
+// this renders an empty list, which hides the dropdown.
+function showFavoriteSuggestions() {
+  renderLocationSuggestions(
+    favoriteLocations.slice(0, LOCATION_SUGGESTION_LIMIT),
+    { heading: "Favorites" },
+  );
 }
 
 function hideLocationSuggestions() {
@@ -1604,65 +1992,270 @@ const iemPhenomenaMap = {
   "MH.W": "Mud/Landslide Warning","MH.Y": "Mud/Landslide Advisory",
 };
 
-const ALERT_PHENOMENA_COLORS = {
-  TO: { fill: "#dc2626", line: "#ef4444" },
-  SV: { fill: "#f97316", line: "#fb923c" },
-  FF: { fill: "#10b981", line: "#34d399" },
-  SQ: { fill: "#a78bfa", line: "#c4b5fd" },
-  MA: { fill: "#38bdf8", line: "#7dd3fc" },
-  // FA (Flood Advisory) intentionally excluded — not severe enough for map display
+// ─── Alert colors ────────────────────────────────────────────────────────────
+// Two tables feed every alert swatch, popup chip and map polygon:
+//
+//   PRIORITY_ALERT_FILLS — the handful of headline events the map promotes by
+//     default. These are deliberately chosen, high-contrast hues that read at a
+//     glance against dark radar, so they are NOT replaced by the official
+//     palette (weather.gov paints several of them in near-identical pinks).
+//   NWS_GOV_ALERT_FILLS — the official weather.gov watch/warning/advisory
+//     colors (https://www.weather.gov/help-map), used for every other event so
+//     an alert on this map matches the one on the NWS map.
+//
+// Anything the tables miss still falls back to a severity color rather than
+// disappearing from the overlay.
+
+function hexToRgb(hex) {
+  const value = String(hex).replace("#", "");
+  const full = value.length === 3 ? value.split("").map(c => c + c).join("") : value;
+  const int = parseInt(full, 16);
+  return Number.isFinite(int) ? [(int >> 16) & 255, (int >> 8) & 255, int & 255] : [148, 163, 184];
+}
+
+function rgbToHex(r, g, b) {
+  const clampByte = v => Math.max(0, Math.min(255, Math.round(v)));
+  return `#${[r, g, b].map(v => clampByte(v).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function hexLuminance(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+// Outline color for a fill. Several official colors are already very light
+// (moccasin, pale goldenrod), so brightening them uniformly would erase the
+// border — the outline moves *away* from the fill's own lightness instead.
+function alertOutlineFor(fill) {
+  const [r, g, b] = hexToRgb(fill);
+  const target = hexLuminance(fill) > 0.6 ? 0 : 255;
+  const mix = channel => channel + (target - channel) * 0.38;
+  return rgbToHex(mix(r), mix(g), mix(b));
+}
+
+function alertColorPair(fill) {
+  return { fill, line: alertOutlineFor(fill) };
+}
+
+// The priority events (DEFAULT_MAP_ALERT_EVENTS, what the map's "Priority"
+// filter shows) that already had a deliberately chosen color keep it. Every
+// other priority event had no color of its own — it fell through to a generic
+// severity shade — so it picks up its official one along with everything else.
+// Special Weather Statement is the one that deliberately changes: it is a
+// priority event, and it moves onto weather.gov's moccasin.
+const PRIORITY_ALERT_FILLS = {
+  "tornado warning": "#dc2626",
+  "tornado watch": "#a855f7",
+  "severe thunderstorm warning": "#f97316",
+  "severe thunderstorm watch": "#f59e0b",
+  "flash flood warning": "#10b981",
+  "snow squall warning": "#a78bfa",
+  "winter storm warning": "#ec4899",
+  "winter storm watch": "#3b82f6",
+  "blizzard warning": "#ec4899",
 };
 
-const NWS_ALERT_EVENT_COLORS = [
-  [/tornado watch/i, { fill: "#a855f7", line: "#c084fc" }],
-  [/severe thunderstorm watch/i, { fill: "#f59e0b", line: "#fbbf24" }],
-  [/winter storm warning|ice storm warning|blizzard warning|lake effect snow warning/i, { fill: "#ec4899", line: "#f472b6" }],
-  [/winter storm watch/i, { fill: "#3b82f6", line: "#60a5fa" }],
-  [/winter weather advisory/i, { fill: "#38bdf8", line: "#7dd3fc" }],
-  [/flood watch/i, { fill: "#14b8a6", line: "#2dd4bf" }],
-  [/flood warning/i, { fill: "#22c55e", line: "#4ade80" }],
-  [/flood advisory/i, { fill: "#10b981", line: "#34d399" }],
-  [/(excessive|extreme) heat/i, { fill: "#c026d3", line: "#d946ef" }],
-  [/heat advisory/i, { fill: "#f97316", line: "#fb923c" }],
-  [/high wind warning/i, { fill: "#eab308", line: "#facc15" }],
-  [/wind advisory/i, { fill: "#d97706", line: "#f59e0b" }],
-  [/extreme cold|wind chill|cold weather advisory/i, { fill: "#06b6d4", line: "#22d3ee" }],
-  [/frost advisory|freeze warning|freeze watch/i, { fill: "#67e8f9", line: "#a5f3fc" }],
-  [/dense fog advisory/i, { fill: "#94a3b8", line: "#cbd5e1" }],
-  [/red flag warning|fire weather watch/i, { fill: "#db2777", line: "#f472b6" }],
-  [/air quality/i, { fill: "#9ca3af", line: "#d1d5db" }],
-];
+// Official NWS alert colors, keyed by the exact product name NWS publishes.
+const NWS_GOV_ALERT_FILLS = {
+  "tsunami warning": "#fd6347",
+  "tornado warning": "#ff0000",
+  "extreme wind warning": "#ff8c00",
+  "severe thunderstorm warning": "#ffa500",
+  "flash flood warning": "#8b0000",
+  "flash flood statement": "#8b0000",
+  "severe weather statement": "#00ffff",
+  "shelter in place warning": "#fa8072",
+  "evacuation immediate": "#7fff00",
+  "civil danger warning": "#ffb6c1",
+  "nuclear power plant warning": "#4b0082",
+  "radiological hazard warning": "#4b0082",
+  "hazardous materials warning": "#4b0082",
+  "fire warning": "#a0522d",
+  "civil emergency message": "#ffb6c1",
+  "law enforcement warning": "#c0c0c0",
+  "storm surge warning": "#b524f7",
+  "hurricane force wind warning": "#cd5c5c",
+  "hurricane warning": "#dc143c",
+  "typhoon warning": "#dc143c",
+  "special marine warning": "#ffa500",
+  "blizzard warning": "#ff4500",
+  "snow squall warning": "#c71585",
+  "ice storm warning": "#8b008b",
+  "winter storm warning": "#ff69b4",
+  "high wind warning": "#daa520",
+  "tropical storm warning": "#b22222",
+  "storm warning": "#9400d3",
+  "tsunami advisory": "#d2691e",
+  "tsunami watch": "#ff00ff",
+  "avalanche warning": "#1e90ff",
+  "earthquake warning": "#8b4513",
+  "volcano warning": "#2f4f4f",
+  "ashfall warning": "#a9a9a9",
+  "coastal flood warning": "#228b22",
+  "lakeshore flood warning": "#228b22",
+  "flood warning": "#00ff00",
+  "high surf warning": "#228b22",
+  "dust storm warning": "#ffe4c4",
+  "blowing dust warning": "#ffe4c4",
+  "lake effect snow warning": "#008b8b",
+  "excessive heat warning": "#c71585",
+  "extreme heat warning": "#c71585",
+  "tornado watch": "#ffff00",
+  "severe thunderstorm watch": "#db7093",
+  "flash flood watch": "#2e8b57",
+  "gale warning": "#dda0dd",
+  "flood statement": "#00ff00",
+  "extreme cold warning": "#b0c4de",
+  "wind chill warning": "#b0c4de",
+  "freeze warning": "#483d8b",
+  "red flag warning": "#ff1493",
+  "storm surge watch": "#db7ff7",
+  "hurricane watch": "#ff00ff",
+  "hurricane force wind watch": "#9932cc",
+  "typhoon watch": "#ff00ff",
+  "tropical storm watch": "#f08080",
+  "storm watch": "#ffe4b5",
+  "hurricane local statement": "#ffe4b5",
+  "typhoon local statement": "#ffe4b5",
+  "tropical storm local statement": "#ffe4b5",
+  "tropical depression local statement": "#ffe4b5",
+  "avalanche advisory": "#cd853f",
+  "winter weather advisory": "#7b68ee",
+  "wind chill advisory": "#afeeee",
+  "cold weather advisory": "#afeeee",
+  "extreme cold watch": "#5f9ea0",
+  "wind chill watch": "#5f9ea0",
+  "heat advisory": "#ff7f50",
+  "excessive heat watch": "#800000",
+  "extreme heat watch": "#800000",
+  "urban and small stream flood advisory": "#00ff7f",
+  "small stream flood advisory": "#00ff7f",
+  "arroyo and small stream flood advisory": "#00ff7f",
+  "flood advisory": "#00ff7f",
+  "hydrologic advisory": "#00ff7f",
+  "lakeshore flood advisory": "#7cfc00",
+  "coastal flood advisory": "#7cfc00",
+  "high surf advisory": "#ba55d3",
+  "heavy freezing spray warning": "#00bfff",
+  "dense fog advisory": "#708090",
+  "dense smoke advisory": "#f0e68c",
+  "small craft advisory": "#d8bfd8",
+  "small craft advisory for hazardous seas": "#d8bfd8",
+  "small craft advisory for winds": "#d8bfd8",
+  "small craft advisory for rough bar": "#d8bfd8",
+  "brisk wind advisory": "#d8bfd8",
+  "hazardous seas warning": "#d8bfd8",
+  "dust advisory": "#bdb76b",
+  "blowing dust advisory": "#bdb76b",
+  "lake wind advisory": "#d2b48c",
+  "wind advisory": "#d2b48c",
+  "frost advisory": "#6495ed",
+  "ashfall advisory": "#696969",
+  "freezing fog advisory": "#008080",
+  "freezing spray advisory": "#00bfff",
+  "freezing rain advisory": "#7b68ee",
+  "ice accretion advisory": "#7b68ee",
+  "low water advisory": "#a52a2a",
+  "local area emergency": "#c0c0c0",
+  "avalanche watch": "#f4a460",
+  "blizzard watch": "#adff2f",
+  "rip current statement": "#40e0d0",
+  "beach hazards statement": "#40e0d0",
+  "gale watch": "#ffc0cb",
+  "winter storm watch": "#4682b4",
+  "hazardous seas watch": "#483d8b",
+  "heavy freezing spray watch": "#bc8f8f",
+  "coastal flood watch": "#66cdaa",
+  "lakeshore flood watch": "#66cdaa",
+  "flood watch": "#2e8b57",
+  "high wind watch": "#b8860b",
+  "freeze watch": "#00ffff",
+  "fire weather watch": "#ffdead",
+  "extreme fire danger": "#e9967a",
+  "911 telephone outage": "#c0c0c0",
+  "coastal flood statement": "#6b8e23",
+  "lakeshore flood statement": "#6b8e23",
+  "special weather statement": "#ffe4b5",
+  "marine weather statement": "#ffdab9",
+  "air quality alert": "#808080",
+  "air stagnation advisory": "#808080",
+  "hazardous weather outlook": "#eee8aa",
+  "hydrologic outlook": "#90ee90",
+  "short term forecast": "#98fb98",
+  "administrative message": "#c0c0c0",
+  "test": "#f0ffff",
+  "child abduction emergency": "#ffffff",
+  "blue alert": "#ffffff",
+  "hard freeze warning": "#9400d3",
+  "hard freeze watch": "#4169e1",
+  "mud and debris flow warning": "#8b4513",
+  "mud/landslide warning": "#8b4513",
+  "mud/landslide advisory": "#a0522d",
+  "ice accretion warning": "#8b008b",
+};
+
+// IEM storm-based warning polygons are keyed by phenomenon code rather than a
+// product name. Resolving each code through its event name keeps that layer on
+// exactly the same palette as everything else.
+const IEM_PHENOMENON_EVENTS = {
+  TO: "Tornado Warning",
+  SV: "Severe Thunderstorm Warning",
+  FF: "Flash Flood Warning",
+  SQ: "Snow Squall Warning",
+  MA: "Special Marine Warning",
+  // FA (Flood Advisory) intentionally excluded — not severe enough for map display
+};
 
 // Severity fallback so county/zone alerts without a dedicated event color
 // still render on the alert overlay instead of being dropped.
 const NWS_ALERT_SEVERITY_COLORS = {
-  extreme: { fill: "#dc2626", line: "#ef4444" },
-  severe: { fill: "#f97316", line: "#fb923c" },
-  moderate: { fill: "#f59e0b", line: "#fbbf24" },
-  minor: { fill: "#64748b", line: "#94a3b8" },
+  extreme: alertColorPair("#dc2626"),
+  severe: alertColorPair("#f97316"),
+  moderate: alertColorPair("#f59e0b"),
+  minor: alertColorPair("#64748b"),
 };
 
-function nwsAlertColor(event = "", severity = "") {
-  return NWS_ALERT_EVENT_COLORS.find(([pattern]) => pattern.test(event))?.[1]
-    || NWS_ALERT_SEVERITY_COLORS[String(severity).toLowerCase()]
-    || NWS_ALERT_SEVERITY_COLORS.minor;
+// Event names arrive from four feeds with different conventions (api.weather.gov
+// "event", the WWA service's "prod_type", IEM's phenomenon expansion, and ECCC
+// names translated to their NWS equivalent). Normalize before every lookup.
+const alertColorCache = new Map();
+
+function alertColorKey(event = "") {
+  return String(event)
+    .replace(/\s+/g, " ")
+    .replace(/[.]/g, "")
+    .trim()
+    .toLowerCase();
 }
 
-// Color lookup shared by US and Canadian alerts. The storm-based warning types
-// keep their IEM layer colors (ALERT_PHENOMENA_COLORS); everything else goes
-// through the NWS event/severity tables. Routing every alert through one
-// function keeps ECCC polygons on the same palette as their US counterparts.
-const STORM_BASED_EVENT_CODES = [
-  [/tornado warning/i, "TO"],
-  [/severe thunderstorm warning/i, "SV"],
-  [/flash flood warning/i, "FF"],
-  [/snow squall warning/i, "SQ"],
-  [/special marine warning/i, "MA"],
-];
+// Exact match first, then longest suffix match so regional variants
+// ("Small Craft Advisory for Winds", "Lake Wind Advisory") still land on the
+// right product color instead of dropping to the severity fallback.
+function alertFillFor(key, table) {
+  if (table[key]) return table[key];
+  let best = null;
+  for (const name of Object.keys(table)) {
+    if (!key.endsWith(name) && !key.startsWith(name)) continue;
+    if (!best || name.length > best.length) best = name;
+  }
+  return best ? table[best] : null;
+}
 
+function nwsAlertColor(event = "", severity = "") {
+  const key = alertColorKey(event);
+  const cached = alertColorCache.get(key);
+  if (cached) return cached;
+  const fill = alertFillFor(key, PRIORITY_ALERT_FILLS) || alertFillFor(key, NWS_GOV_ALERT_FILLS);
+  if (!fill) return NWS_ALERT_SEVERITY_COLORS[String(severity).toLowerCase()] || NWS_ALERT_SEVERITY_COLORS.minor;
+  const pair = alertColorPair(fill);
+  alertColorCache.set(key, pair);
+  return pair;
+}
+
+// Single color lookup shared by US and Canadian alerts, the alert list, the
+// detail modal and every map layer, so an event is the same color everywhere.
 function alertEventColor(event = "", severity = "") {
-  const code = STORM_BASED_EVENT_CODES.find(([pattern]) => pattern.test(event))?.[1];
-  return (code && ALERT_PHENOMENA_COLORS[code]) || nwsAlertColor(event, severity);
+  return nwsAlertColor(event, severity);
 }
 
 // Coarse alert class used by the map overlay filter. ECCC supplies an explicit
@@ -1688,7 +2281,7 @@ function isStormBasedWarning(event = "") {
 
 function warningHasMapColor(feature) {
   const phenomenon = String(feature?.properties?.phenomena || "").toUpperCase();
-  return !!ALERT_PHENOMENA_COLORS[phenomenon];
+  return !!IEM_PHENOMENON_EVENTS[phenomenon];
 }
 
 function filterMapColoredWarnings(data) {
@@ -4638,8 +5231,11 @@ function renderAlerts() {
     <div class="alert-list">
       ${shown.map((alert, index) => {
         const meta = [alertExpiryLabel(alert), alertAreaShort(alert.areaDesc)].filter(Boolean).join(" · ");
+        // Each row carries its own event color so the panel matches the polygon
+        // on the map and the swatch on weather.gov.
+        const color = alertEventColor(alert.event || "", alert.severity || "");
         return `
-        <button class="alert-row severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-alert-index="${index}">
+        <button class="alert-row severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-alert-index="${index}" style="--alert-color:${safeText(color.fill)};--alert-edge:${safeText(color.line)}">
           <span class="alert-row-text">
             <span class="alert-row-event">${safeText(alertDisplayEvent(alert))}</span>
             ${meta ? `<span class="alert-row-meta">${safeText(meta)}</span>` : ""}
@@ -5170,7 +5766,9 @@ function generateDailySummary(day, precip, night, options = {}) {
   if (gust != null && gust >= 30) watchFor.push(`winds gusting to ${fmtWind(gust)}`);
   const snow = day.snowAmount;
   if (snow != null && snow >= 0.5) {
-    const amount = isMetric() ? `${(snow * 2.54).toFixed(0)} cm` : `${snow.toFixed(snow < 2 ? 1 : 0)} in`;
+    const amount = unitChoice("precip") === "mm"
+      ? `${(snow * 2.54).toFixed(0)} cm`
+      : `${snow.toFixed(snow < 2 ? 1 : 0)} in`;
     watchFor.push(`around ${amount} of snow`);
   }
 
@@ -5708,8 +6306,13 @@ function showAlertDetails(indexOrAlert) {
   const bg = sevBg[severity] || "rgba(148,163,184,0.15)";
   const col = sevColor[severity] || "#94a3b8";
 
-  // Tags row
+  // Tags row. The event chip carries the alert's own weather.gov color so the
+  // modal, the alert list and the map polygon all read as the same alert.
+  const eventColor = alertEventColor(event, severity);
   const tagsHtml = `<div class="alert-modal-tags">
+    <span class="alert-modal-tag alert-modal-event-tag" style="background:${safeText(eventColor.fill)}2e;color:${safeText(eventColor.line)};border:1px solid ${safeText(eventColor.line)}88">
+      <span class="alert-modal-swatch" style="background:${safeText(eventColor.fill)}"></span>${safeText(displayEvent)}
+    </span>
     ${severity ? `<span class="alert-modal-tag" style="background:${bg};color:${col};border:1px solid ${col}55">${safeText(severity)}</span>` : ""}
     ${tags.map(t => `<span class="alert-modal-tag">${safeText(t)}</span>`).join("")}
   </div>`;
@@ -6724,7 +7327,12 @@ async function renderClimate(date) {
     const stats = [
       ["Peak Wind", windMax != null ? fmtWind(windMax) : "--", windGust != null ? `${fmtWind(windGust)} gusts · ${windDirLabel(windDir)}` : "--", "wind"],
       ["Avg Humidity", humidity != null ? `${Math.round(humidity)}%` : "--", `Dew point: ${dew != null ? fmtTemp(dew) : "--"}`, "humidity"],
-      ["Avg Pressure", pressure == null ? "--" : (isMetric() ? `${Math.round(pressure)} hPa` : (pressure * 0.02953).toFixed(2) + " inHg"), pressure == null ? "--" : (isMetric() ? (pressure * 0.02953).toFixed(2) + " inHg" : Math.round(pressure) + " hPa"), "pressure"],
+      // Climate pressure arrives in hPa; the secondary line always shows the
+      // other unit so the reading is legible either way.
+      ["Avg Pressure",
+        pressure == null ? "--" : (unitChoice("pressure") === "hpa" ? `${Math.round(pressure)} hPa` : `${(pressure * 0.02953).toFixed(2)} inHg`),
+        pressure == null ? "--" : (unitChoice("pressure") === "hpa" ? `${(pressure * 0.02953).toFixed(2)} inHg` : `${Math.round(pressure)} hPa`),
+        "pressure"],
       ["Cloud Cover", cloud != null ? `${Math.round(cloud)}%` : "--", cloudCoverLabel(cloud), "cloud"],
       ["Precipitation", precip != null ? fmtPrecip(precip) : fmtPrecip(0), precipDetail, "precip"],
       ...(snow != null && snow > 0 ? [["Snowfall", fmtSnow(snow), "Snow total", "snow"]] : []),
@@ -7193,13 +7801,22 @@ async function loadMrmsFrame(mrmsIdx, product = activeMrmsProduct) {
   return data;
 }
 
-// Warm the rest of the buffer in the background so pressing Play animates
-// smoothly instead of stuttering on each frame's download.
+// Warm the rest of the buffer in the background so scrubbing the timeline — or
+// pressing Play — shows a cached frame instantly instead of stuttering on each
+// frame's download. Started as soon as the latest frame is on the map rather
+// than waiting for the user to hit Play, and re-entrant: a product switch
+// mid-prefetch abandons the previous walk on its next step.
+let mrmsPrewarmSequence = 0;
 function prewarmMrmsFrames() {
   const product = activeMrmsProduct;
+  const token = ++mrmsPrewarmSequence;
   (async () => {
+    // Let the visible frame finish first; warming must never delay it.
+    await new Promise(resolve => setTimeout(resolve, 250));
     for (const idx of radarFrames) {
-      if (product !== activeMrmsProduct) return; // product switched mid-prefetch
+      // Product switched, or a newer prefetch took over.
+      if (product !== activeMrmsProduct || token !== mrmsPrewarmSequence) return;
+      if (!radarActive || satelliteActive) return;
       await loadMrmsFrame(idx, product).catch(() => {});
     }
   })();
@@ -7368,7 +7985,8 @@ function clearWeatherLayers() {
    "radar-layer-a", "radar-layer-b",
    "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
    "drought-fill", "drought-line",
-   "alerts-fill", "alerts-line", "nws-alerts-fill", "nws-alerts-line",
+   "alerts-fill", "alerts-halo", "alerts-casing", "alerts-line",
+   "nws-alerts-fill", "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
    "fire-fill", "fire-line",
    "wpc-rain-fill", "wpc-rain-line",
    "lsr-hit",
@@ -7399,6 +8017,27 @@ function clearWeatherLayers() {
   radarSlot = 0;
 }
 
+// Swapping the basemap replaces every layer in the style, so the whole weather
+// stack is rebuilt once the new style reports ready. Called from both the
+// Layers panel and the Settings dialog.
+function setBasemap(styleId) {
+  if (!BASEMAP_STYLES.some(style => style.id === styleId) || styleId === activeBasemap) return;
+  activeBasemap = styleId;
+  localStorage.setItem("weatherBasemap", activeBasemap);
+  renderBasemapButtons();
+  if (!radarMap) return;
+  radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
+  radarMap.once("style.load", () => {
+    mapLoaded = true;
+    radarMap.setProjection("mercator"); // keep flat projection across basemap swaps
+    // Clear per-layer wiring flags so cursor handlers are re-added
+    popupWiredLayers.delete("spc"); popupWiredLayers.delete("fire");
+    popupWiredLayers.delete("wpc-rain"); popupWiredLayers.delete("all-alerts");
+    droughtPopupWired = false;
+    drawRadar(false);
+  });
+}
+
 function renderBasemapButtons() {
   const container = document.querySelector("#basemapBtns");
   if (!container) return;
@@ -7406,24 +8045,18 @@ function renderBasemapButtons() {
     `<button type="button" data-basemap="${s.id}" class="${s.id === activeBasemap ? "active" : ""}">${s.label}</button>`
   ).join("");
   container.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      activeBasemap = btn.dataset.basemap;
-      localStorage.setItem("weatherBasemap", activeBasemap);
-      container.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
-      if (radarMap) {
-        radarMap.setStyle(`mapbox://styles/mapbox/${activeBasemap}`);
-        radarMap.once("style.load", () => {
-          mapLoaded = true;
-          radarMap.setProjection("mercator"); // keep flat projection across basemap swaps
-          // Clear per-layer wiring flags so cursor handlers are re-added
-          popupWiredLayers.delete("spc"); popupWiredLayers.delete("fire");
-          popupWiredLayers.delete("wpc-rain"); popupWiredLayers.delete("all-alerts");
-          droughtPopupWired = false;
-          drawRadar(false);
-        });
-      }
-    });
+    btn.addEventListener("click", () => setBasemap(btn.dataset.basemap));
   });
+}
+
+// The scale bar follows whichever distance unit the user picked in Settings.
+let mapScaleControl = null;
+function scaleControlUnit() {
+  return unitChoice("distance") === "km" ? "metric" : "imperial";
+}
+
+function syncScaleControlUnit() {
+  try { mapScaleControl?.setUnit(scaleControlUnit()); } catch {}
 }
 
 function initMap() {
@@ -7438,10 +8071,23 @@ function initMap() {
     // image overlays (satellite frames) and can't handle antimeridian-crossing
     // extents. Flat Mercator matches the source repos' Leaflet viewers exactly.
     projection: "mercator",
+    // Replaced below by a compact instance placed opposite the scale bar.
+    attributionControl: false,
   });
   radarMap.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
-  radarMap.addControl(new mapboxgl.ScaleControl({ unit: "imperial" }), "bottom-right");
-  radarMap.on("load", () => {
+  // Scale on the left, attribution on the right, so the two never stack into a
+  // two-line credit strip that swallows the legend on a phone. The attribution
+  // is forced compact (an "i" disc that expands on tap) for the same reason.
+  mapScaleControl = new mapboxgl.ScaleControl({ unit: scaleControlUnit() });
+  radarMap.addControl(mapScaleControl, "bottom-left");
+  radarMap.addControl(new mapboxgl.AttributionControl({ compact: true }), "bottom-right");
+  // "style.load" is the right signal for "the style is parsed, layers can be
+  // added"; "load" additionally waits for the first screenful of tiles, so on a
+  // slow or partially failing tile fetch the weather stack was never mounted at
+  // all and the tab sat empty. The basemap swap in setBasemap() already keys off
+  // style.load for exactly this reason — init now matches it. `once`, so a later
+  // basemap swap runs its own handler instead of two.
+  radarMap.once("style.load", () => {
     mapLoaded = true;
     drawRadar(true);
     wireUnifiedClickHandler();
@@ -7563,6 +8209,10 @@ async function addMrmsLayer() {
   // Update the product select to reflect current product
   const sel = document.querySelector("#mrmsProductSelect");
   if (sel) sel.value = activeMrmsProduct;
+
+  // The latest frame is drawn; pull the rest of the loop down behind it so
+  // scrubbing back through the timeline never waits on a download.
+  prewarmMrmsFrames();
 }
 
 async function addSpcLayer() {
@@ -7934,7 +8584,8 @@ const WEATHER_LAYER_ORDER = [
   "surface-layer",
   "alerts-fill", "nws-alerts-fill",
   "radar-layer-a", "radar-layer-b", "mrms-layer", "on-device-radar", "on-device-mrms",
-  "alerts-line", "nws-alerts-line",
+  "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
+  "alerts-halo", "alerts-casing", "alerts-line",
   "lsr-hit",
   "cyclones-radii-fill", "cyclones-radii-line", "cyclones-track", "cyclones-points",
 ];
@@ -7949,7 +8600,12 @@ const WEATHER_LAYER_ORDER = [
 // over saturated radar colours, mounted at the top of the stack where nothing
 // weather-related can cover them.
 const BOUNDARY_SOURCE_ID = "admin-boundaries";
-const BOUNDARY_LAYER_IDS = ["admin-state-line", "admin-country-line"];
+// Bottom → top. The shoreline sits under the admin lines so a border that runs
+// along a coast still reads as a border.
+const BOUNDARY_LAYER_IDS = [
+  "coastline-casing", "coastline-line",
+  "admin-state-line", "admin-country-line",
+];
 
 function addBoundaryLayers() {
   if (!radarMap || !radarMap.getStyle()) return;
@@ -7962,6 +8618,42 @@ function addBoundaryLayers() {
   // Each border feature is published once per worldview; without this filter
   // every disputed boundary draws two or three times, one per interpretation.
   const worldview = ["match", ["get", "worldview"], ["all", "US"], true, false];
+
+  // ── Shoreline ──
+  // Admin borders stop at the water's edge, so a storm moving off the coast used
+  // to cross an unmarked boundary: reflectivity over the ocean looks exactly
+  // like reflectivity over land once a radar layer covers the basemap. Outlining
+  // the streets tileset's water polygons draws the actual land/water edge —
+  // coastlines, bays, the Great Lakes — as its own line, on top of every weather
+  // layer, so it is always obvious which side of the shore a cell is on.
+  if (!radarMap.getLayer("coastline-casing")) {
+    radarMap.addLayer({
+      id: "coastline-casing",
+      type: "line",
+      source: BOUNDARY_SOURCE_ID,
+      "source-layer": "water",
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        "line-color": "rgba(3, 10, 24, 0.85)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 6, 3.4, 10, 5],
+      },
+    });
+  }
+  if (!radarMap.getLayer("coastline-line")) {
+    radarMap.addLayer({
+      id: "coastline-line",
+      type: "line",
+      source: BOUNDARY_SOURCE_ID,
+      "source-layer": "water",
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        // A cool cyan reads as "water edge" without competing with the warm
+        // reds and oranges of heavy reflectivity.
+        "line-color": "rgba(148, 233, 255, 0.95)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.9, 6, 1.6, 10, 2.6],
+      },
+    });
+  }
 
   if (!radarMap.getLayer("admin-state-line")) {
     radarMap.addLayer({
@@ -8002,6 +8694,71 @@ function raiseBoundaryLayers() {
   BOUNDARY_LAYER_IDS.forEach(id => {
     if (radarMap.getLayer(id)) radarMap.moveLayer(id, boundaryAnchorId());
   });
+  applyBoundarySettings();
+}
+
+function setLayerVisible(id, visible) {
+  if (radarMap?.getLayer(id)) {
+    radarMap.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
+  }
+}
+
+// Honour the Settings toggles for the reference lines this app draws itself.
+function applyBoundarySettings() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  setLayerVisible("coastline-casing", mapSettings.coastlines);
+  setLayerVisible("coastline-line", mapSettings.coastlines);
+  setLayerVisible("admin-state-line", mapSettings.stateBorders);
+  setLayerVisible("admin-country-line", mapSettings.countryBorders);
+  applyPlaceLabelSetting();
+}
+
+// Place names come from the basemap style, so hiding them means walking its
+// symbol layers rather than one of ours.
+function applyPlaceLabelSetting() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  for (const layer of radarMap.getStyle().layers || []) {
+    if (layer.type !== "symbol") continue;
+    if (!/label|place|poi|settlement|country|state|marine|water-point/.test(layer.id)) continue;
+    try {
+      radarMap.setLayoutProperty(layer.id, "visibility", mapSettings.placeLabels ? "visible" : "none");
+    } catch {}
+  }
+}
+
+// Scale the whole alert-outline stack in one go. The stops of an
+// ["interpolate", ["linear"], ["zoom"], z0, px0, z1, px1, …] expression alternate
+// zoom, width from index 3 onward — only the widths are scaled.
+function scaledZoomWidths(expression, scale) {
+  return expression.map((value, index) =>
+    index >= 4 && index % 2 === 0 ? Number((value * scale).toFixed(2)) : value);
+}
+
+function applyAlertBorderSettings() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  const scale = ALERT_BORDER_SCALE[mapSettings.alertBorders] ?? 1;
+  for (const prefix of ["alerts", "nws-alerts"]) {
+    for (const [part, base] of Object.entries(ALERT_BORDER_WEIGHTS)) {
+      const id = `${prefix}-${part}`;
+      if (!radarMap.getLayer(id)) continue;
+      try { radarMap.setPaintProperty(id, "line-width", scaledZoomWidths(base, scale)); } catch {}
+    }
+  }
+}
+
+// Legends and the docked scrubber are both optional furniture.
+function applyMapChromeSettings() {
+  renderMrmsLegend();
+  renderSpcLegend();
+  const scrubber = document.querySelector("#mapFrameScrubber");
+  if (scrubber) scrubber.hidden = !mapSettings.scrubber || !(radarActive || satelliteActive);
+}
+
+// Everything the Settings panel can change about the map, applied to a live map.
+function applyMapSettings() {
+  applyBoundarySettings();
+  applyAlertBorderSettings();
+  applyMapChromeSettings();
 }
 
 // Place names still belong above the borders; everything else does not.
@@ -8841,7 +9598,7 @@ function buildAlertBodyHtml(feature, alertIdx, popupId) {
     chips = [
       expiresChip(p.expire),
       p.windtag && `Wind ${numericWind(p.windtag) != null ? fmtWind(numericWind(p.windtag)) : `${p.windtag} mph`}`,
-      p.hailtag && `Hail ${isMetric() && Number.isFinite(Number(p.hailtag)) ? `${(Number(p.hailtag) * 2.54).toFixed(1)} cm` : `${p.hailtag}"`}`,
+      p.hailtag && `Hail ${unitChoice("precip") === "mm" && Number.isFinite(Number(p.hailtag)) ? `${(Number(p.hailtag) * 2.54).toFixed(1)} cm` : `${p.hailtag}"`}`,
       p.tornadotag && `Tornado ${String(p.tornadotag).toLowerCase()}`,
     ];
   } else {
@@ -8880,6 +9637,73 @@ function buildAlertFeatureHtml(feature, idx, total, popupId) {
   return buildAlertBodyHtml(feature, idx, popupId).replace("[NAV_SLOT]", buildPopupNavHtml(idx, total));
 }
 
+// A warned polygon has to be findable at a glance on a busy radar loop, so its
+// edge is drawn as three stacked lines rather than one hairline:
+//   halo   — a wide, soft, colored bloom that separates the outline from the
+//            reflectivity underneath it,
+//   casing — a near-black stroke that guarantees contrast on any basemap or
+//            precipitation color,
+//   line   — the alert's own color on top.
+// Every width scales with zoom so the border is bold on a continental view and
+// stays proportionate when zoomed into a single county.
+const ALERT_BORDER_WEIGHTS = {
+  // [zoom, px] stops, widest → narrowest, for [halo, casing, line].
+  halo:   ["interpolate", ["linear"], ["zoom"], 3, 6, 6, 9, 10, 13],
+  casing: ["interpolate", ["linear"], ["zoom"], 3, 4.4, 6, 6.4, 10, 8.8],
+  line:   ["interpolate", ["linear"], ["zoom"], 3, 2.6, 6, 4, 10, 5.6],
+};
+
+const ALERT_LINE_LAYOUT = { "line-join": "round", "line-cap": "round" };
+
+// Storm-based (IEM) polygons are keyed by phenomenon code; the paint expression
+// is generated from the same palette the rest of the app uses.
+const IEM_PHENOMENA_MATCH = key => [
+  "match", ["get", "phenomena"],
+  ...Object.entries(IEM_PHENOMENON_EVENTS).flatMap(([code, event]) => [code, alertEventColor(event)[key]]),
+  "rgba(0,0,0,0)",
+];
+
+function alertBorderLayers(sourceId, prefix, colorExpression) {
+  // Mount at the weight the user has chosen so a "Normal" setting never flashes
+  // the maximum-width outline on the first paint.
+  const scale = ALERT_BORDER_SCALE[mapSettings.alertBorders] ?? 1;
+  const width = part => scaledZoomWidths(ALERT_BORDER_WEIGHTS[part], scale);
+  return [
+    {
+      id: `${prefix}-halo`,
+      type: "line",
+      source: sourceId,
+      layout: ALERT_LINE_LAYOUT,
+      paint: {
+        "line-color": colorExpression,
+        "line-width": width("halo"),
+        "line-opacity": 0.34,
+        "line-blur": 3.5,
+      },
+    },
+    {
+      id: `${prefix}-casing`,
+      type: "line",
+      source: sourceId,
+      layout: ALERT_LINE_LAYOUT,
+      paint: {
+        "line-color": "rgba(4, 8, 18, 0.88)",
+        "line-width": width("casing"),
+      },
+    },
+    {
+      id: `${prefix}-line`,
+      type: "line",
+      source: sourceId,
+      layout: ALERT_LINE_LAYOUT,
+      paint: {
+        "line-color": colorExpression,
+        "line-width": width("line"),
+      },
+    },
+  ];
+}
+
 function mountAlertLayers() {
   if (!radarMap || !mapLoaded) return;
   const emptyCollection = { type: "FeatureCollection", features: [] };
@@ -8897,28 +9721,13 @@ function mountAlertLayers() {
       type: "fill",
       source: "alerts-source",
       paint: {
-        "fill-color": ["match", ["get", "phenomena"],
-          "TO", "#dc2626", "SV", "#f97316", "FF", "#10b981",
-          "SQ", "#a78bfa", "MA", "#38bdf8",
-          "rgba(0,0,0,0)"],
+        "fill-color": IEM_PHENOMENA_MATCH("fill"),
         "fill-opacity": 0.3,
       },
     });
   }
-  if (!radarMap.getLayer("alerts-line")) {
-    addWeatherLayer({
-      id: "alerts-line",
-      type: "line",
-      source: "alerts-source",
-      paint: {
-        "line-color": ["match", ["get", "phenomena"],
-          "TO", "#ef4444", "SV", "#fb923c", "FF", "#34d399",
-          "SQ", "#c4b5fd", "MA", "#7dd3fc",
-          "rgba(0,0,0,0)"],
-        "line-width": 2,
-      },
-    });
-  }
+  alertBorderLayers("alerts-source", "alerts", IEM_PHENOMENA_MATCH("line"))
+    .forEach(layer => { if (!radarMap.getLayer(layer.id)) addWeatherLayer(layer); });
 
   if (!radarMap.getSource("nws-alerts-source")) {
     radarMap.addSource("nws-alerts-source", {
@@ -8938,20 +9747,12 @@ function mountAlertLayers() {
       },
     });
   }
-  if (!radarMap.getLayer("nws-alerts-line")) {
-    addWeatherLayer({
-      id: "nws-alerts-line",
-      type: "line",
-      source: "nws-alerts-source",
-      paint: {
-        "line-color": ["get", "lineColor"],
-        "line-width": 2.2,
-      },
-    });
-  }
+  alertBorderLayers("nws-alerts-source", "nws-alerts", ["get", "lineColor"])
+    .forEach(layer => { if (!radarMap.getLayer(layer.id)) addWeatherLayer(layer); });
 
   ensureAlertLayersVisible();
   restackWeatherLayers();
+  applyAlertBorderSettings();
 
   if (!popupWiredLayers.has("all-alerts")) {
     ["alerts-fill", "nws-alerts-fill"].forEach(layer => {
@@ -9037,9 +9838,14 @@ function refreshAlertSourcesForFilter() {
   if (nwsSource) nwsSource.setData(filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws"));
 }
 
+const ALERT_LAYER_IDS = [
+  "nws-alerts-fill", "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
+  "alerts-fill", "alerts-halo", "alerts-casing", "alerts-line",
+];
+
 function ensureAlertLayersVisible() {
   if (!radarMap || !mapLoaded) return;
-  ["nws-alerts-fill", "nws-alerts-line", "alerts-fill", "alerts-line"].forEach(id => {
+  ALERT_LAYER_IDS.forEach(id => {
     if (radarMap.getLayer(id)) radarMap.setFilter(id, null);
     if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", "visible");
   });
@@ -9152,8 +9958,9 @@ function drawRadar(relocate = false) {
 
   mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   mapMarker?.setPopup(new mapboxgl.Popup({ offset: 14 }).setHTML(buildLocationPopup(selectedLocation.name)));
-  // The adds above are async; give them a turn to land before restacking.
-  setTimeout(raiseBoundaryLayers, 0);
+  // The adds above are async; give them a turn to land before restacking and
+  // re-applying the user's map preferences over the rebuilt stack.
+  setTimeout(() => { raiseBoundaryLayers(); applyMapSettings(); }, 0);
   radarMap.resize();
   if (relocate) {
     radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 700 });
@@ -9167,8 +9974,8 @@ function animateRadarLayer() {
   const frames = sat ? satFrames : radarFrames;
   if ((sat ? !satelliteActive : !radarActive) || !frames.length) return;
   setPlayingUi(true);
-  // Contour frames are a couple of MB each, so they are only bulk-downloaded
-  // once the user asks for animation rather than on every visit to the tab.
+  // The buffer is already warming from when the layer mounted; re-arming here
+  // covers the case where a frame failed on the first pass.
   const decodedLocally = sat ? onDeviceSatelliteFrameInfo.length > 0 : usesOnDeviceRadar();
   if (!sat && !decodedLocally) prewarmMrmsFrames();
   if (!decodedLocally) {
@@ -9176,16 +9983,16 @@ function animateRadarLayer() {
     // Animate oldest→newest, wrapping back to the oldest after the latest frame.
       if (sat) setSatelliteFrame((satFrameIndex + 1) % satFrames.length);
       else setRadarFrame((radarFrameIndex + 1) % radarFrames.length);
-    }, RADAR_FRAME_MS);
+    }, radarFrameDelay());
     return;
   }
   const tick = async () => {
     if (!radarAnimationTimer) return;
     if (sat) await setSatelliteFrame((satFrameIndex + 1) % satFrames.length);
     else await setRadarFrame((radarFrameIndex + 1) % radarFrames.length);
-    if (radarAnimationTimer) radarAnimationTimer = setTimeout(tick, RADAR_FRAME_MS);
+    if (radarAnimationTimer) radarAnimationTimer = setTimeout(tick, radarFrameDelay());
   };
-  radarAnimationTimer = setTimeout(tick, RADAR_FRAME_MS);
+  radarAnimationTimer = setTimeout(tick, radarFrameDelay());
 }
 
 function renderLayers() {
@@ -9283,7 +10090,7 @@ function renderLayers() {
   // The bottom-docked scrubber follows the same rule: visible only while a
   // frame-based layer (radar or satellite) is on the map.
   const scrubber = document.querySelector("#mapFrameScrubber");
-  if (scrubber) scrubber.hidden = !(radarActive || satelliteActive);
+  if (scrubber) scrubber.hidden = !mapSettings.scrubber || !(radarActive || satelliteActive);
   if (radCtrl) {
     radCtrl.hidden = !(radarActive || satelliteActive);
     const prodRow = document.querySelector("#mrmsProductRow");
@@ -9576,7 +10383,7 @@ function renderSatelliteSubControls() {
 function renderSpcLegend() {
   const box = document.querySelector("#spcLegendBox");
   if (!box) return;
-  if (!activeOverlays.has("SPC")) { box.hidden = true; return; }
+  if (!activeOverlays.has("SPC") || !mapSettings.legend) { box.hidden = true; return; }
   box.hidden = false;
 
   const day = activeSpcDay, type = activeSpcType;
@@ -9636,41 +10443,17 @@ function renderRadarSubControls() {
   if (paletteName) paletteName.textContent = palette?.name || "Default";
 }
 
+// The legend is a colour key and nothing else. It used to double as a status
+// line — how the data was decoded, which storm-motion vector the extrapolation
+// had fitted, how confident it was — none of which helps read the map, and all
+// of which crowded the box on a phone. The scrubber already labels which frame
+// is on screen, so what is left here is the product name, the ramp, and its
+// values.
 function renderMrmsLegend() {
   const box = document.querySelector("#mrmsLegendBox");
   if (!box) return;
-  if (!radarActive) { box.hidden = true; return; }
+  if (!radarActive || !mapSettings.legend) { box.hidden = true; return; }
   box.hidden = false;
-  const nowcast = nowcastInfo();
-  const nowcastSummary = nowcast?.summary;
-  const movement = nowcastSummary && !nowcastSummary.unavailable
-    ? `${
-        nowcastSummary.direction === "Stationary"
-          ? "STATIONARY"
-          : `${nowcastSummary.direction} ${Math.round(nowcastSummary.speedMph)} MPH`
-      } · ${String(nowcastSummary.evolution || nowcastSummary.intensity || "steady").toUpperCase()}`
-    : "";
-  // Shown while a forecast frame is on screen, and as a suffix on the observed
-  // subtitle so the timeline's future half is never a surprise.
-  const nowcastSubtitle = nowcastSummary?.unavailable
-    ? `OUTLOOK UNAVAILABLE · ${String(nowcastSummary.reason || "SHOWING OBSERVATIONS").toUpperCase()}`
-    : movement
-    ? `MRMS MOTION EXTRAPOLATION · ${movement} · ${
-        String(nowcastSummary.confidence || "moderate").toUpperCase()
-      } CONFIDENCE`
-    : "MRMS MOTION EXTRAPOLATION · EXPERIMENTAL";
-  const observedSuffix = !nowcast
-    ? ""
-    : nowcast.status === "building"
-    ? " · BUILDING +30 MIN OUTLOOK"
-    : nowcast.status === "ready" && nowcast.frameCount
-    ? ` · +${Math.max(...nowcast.leadsMinutes.slice(0, nowcast.frameCount))} MIN OUTLOOK ON TIMELINE`
-    : nowcast.status === "unavailable"
-    ? ` · OUTLOOK UNAVAILABLE (${String(nowcast.summary?.reason || "NO RECENT SCAN PAIR").toUpperCase()})`
-    : "";
-  const showingForecast = Boolean(
-    onDeviceWeatherApi?.currentState()?.radar?.frame?.forecast
-  );
   const livePalette = usesOnDeviceRadar()
     ? onDeviceWeatherApi?.radarPalette(activeRadarMode, activeMrmsProduct)
     : null;
@@ -9684,11 +10467,6 @@ function renderMrmsLegend() {
     box.innerHTML = `
       <div class="legend-title">${safeText((cfg?.label || "RADAR").toUpperCase())}</div>
       <div class="mrms-legend-section">
-        <div class="legend-subtitle">${
-          showingForecast
-            ? safeText(nowcastSubtitle)
-            : `${activeRadarMode === "single" ? "RAW LEVEL II" : "RAW MRMS GRIB2"} · DECODED ON THIS DEVICE${safeText(observedSuffix)}`
-        }</div>
         <div class="legend-gradient" style="background:linear-gradient(90deg,${livePalette.colors.join(",")})"></div>
         <div class="legend-ticks" style="--tick-count:3">
           ${[livePalette.lo, mid, livePalette.hi].map((value, index) =>
@@ -9703,7 +10481,6 @@ function renderMrmsLegend() {
     box.innerHTML = legend ? `
       <div class="legend-title">${safeText(legend.title)}</div>
       <div class="mrms-legend-section">
-        <div class="legend-subtitle">RAW LEVEL II · DECODED ON THIS DEVICE</div>
         <div class="legend-gradient" style="background:${legend.gradient}"></div>
         <div class="legend-ticks" style="--tick-count:${legend.ticks.length}">
           ${legend.ticks.map(tick => `<span class="legend-tick"><span>${safeText(tick)}</span></span>`).join("")}
@@ -10049,8 +10826,12 @@ notifyButton?.addEventListener("click", toggleNotifications);
 document.querySelector("#unitToggle")?.addEventListener("click", event => {
   // Clicking a specific side picks that system; clicking elsewhere just flips.
   const opt = event.target.closest(".unit-opt");
-  unitSystem = opt ? opt.dataset.system : (isMetric() ? "imperial" : "metric");
+  unitSystem = opt ? opt.dataset.system : (unitChoice("temp") === "c" ? "imperial" : "metric");
   localStorage.setItem("unitSystem", unitSystem);
+  // A pinned temperature unit would make this toggle look broken, so the
+  // header switch hands temperature back to the system.
+  if (unitPrefs.temp !== "auto") { unitPrefs.temp = "auto"; saveUnitPrefs(); }
+  renderSettingsPanel();
   rerenderUnits();
 });
 locationForm.addEventListener("submit", async event => {
@@ -10074,12 +10855,13 @@ locationInput.addEventListener("input", () => {
   const query = locationInput.value.trim();
   clearTimeout(locationSuggestionTimer);
   if (query.length < 2) {
-    renderLocationSuggestions([]);
+    // Nothing worth geocoding yet, so the box falls back to the saved towns.
+    showFavoriteSuggestions();
     return;
   }
   locationSuggestionTimer = setTimeout(async () => {
     try {
-      renderLocationSuggestions(await searchLocations(query));
+      renderLocationSuggestions(mergeFavoritesIntoResults(await searchLocations(query)));
     } catch {
       renderLocationSuggestions([]);
     }
@@ -10087,10 +10869,30 @@ locationInput.addEventListener("input", () => {
 });
 
 locationInput.addEventListener("focus", () => {
+  if (!locationInput.value.trim()) {
+    showFavoriteSuggestions();
+    return;
+  }
   if (locationSuggestionResults.length) locationSuggestions.hidden = false;
 });
 
 locationSuggestions.addEventListener("click", event => {
+  const star = event.target.closest("[data-favorite-index]");
+  if (star) {
+    // Starring must not also pick the town, and the dropdown has to stay open
+    // so several places can be saved in one pass.
+    event.preventDefault();
+    event.stopPropagation();
+    const target = locationSuggestionResults[Number(star.dataset.favoriteIndex)];
+    if (!target) return;
+    toggleFavoriteLocation(target);
+    // Re-render so the list reflects the new set — including dropping a row
+    // when the user un-stars something while browsing their favorites.
+    if (!locationInput.value.trim()) showFavoriteSuggestions();
+    else renderLocationSuggestions(locationSuggestionResults);
+    locationInput.focus();
+    return;
+  }
   const button = event.target.closest("[data-suggestion-index]");
   if (!button) return;
   const suggestion = locationSuggestionResults[Number(button.dataset.suggestionIndex)];
@@ -10120,9 +10922,15 @@ alertsPanel.addEventListener("click", event => {
 detailModal.addEventListener("click", event => {
   if (event.target.closest("[data-close-modal]")) closeDetails();
 });
+document.querySelector("#settingsButton")?.addEventListener("click", openSettings);
+settingsModal?.addEventListener("click", event => {
+  if (event.target.closest("[data-close-settings]")) { closeSettings(); return; }
+  handleSettingsClick(event);
+});
 window.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
-  if (!detailModal.hidden) closeDetails();
+  if (settingsModal && !settingsModal.hidden) closeSettings();
+  else if (!detailModal.hidden) closeDetails();
   else if (document.body.classList.contains("map-fullscreen")) setMapFullscreen(false);
 });
 // climateForm removed — using calendar date picker

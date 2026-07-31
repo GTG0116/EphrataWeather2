@@ -90,6 +90,19 @@ const constrained =
   (nav.maxTouchPoints > 0 && viewportMin <= 1024);
 const RADAR_CACHE_MAX = constrained ? 1 : 3;
 const SATELLITE_CACHE_MAX = constrained ? 1 : 2;
+// Scrubbing or pressing play used to download and decode each frame on demand,
+// so the first pass through the loop stuttered on every step. Once the newest
+// frame is on screen the rest of the buffer is fetched quietly in the
+// background, oldest-first-behind-newest, one at a time so the warming never
+// competes with a frame the user is actually waiting for.
+//
+// Decoded MRMS grids are a few MB each, so the whole observed buffer is held in
+// memory only where there is memory to hold it; a constrained device still
+// warms the network so the bytes are local even when the grid has to be rebuilt.
+const MRMS_CACHE_MAX = constrained ? 1 : 12;
+// Level II volumes are an order of magnitude larger than an MRMS grid, so those
+// are warmed through the byte cache and decoded on demand.
+const RADAR_WARM_LIMIT = constrained ? 0 : 6;
 // Forecast frames are spaced closer than the 5-minute steps the extrapolation
 // used to publish, so playing past "now" glides at roughly the observed scan
 // cadence instead of jumping. Each frame is a float grid, so phones get the
@@ -306,7 +319,7 @@ async function decodedRadarFrame(frame, onProgress) {
   if (radarInflight.has(frame.key)) return radarInflight.get(frame.key);
   const task = (async () => {
     const bytes = await fetchVolume(frame.key, onProgress);
-    emitStatus('radar', 'decoding', 'Decoding Level II on this device', 1);
+    emitStatus('radar', 'processing', `Processing ${radarSite?.[0] || 'radar'} scan`, 1);
     const volume = await decodeRadar(bytes);
     lruSet(radarCache, frame.key, volume, RADAR_CACHE_MAX);
     return volume;
@@ -357,10 +370,10 @@ async function showRadar(index, sequence = ++radarSequence) {
   const frame = radarFrames[Math.max(0, Math.min(radarFrames.length - 1, Number(index)))];
   if (!frame || !productInfo) throw new Error('No raw radar frame is available');
   radarFrameIndex = radarFrames.indexOf(frame);
-  emitStatus('radar', 'downloading', `Downloading ${radarSite[0]} Level II`, 0);
+  emitStatus('radar', 'downloading', `Loading ${radarSite[0]} radar`, 0);
   const volume = await decodedRadarFrame(frame, (progress) => {
     if (sequence === radarSequence)
-      emitStatus('radar', 'downloading', `Downloading ${radarSite[0]} Level II`, progress);
+      emitStatus('radar', 'downloading', `Loading ${radarSite[0]} radar`, progress);
   });
   if (sequence !== radarSequence) return radarResult();
   const sweep = pickSweep(volume, productInfo.decoderId);
@@ -393,15 +406,18 @@ async function showRadar(index, sequence = ++radarSequence) {
   return radarResult();
 }
 
-async function decodedMrmsFrame(frame, decoderId, onProgress) {
+// `quiet` suppresses the status line. The background warmer loads frames nobody
+// asked for yet, so it must not replace the label describing the frame that is
+// actually on screen with a progress readout for a different one.
+async function decodedMrmsFrame(frame, decoderId, onProgress, { quiet = false } = {}) {
   const cacheKey = `${decoderId}|${frame.key}`;
   const cached = lruGet(mrmsCache, cacheKey);
   if (cached) return cached;
   if (mrmsInflight.has(cacheKey)) return mrmsInflight.get(cacheKey);
   const task = (async () => {
-    emitStatus('radar', 'downloading', `Downloading MRMS ${MRMS_PRODUCTS[decoderId].name}`, 0);
+    if (!quiet) emitStatus('radar', 'downloading', `Loading ${MRMS_PRODUCTS[decoderId].name}`, 0);
     const grid = await loadMrms(decoderId, frame.key, onProgress);
-    lruSet(mrmsCache, cacheKey, grid, constrained ? 1 : 2);
+    lruSet(mrmsCache, cacheKey, grid, MRMS_CACHE_MAX);
     return grid;
   })();
   mrmsInflight.set(cacheKey, task);
@@ -420,7 +436,7 @@ async function showMrmsRadar(index, sequence = ++radarSequence) {
     ? frame.grid
     : await decodedMrmsFrame(frame, productInfo.decoderId, (progress) => {
         if (sequence === radarSequence)
-          emitStatus('radar', 'decoding', 'Decoding MRMS GRIB2 on this device', progress);
+          emitStatus('radar', 'processing', 'Processing radar', progress);
       });
   if (sequence !== radarSequence) return radarResult();
   radarFrameMeta = {
@@ -447,8 +463,8 @@ async function showMrmsRadar(index, sequence = ++radarSequence) {
     'radar',
     'ready',
     forecast
-      ? `MRMS extrapolation +${radarFrameMeta.leadMinutes} min`
-      : `${productInfo.label} · MRMS decoded locally`,
+      ? `+${radarFrameMeta.leadMinutes} min outlook`
+      : `${productInfo.label} · MRMS`,
     1,
   );
   radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
@@ -459,6 +475,62 @@ function frameTimeMillis(frame) {
   const raw = frame?.time;
   const value = raw instanceof Date ? raw.getTime() : raw ? new Date(raw).getTime() : NaN;
   return Number.isFinite(value) ? value : NaN;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Background frame warming
+   The frame the user asked for is always fetched first and on its own; this
+   fills in the rest of the buffer afterwards, newest-backwards, one frame at a
+   time. Every step re-checks `radarSequence`, so switching product, mode, site
+   or tab abandons the warm immediately instead of finishing a download nobody
+   is going to look at.
+   ────────────────────────────────────────────────────────────────────────── */
+let warmSequence = 0;
+
+function idle(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Warm the observed frames behind `skipKey` for whichever radar path is active.
+// Fire-and-forget: failures are the same "this frame is unavailable" the
+// foreground path already tolerates.
+function warmRadarFrames(sequence, skipKey) {
+  const token = ++warmSequence;
+  const current = () => sequence === radarSequence && token === warmSequence && radarVisible;
+  (async () => {
+    // Give the frame on screen a clear run at the network first.
+    await idle(250);
+    if (!current()) return;
+
+    // Newest first: that is the order a user scrubs backwards through.
+    const observed = radarFrames
+      .slice(0, radarObservedCount || radarFrames.length)
+      .filter((frame) => frame && !frame.forecast && !frame.extrapolated && frame.key !== skipKey)
+      .reverse();
+    if (!observed.length) return;
+
+    if (radarMode === 'mrms') {
+      const decoderId = MRMS_RADAR_PRODUCTS[radarProductKey]?.decoderId;
+      if (!decoderId) return;
+      for (const frame of observed) {
+        if (!current()) return;
+        // Silent: warming must never write over the status line describing the
+        // frame the user is looking at.
+        await decodedMrmsFrame(frame, decoderId, null, { quiet: true }).catch(() => {});
+        await idle(0);
+      }
+      return;
+    }
+
+    for (const frame of observed.slice(0, RADAR_WARM_LIMIT)) {
+      if (!current()) return;
+      // Only the bytes are warmed here — the browser's HTTP cache keeps them, so
+      // the decode when the user reaches this frame starts from local data
+      // instead of a multi-megabyte download.
+      await fetchVolume(frame.key).catch(() => {});
+      await idle(0);
+    }
+  })();
 }
 
 async function recentMrmsFrames(productId, limit = MAX_RADAR_FRAMES) {
@@ -1044,7 +1116,7 @@ async function prepareSatelliteFrame(sourceKey, productKey, frame, bbox, sequenc
       bandsFor(decoderId),
       (progress) => {
         if (sequence === satelliteSequence)
-          emitStatus('satellite', 'decoding', `Decoding ${source.label} on this device`, progress);
+          emitStatus('satellite', 'processing', `Processing ${source.label}`, progress);
       },
       bbox
     );
@@ -1053,7 +1125,7 @@ async function prepareSatelliteFrame(sourceKey, productKey, frame, bbox, sequenc
     await ensureBandsAsync(scene, source.satKey, source.sectorKey, bandsFor(decoderId));
   }
   if (decoderId === SAT_PRECIP_ID) {
-    emitStatus('satellite', 'deriving', 'Deriving satellite rain rate on this device', 1);
+    emitStatus('satellite', 'deriving', 'Estimating rain rate', 1);
     scene.channels.RR = computePrecipRate(scene);
   }
   const rgba = buildRGBA(scene, decoderId, { enhanceIR: true });
@@ -1128,7 +1200,7 @@ async function showSatellite(index, sequence = ++satelliteSequence) {
   emitStatus(
     'satellite',
     'ready',
-    `${SATELLITE_SOURCES[satelliteSourceKey].label} · decoded locally`,
+    SATELLITE_SOURCES[satelliteSourceKey].label,
     1
   );
   satelliteHooks.onFrame?.({ kind: 'satellite', ...satelliteResult() });
@@ -1213,6 +1285,9 @@ export async function loadRadar({
     if (product.nowcast && sequence === radarSequence) {
       scheduleNowcast();
     }
+    // Likewise not awaited — the rest of the loop fills in behind the frame
+    // that is already drawn.
+    if (sequence === radarSequence) warmRadarFrames(sequence, radarFrames[targetIndex]?.key);
     return shown;
   }
 
@@ -1249,7 +1324,9 @@ export async function loadRadar({
   const targetIndex = contextChanged || siteChanged || resetToLatest || radarFrameIndex < 0
     ? radarFrames.length - 1
     : Math.min(radarFrameIndex, radarFrames.length - 1);
-  return showRadar(targetIndex, sequence);
+  const shown = await showRadar(targetIndex, sequence);
+  if (sequence === radarSequence) warmRadarFrames(sequence, radarFrames[targetIndex]?.key);
+  return shown;
 }
 
 export function showRadarFrame(index) {

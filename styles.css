@@ -484,12 +484,30 @@ h3 {
   display: none;
 }
 
-.location-suggestions button {
-  width: 100%;
-  min-height: 48px;
-  display: grid;
+/* One row per town: the row itself picks the place, the trailing star saves it
+   to favorites without dismissing the dropdown. */
+.location-suggestion {
+  display: flex;
+  align-items: center;
   gap: 2px;
-  padding: 8px 10px;
+  border-radius: 14px;
+}
+
+.location-suggestion:hover {
+  background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.05));
+}
+
+.location-suggestion-heading {
+  margin: 2px 4px 6px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.location-suggestions button {
+  min-height: 48px;
   color: var(--text);
   text-align: left;
   border: 0;
@@ -498,8 +516,49 @@ h3 {
   cursor: pointer;
 }
 
-.location-suggestions button:hover {
-  background: color-mix(in srgb, var(--accent) 16%, rgba(255, 255, 255, 0.05));
+.location-suggestion-pick {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.location-suggestion-pick strong,
+.location-suggestion-pick span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.location-favorite-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  min-height: 38px;
+  margin-right: 4px;
+  padding: 0;
+  color: var(--muted);
+  opacity: 0.65;
+  transition: color 140ms ease, opacity 140ms ease, transform 140ms ease;
+}
+
+.location-favorite-btn svg { fill: none; }
+
+.location-favorite-btn:hover {
+  opacity: 1;
+  transform: scale(1.12);
+}
+
+/* A saved town keeps a filled amber star whether or not the row is hovered. */
+.location-favorite-btn.active {
+  color: #fbbf24;
+  opacity: 1;
+}
+
+.location-favorite-btn.active svg {
+  fill: currentColor;
 }
 
 .location-suggestions span {
@@ -956,6 +1015,11 @@ dd {
 /* One tappable line per alert. Everything else — the headline paragraph, the
    full county list, the tag row — lives in the alert modal behind this tap. */
 .alert-row {
+  /* --alert-color / --alert-edge are set per row from the event's official
+     weather.gov color, so the panel, the map polygon and the NWS map agree.
+     They fall back to the theme accent for anything without a color. */
+  --alert-color: var(--accent);
+  --alert-edge: var(--accent);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -964,14 +1028,16 @@ dd {
   text-align: left;
   color: var(--text);
   cursor: pointer;
-  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
-  border-left: 3px solid var(--accent);
+  border: 1px solid color-mix(in srgb, var(--alert-color) 42%, var(--border));
+  border-left: 4px solid var(--alert-color);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 10%, var(--card, rgba(255, 255, 255, 0.06)));
+  background: color-mix(in srgb, var(--alert-color) 13%, var(--card, rgba(255, 255, 255, 0.06)));
 }
 
 .alert-row:hover {
-  background: color-mix(in srgb, var(--accent) 18%, var(--card, rgba(255, 255, 255, 0.06)));
+  border-color: color-mix(in srgb, var(--alert-edge) 62%, var(--border));
+  border-left-color: var(--alert-edge);
+  background: color-mix(in srgb, var(--alert-color) 22%, var(--card, rgba(255, 255, 255, 0.06)));
 }
 
 .alert-row-text {
@@ -1314,7 +1380,17 @@ body.map-fullscreen .map-stage {
 
 body.map-fullscreen .map-hud {
   top: max(12px, env(safe-area-inset-top));
-  bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+/* Fullscreen runs to the physical edge of the screen, so the credit strip — and
+   therefore everything stacked above it — has to clear the home indicator. */
+body.map-fullscreen .map-stage {
+  --map-credit-h: calc(22px + env(safe-area-inset-bottom, 0px));
+}
+
+body.map-fullscreen #radarMap .mapboxgl-ctrl-bottom-left,
+body.map-fullscreen #radarMap .mapboxgl-ctrl-bottom-right {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* On the radar tab the map screen is sized to fill the viewport exactly, so
@@ -1337,6 +1413,17 @@ body.map-mode .shell {
    every control floats over it as a translucent panel.
 ═══════════════════════════════════════════════ */
 .map-stage {
+  /* Everything docked along the bottom of the map — the Mapbox credit strip and
+     scale bar, the frame scrubber, the legends — is stacked from these, so a
+     change to any one row pushes the others up instead of landing on top of
+     them. The credit row is the floor. */
+  --map-credit-h: 22px;
+  --map-scrubber-h: 40px;
+  --map-bottom-gap: 8px;
+  /* Where the scrubber sits, and where a legend sits when there is no scrubber. */
+  --map-dock-bottom: calc(var(--map-credit-h) + var(--map-bottom-gap));
+  /* Where a legend sits when the scrubber is on screen. */
+  --map-legend-bottom: calc(var(--map-dock-bottom) + var(--map-scrubber-h) + var(--map-bottom-gap));
   position: relative;
   /* Escape the shell's max-width and side gutters so the map runs edge to
      edge, then fill everything from the tabs down to the bottom of the
@@ -1401,7 +1488,10 @@ body.map-mode .shell {
   top: 12px;
   left: 12px;
   right: 12px;
-  bottom: 12px;
+  /* Stop above the docked scrubber and credit strip. The panels scroll inside
+     whatever height that leaves, so a long layer list can no longer grow down
+     across the timeline and the legends on a phone. */
+  bottom: var(--map-legend-bottom);
   z-index: 6;
   display: flex;
   flex-direction: column;
@@ -1557,6 +1647,75 @@ body.map-mode .shell {
 
 #radarMap .mapboxgl-ctrl button {
   filter: invert(1);
+}
+
+/* ── Bottom credit strip ──
+   The scale bar and the attribution are the map's floor: everything else docked
+   at the bottom stacks above them (see --map-credit-h on .map-stage). They used
+   to share the bottom-right corner and stack into a two-line block that ran
+   straight through the legend on a phone, so they now sit in opposite corners,
+   both clamped to one line at the height the rest of the layout assumes. */
+#radarMap .mapboxgl-ctrl-bottom-left,
+#radarMap .mapboxgl-ctrl-bottom-right {
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  height: var(--map-credit-h, 22px);
+  pointer-events: none;
+}
+
+#radarMap .mapboxgl-ctrl-bottom-left .mapboxgl-ctrl,
+#radarMap .mapboxgl-ctrl-bottom-right .mapboxgl-ctrl {
+  margin: 0 6px 3px;
+  pointer-events: auto;
+}
+
+#radarMap .mapboxgl-ctrl-scale {
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-top: 0;
+  border-radius: 0 0 5px 5px;
+  background: rgba(4, 10, 24, 0.66);
+  color: rgba(226, 236, 250, 0.86);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+#radarMap .mapboxgl-ctrl-attrib {
+  max-width: min(58vw, 420px);
+  padding: 0 6px;
+  border-radius: 7px;
+  background: rgba(4, 10, 24, 0.66);
+  font-size: 9.5px;
+  line-height: 15px;
+  /* One line, always: the credit strip's height is a layout constant. */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#radarMap .mapboxgl-ctrl-attrib a {
+  color: rgba(226, 236, 250, 0.8);
+}
+
+/* Compact mode collapses to an "i" disc until tapped; the expanded panel opens
+   upward so it never pushes the strip taller. */
+#radarMap .mapboxgl-ctrl-attrib.mapboxgl-compact {
+  min-height: 18px;
+  background: rgba(4, 10, 24, 0.66);
+}
+
+#radarMap .mapboxgl-ctrl-attrib-button {
+  width: 18px;
+  height: 18px;
+  background-color: rgba(255, 255, 255, 0.82);
+  border-radius: 50%;
+}
+
+#radarMap .mapboxgl-ctrl-attrib.mapboxgl-compact-show .mapboxgl-ctrl-attrib-inner {
+  max-width: min(70vw, 380px);
 }
 
 .layer-pills {
@@ -1902,6 +2061,18 @@ body.modal-open {
   background: rgba(148, 163, 184, 0.15);
   border: 1px solid rgba(148, 163, 184, 0.3);
   color: var(--muted);
+}
+/* The event chip leads the tag row and shows the alert's official color. */
+.alert-modal-event-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.alert-modal-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 .alert-modal-meta {
   display: flex;
@@ -2622,7 +2793,8 @@ body.modal-open {
 
 /* ── Locate Me button ─────────────────────────────── */
 .locate-me-btn,
-.notify-btn {
+.notify-btn,
+.settings-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2639,7 +2811,8 @@ body.modal-open {
   transition: transform 160ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
 }
 .locate-me-btn:hover,
-.notify-btn:hover {
+.notify-btn:hover,
+.settings-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px color-mix(in srgb, var(--accent-2) 18%, transparent);
 }
@@ -2648,6 +2821,201 @@ body.modal-open {
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
+}
+
+/* ═══════════════════════════════════════════════
+   SETTINGS DIALOG
+   Units and map customization. Rows are label-on-the-left / control-on-the-
+   right, collapsing to stacked blocks once the row can no longer fit both.
+═══════════════════════════════════════════════ */
+.settings-section {
+  margin-bottom: 22px;
+}
+
+.settings-section:last-child {
+  margin-bottom: 0;
+}
+
+.settings-section h3 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.settings-section-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.settings-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-row-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-row-label {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.settings-row-note {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.settings-choice {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-choice-wrap {
+  flex-wrap: wrap;
+}
+
+.settings-choice button {
+  min-height: 30px;
+  padding: 0 11px;
+  color: var(--muted);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 800;
+  white-space: nowrap;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.settings-choice button:hover {
+  color: var(--text);
+}
+
+.settings-choice button.active {
+  color: #04121a;
+  background: var(--accent);
+}
+
+/* Toggle switch */
+.settings-switch {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.settings-switch.on {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.settings-switch-knob {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f8fbff;
+  translate: 0 -50%;
+  transition: left 160ms ease;
+}
+
+.settings-switch.on .settings-switch-knob {
+  left: 23px;
+}
+
+.settings-favorites {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-favorite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settings-favorite span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.settings-favorite button {
+  flex: none;
+  min-height: 28px;
+  padding: 0 10px;
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.12);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.settings-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* Narrow screens: the control moves under its label rather than squeezing. */
+@media (max-width: 560px) {
+  .settings-row,
+  .settings-row-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .settings-choice {
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  .settings-choice button {
+    flex: 1;
+    padding: 0 8px;
+  }
+  .settings-switch {
+    align-self: flex-start;
+  }
 }
 
 /* Subscribed state — green treatment plus a status dot so it's obvious
@@ -3097,7 +3465,8 @@ body.modal-open {
     grid-template-columns: repeat(3, 1fr);
   }
   .locate-me-btn span,
-  .notify-btn span {
+  .notify-btn span,
+  .settings-btn span {
     display: none;
   }
 
@@ -3461,14 +3830,21 @@ body.modal-open {
 ═══════════════════════════════════════════════ */
 .map-frame-scrubber {
   position: absolute;
-  bottom: 26px; /* clears the Mapbox attribution strip */
+  /* Docked directly above the Mapbox credit strip. Both the strip's height and
+     this bar's own height are layout constants (see .map-stage) so the legends
+     can be stacked on top of it without guessing. */
+  bottom: var(--map-dock-bottom);
+  /* The scale bar and attribution live in the bottom corners, so the bar stops
+     short of them rather than running edge to edge over the top. */
   left: 12px;
   right: 12px;
   z-index: 5;
+  box-sizing: border-box;
+  height: var(--map-scrubber-h);
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 14px;
+  padding: 0 14px;
   background: rgba(6, 12, 30, 0.86);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -3511,25 +3887,30 @@ body.modal-open {
 /* Lift the legends clear of the scrubber while it's on screen. */
 .map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
 .map-stage:has(.map-frame-scrubber:not([hidden])) .mrms-legend-box {
-  bottom: 84px;
+  bottom: var(--map-legend-bottom);
 }
 
 @media (max-width: 600px) {
+  /* A phone gets a shorter bar, and the attribution disc needs a little more
+     room than the desktop credit line, so both constants move together. */
+  .map-stage {
+    --map-credit-h: 24px;
+    --map-scrubber-h: 34px;
+    --map-bottom-gap: 6px;
+  }
+  body.map-fullscreen .map-stage {
+    --map-credit-h: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
   .map-frame-scrubber {
     left: 6px;
     right: 6px;
-    bottom: 22px;
-    padding: 5px 10px;
+    padding: 0 10px;
     gap: 8px;
   }
   .map-frame-scrubber .timeline-label {
     min-width: 0;
     max-width: 84px;
     font-size: 0.68rem;
-  }
-  .map-stage:has(.map-frame-scrubber:not([hidden])) .spc-legend-box,
-  .map-stage:has(.map-frame-scrubber:not([hidden])) .mrms-legend-box {
-    bottom: 70px;
   }
 }
 
@@ -3538,7 +3919,7 @@ body.modal-open {
 ═══════════════════════════════════════════════ */
 .spc-legend-box {
   position: absolute;
-  bottom: 52px;
+  bottom: var(--map-dock-bottom);
   right: 12px;
   z-index: 3;
   padding: 8px 10px;
@@ -3578,7 +3959,7 @@ body.modal-open {
 
 .mrms-legend-box {
   position: absolute;
-  bottom: 52px;
+  bottom: var(--map-dock-bottom);
   left: 12px;
   z-index: 3;
   padding: 8px 8px 9px;
@@ -3599,12 +3980,16 @@ body.modal-open {
 @media (max-width: 600px) {
   .mrms-legend-box {
     min-width: 0;
-    max-width: 140px;
+    /* Two legends can be on screen at once (radar left, SPC right). Capping
+       each at just under half the width keeps them from meeting in the middle
+       on a narrow phone. */
+    max-width: min(44vw, 150px);
     left: 6px;
-    bottom: 40px;
     padding: 5px 6px 6px;
     font-size: 0.62rem;
-    max-height: 200px;
+    /* The stage is short in landscape; never let a legend run past the top of
+       the map or under the scrubber it is sitting on. */
+    max-height: min(190px, 42vh);
   }
   .mrms-legend-box .legend-title {
     font-size: 0.68rem;
@@ -3618,20 +4003,43 @@ body.modal-open {
     width: 100%;
     height: 10px;
   }
+  /* The tick values used to be dropped on phones because the box was crowded
+     with a decode/status subtitle. That subtitle is gone, and a colour ramp
+     with no numbers on it is not a legend — so the values stay, just smaller. */
   .mrms-legend-box .legend-ticks {
+    font-size: 0.55rem;
+  }
+  .mrms-legend-box .legend-tick small {
     display: none;
   }
   .mrms-legend-section {
-    margin-bottom: 10px;
+    margin-bottom: 8px;
+  }
+  .mrms-legend-section:last-child {
+    margin-bottom: 0;
   }
   .spc-legend-box {
-    max-width: 130px;
+    max-width: min(44vw, 140px);
     min-width: 0;
     right: 6px;
-    bottom: 40px;
     padding: 6px 8px;
     font-size: 0.62rem;
+    max-height: min(190px, 42vh);
+    overflow-y: auto;
     pointer-events: none;
+  }
+
+  /* An open panel covers most of a phone's map, legends included. Rather than
+     leave a legend half-visible behind it, fade it out for as long as the panel
+     is up — the same treatment a popup gets. */
+  .map-stage:has(#mapControlsPanel:not([hidden])) .mrms-legend-box,
+  .map-stage:has(#mapControlsPanel:not([hidden])) .spc-legend-box,
+  .map-stage:has(#mapSidebar:not([hidden])) .mrms-legend-box,
+  .map-stage:has(#mapSidebar:not([hidden])) .spc-legend-box {
+    animation: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 160ms ease, visibility 160ms ease;
   }
 }
 
@@ -4356,7 +4764,8 @@ body.modal-open {
     top: 8px;
     left: 8px;
     right: 8px;
-    bottom: 8px;
+    /* Deliberately not reset to a fixed inset: the HUD still has to stop above
+       the scrubber and the credit strip (see .map-hud). */
     gap: 6px;
   }
 
