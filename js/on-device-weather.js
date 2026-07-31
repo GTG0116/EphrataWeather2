@@ -1233,7 +1233,35 @@ export async function loadRadar({
   radarMode = requestedMode;
   radarProductKey = requestedProduct;
   const sequence = ++radarSequence;
-  if (contextChanged) {
+
+  // Which single-site scan list the request lands on has to be known before the
+  // frames are thrown away, because a product switch inside one site keeps them.
+  const requestedSite = String(siteId || '').toUpperCase();
+  const selectedSite =
+    requestedMode === 'single'
+      ? RADARS.find((site) => site[0] === requestedSite) ||
+        nearestSite(Number(location?.lat), Number(location?.lon))
+      : null;
+  if (requestedMode === 'single' && !selectedSite)
+    throw new Error('No NEXRAD site is available for this location');
+  const siteChanged =
+    requestedMode === 'single' &&
+    (previousMode !== 'single' ||
+      radarSite?.[0] !== selectedSite[0] ||
+      shownRadar?.mode === 'mrms');
+  // Every moment of a scan — reflectivity, velocity, ρHV, all of them — comes
+  // out of the *same* Level II volume, so switching product inside one site
+  // changes which moment is read, not which files exist. Wiping the timeline
+  // and re-listing the site's whole day from S3 for that was what made a
+  // product switch look like it had not registered: the scrubber emptied, the
+  // old sweep stayed on screen, and nothing replaced it until the listing
+  // finally came back (or until the product was picked a second time, by which
+  // point the browser had the listing cached). Keeping the frames means the new
+  // moment is drawn from the volume already in the cache, immediately.
+  const keepSingleTimeline =
+    requestedMode === 'single' && contextChanged && !siteChanged && radarFrames.length > 0;
+
+  if (contextChanged && !keepSingleTimeline) {
     invalidateNowcastBuild();
     radarFrames = [];
     radarFrameIndex = -1;
@@ -1246,6 +1274,12 @@ export async function loadRadar({
       nowcastStatus = 'idle';
       nowcastSummary = null;
     }
+    radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
+  } else if (contextChanged) {
+    // The timeline survives; only what is drawn from it is stale. Re-announce it
+    // so the page relabels the scrubber for the new product without blanking it.
+    radarFrameMeta = null;
+    shownRadar = null;
     radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
   }
 
@@ -1295,15 +1329,7 @@ export async function loadRadar({
   nowcastFrames = [];
   nowcastStatus = 'idle';
   mrmsLayer?.clear();
-  const requestedSite = String(siteId || '').toUpperCase();
-  const selected =
-    RADARS.find((site) => site[0] === requestedSite) ||
-    nearestSite(Number(location?.lat), Number(location?.lon));
-  if (!selected) throw new Error('No NEXRAD site is available for this location');
-  const siteChanged =
-    radarSite?.[0] !== selected[0] ||
-    previousMode !== 'single' ||
-    shownRadar?.mode === 'mrms';
+  const selected = selectedSite;
   if (siteChanged && radarFrames.length) {
     radarFrames = [];
     radarFrameIndex = -1;
@@ -1311,7 +1337,9 @@ export async function loadRadar({
     radarHooks.onFrame?.({ kind: 'radar', ...radarResult() });
   }
   radarSite = selected;
-  if (siteChanged || resetToLatest || !radarFrames.length) {
+  // `resetToLatest` accompanies a product switch too, and re-listing on one is
+  // exactly what the retained timeline exists to avoid.
+  if (siteChanged || !radarFrames.length || (resetToLatest && !keepSingleTimeline)) {
     emitStatus('radar', 'listing', `Finding recent ${selected[0]} scans`, null);
     let volumes = await listVolumes(selected[0], new Date());
     if (!volumes.length) volumes = await listVolumes(selected[0], new Date(Date.now() - 86400000));
@@ -1320,9 +1348,13 @@ export async function loadRadar({
     radarFrameIndex = radarFrames.length - 1;
   }
   if (!radarFrames.length) throw new Error(`No recent ${selected[0]} Level II scans were found`);
-  const targetIndex = contextChanged || siteChanged || resetToLatest || radarFrameIndex < 0
-    ? radarFrames.length - 1
-    : Math.min(radarFrameIndex, radarFrames.length - 1);
+  // A kept timeline stays where the user scrubbed it: switching reflectivity to
+  // velocity should show the same scan in a different moment, not jump to now.
+  const targetIndex = keepSingleTimeline
+    ? Math.max(0, Math.min(radarFrameIndex, radarFrames.length - 1))
+    : (contextChanged || siteChanged || resetToLatest || radarFrameIndex < 0
+      ? radarFrames.length - 1
+      : Math.min(radarFrameIndex, radarFrames.length - 1));
   const shown = await showRadar(targetIndex, sequence);
   if (sequence === radarSequence) warmRadarFrames(sequence, radarFrames[targetIndex]?.key);
   return shown;
