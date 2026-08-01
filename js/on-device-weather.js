@@ -8,8 +8,9 @@
 import { listVolumes, fetchVolume, nearestSite, RADARS } from './s3.js';
 import { PRODUCTS, makeScale, parsePal } from './products.js';
 import { createRadarLayer } from './radarLayer.js';
+import { dealiasVelocitySweep } from './dealias.js';
 import { MRMS_PRODUCTS, listMrms, loadMrms, precipTypeReading } from './mrms.js';
-import { createGridLayer } from './gridLayer.js';
+import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import {
   NOWCAST_MAX_LEAD_MINUTES,
   prepareReflectivityNowcast,
@@ -43,7 +44,7 @@ export const MRMS_RADAR_PRODUCTS = {
   rotation:  { decoderId: 'AZSHEAR',  label: 'Azimuthal Shear', unit: '10⁻³ s⁻¹' },
   // Precipitation type is derived in the browser from three MRMS fields (see
   // mrms.js): the rate sets the shade, the flag and wet-bulb set the band.
-  rate:      { decoderId: 'PTYPE',    label: 'Precip Type', unit: 'in/hr' },
+  rate:      { decoderId: 'PTYPE',    label: 'Precip Type', unit: 'in/hr', nowcast: true },
 };
 
 export const SATELLITE_PRODUCTS = {
@@ -99,7 +100,8 @@ const SATELLITE_CACHE_MAX = constrained ? 1 : 2;
 // Decoded MRMS grids are a few MB each, so the whole observed buffer is held in
 // memory only where there is memory to hold it; a constrained device still
 // warms the network so the bytes are local even when the grid has to be rebuilt.
-const MRMS_CACHE_MAX = constrained ? 1 : 12;
+const MRMS_CACHE_MAX = constrained ? 2 : 12;
+const MRMS_PREPARED_CACHE_MAX = constrained ? 12 : 18;
 // Level II volumes are an order of magnitude larger than an MRMS grid, so those
 // are warmed through the byte cache and decoded on demand.
 const RADAR_WARM_LIMIT = constrained ? 0 : 6;
@@ -185,6 +187,7 @@ const radarCache = new Map();
 const radarInflight = new Map();
 const mrmsCache = new Map();
 const mrmsInflight = new Map();
+const mrmsPreparedCache = new Map();
 
 const defaultColorTables = new WeakMap();
 
@@ -248,7 +251,7 @@ function ensureMrmsLayer(map, beforeId, product = null) {
   if (!mrmsLayer) mrmsLayer = createGridLayer(MRMS_LAYER_ID);
   mountLayer(map, mrmsLayer, beforeId);
   mrmsLayer.setOpacity(opacity);
-  mrmsLayer.setSmooth(product?.categorical ? 0 : MRMS_SMOOTH_LEVEL);
+  mrmsLayer.setSmooth(MRMS_SMOOTH_LEVEL);
   return mrmsLayer;
 }
 
@@ -379,8 +382,9 @@ async function showRadar(index, sequence = ++radarSequence) {
       emitStatus('radar', 'downloading', `Loading ${radarSite[0]} radar`, progress);
   });
   if (sequence !== radarSequence) return radarResult();
-  const sweep = pickSweep(volume, productInfo.decoderId);
+  let sweep = pickSweep(volume, productInfo.decoderId);
   if (!sweep) throw new Error(`${productInfo.label} is unavailable in this volume`);
+  if (productInfo.decoderId === 'VEL') sweep = dealiasVelocitySweep(sweep);
   const site = radarSiteFromFrame(volume, radarSite);
   radarFrameMeta = {
     key: frame.key,
@@ -428,6 +432,16 @@ async function decodedMrmsFrame(frame, decoderId, onProgress, { quiet = false } 
   return task;
 }
 
+function preparedMrmsFrame(frame, decoderId, grid, product) {
+  const cacheKey = `${decoderId}|${frame.key}`;
+  let prepared = lruGet(mrmsPreparedCache, cacheKey);
+  if (!prepared && grid?.values?.length) {
+    prepared = prepareGridTexture(grid, product, { packed: true });
+    lruSet(mrmsPreparedCache, cacheKey, prepared, MRMS_PREPARED_CACHE_MAX);
+  }
+  return prepared;
+}
+
 async function showMrmsRadar(index, sequence = ++radarSequence) {
   const productInfo = MRMS_RADAR_PRODUCTS[radarProductKey];
   const product = productInfo && MRMS_PRODUCTS[productInfo.decoderId];
@@ -435,16 +449,20 @@ async function showMrmsRadar(index, sequence = ++radarSequence) {
   if (!frame || !product) throw new Error('No raw MRMS frame is available');
   radarFrameIndex = radarFrames.indexOf(frame);
   const forecast = Boolean(frame.forecast || frame.extrapolated);
-  const grid = frame.grid
-    ? frame.grid
-    : await decodedMrmsFrame(frame, productInfo.decoderId, (progress) => {
+  const cacheKey = `${productInfo.decoderId}|${frame.key}`;
+  let grid = frame.grid || lruGet(mrmsCache, cacheKey);
+  let prepared = lruGet(mrmsPreparedCache, cacheKey);
+  if (!grid && !prepared) {
+    grid = await decodedMrmsFrame(frame, productInfo.decoderId, (progress) => {
         if (sequence === radarSequence)
           emitStatus('radar', 'processing', 'Processing radar', progress);
       });
+  }
   if (sequence !== radarSequence) return radarResult();
+  prepared = prepared || preparedMrmsFrame(frame, productInfo.decoderId, grid, product);
   radarFrameMeta = {
     key: frame.key,
-    time: frame.time || grid.time || null,
+    time: frame.time || grid?.time || null,
     forecast,
     leadMinutes: Number(frame.leadMinutes) || 0,
     quality: Number.isFinite(frame.quality) ? frame.quality : null,
@@ -452,12 +470,14 @@ async function showMrmsRadar(index, sequence = ++radarSequence) {
   };
   if (radarVisible && activeMap) {
     radarLayer?.clear();
-    ensureMrmsLayer(activeMap, anchorId, product).setGrid(grid, product);
+    const layer = ensureMrmsLayer(activeMap, anchorId, product);
+    if (prepared) layer.showPrepared(prepared);
+    else layer.setGrid(grid, product);
   }
   shownRadar = {
     mode: 'mrms',
     productKey: radarProductKey,
-    grid,
+    grid: grid || null,
     product,
     productInfo,
     forecast: radarFrameMeta,
@@ -514,12 +534,20 @@ function warmRadarFrames(sequence, skipKey) {
 
     if (radarMode === 'mrms') {
       const decoderId = MRMS_RADAR_PRODUCTS[radarProductKey]?.decoderId;
-      if (!decoderId) return;
+      const product = MRMS_PRODUCTS[decoderId];
+      if (!decoderId || !product) return;
       for (const frame of observed) {
         if (!current()) return;
         // Silent: warming must never write over the status line describing the
         // frame the user is looking at.
-        await decodedMrmsFrame(frame, decoderId, null, { quiet: true }).catch(() => {});
+        const grid = await decodedMrmsFrame(frame, decoderId, null, { quiet: true }).catch(() => null);
+        if (grid) {
+          preparedMrmsFrame(frame, decoderId, grid, product);
+          // Compact prepared frames are the phone playback cache. Drop the
+          // much larger decoded field once it has been packed; the compressed
+          // response bytes were already transient and are no longer retained.
+          if (constrained && frame.key !== skipKey) mrmsCache.delete(`${decoderId}|${frame.key}`);
+        }
         await idle(0);
       }
       return;
@@ -766,6 +794,60 @@ function nowcastForecastFrame(sourceFrame, leadMinutes, grid, motion) {
   };
 }
 
+// Carry the latest precipitation classification along the reflectivity
+// nowcast. The motion engine forecasts echo position/intensity; this maps the
+// latest rain/ice/snow bands onto that reduced grid and grows the nearby band
+// mask by the distance uncertainty at each lead. It is intentionally labelled
+// extrapolated: changing thermal profiles are not a numerical-model forecast.
+function precipitationTypeForecastGrid(reflectivity, latestType, leadMinutes) {
+  if (!latestType?.values?.length) return reflectivity;
+  const count = reflectivity.ni * reflectivity.nj;
+  let bands = new Int8Array(count).fill(-1);
+  for (let row = 0; row < reflectivity.nj; row++) {
+    const lat = reflectivity.lat1 - row * reflectivity.dj;
+    const sourceRow = Math.round((latestType.lat1 - lat) / latestType.dj);
+    if (sourceRow < 0 || sourceRow >= latestType.nj) continue;
+    for (let col = 0; col < reflectivity.ni; col++) {
+      const lon = reflectivity.lon1 + col * reflectivity.di;
+      const sourceCol = Math.round((lon - latestType.lon1) / latestType.di);
+      if (sourceCol < 0 || sourceCol >= latestType.ni) continue;
+      const encoded = latestType.values[sourceRow * latestType.ni + sourceCol];
+      if (Number.isFinite(encoded)) bands[row * reflectivity.ni + col] = Math.floor(encoded);
+    }
+  }
+  const spread = Math.max(1, Math.min(5, Math.ceil(leadMinutes / 6)));
+  for (let pass = 0; pass < spread; pass++) {
+    const next = Int8Array.from(bands);
+    for (let row = 1; row < reflectivity.nj - 1; row++) {
+      for (let col = 1; col < reflectivity.ni - 1; col++) {
+        const index = row * reflectivity.ni + col;
+        if (bands[index] >= 0) continue;
+        const votes = [0, 0, 0];
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const band = bands[index + dy * reflectivity.ni + dx];
+          if (band >= 0 && band < 3) votes[band]++;
+        }
+        const winner = votes[1] > votes[0] ? (votes[2] > votes[1] ? 2 : 1) : (votes[2] > votes[0] ? 2 : 0);
+        if (votes[winner]) next[index] = winner;
+      }
+    }
+    bands = next;
+  }
+  const values = new Float32Array(count).fill(NaN);
+  const rateCenti = new Uint16Array(count);
+  for (let index = 0; index < count; index++) {
+    const dbz = reflectivity.values[index];
+    const band = bands[index];
+    if (!Number.isFinite(dbz) || dbz < 5 || band < 0) continue;
+    const rate = Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6);
+    const shade = Math.max(0.01, Math.min(0.98, Math.log10(rate + 1) / 2));
+    values[index] = band + shade;
+    rateCenti[index] = Math.min(65535, Math.round(rate * 100));
+  }
+  return { ...reflectivity, values, rateCenti, product: MRMS_PRODUCTS.PTYPE };
+}
+
 // Run the extrapolation in a module worker, handing each finished lead straight
 // to `onForecast`. The older scan is passed by key so the worker downloads and
 // decodes it itself. Falls back to running in-page (fetching that scan here and
@@ -887,9 +969,23 @@ function markNowcastUnavailable(reason) {
 // failure here costs the user nothing and a success simply extends the scrubber.
 async function buildNowcast(token, bounds, regionKey) {
   const observed = observedRadarFrames();
-  const latest = observed[observed.length - 1];
+  const displayedLatest = observed[observed.length - 1];
+  if (!displayedLatest) return;
+  const precipitationType = radarProductKey === 'rate';
+  let latestTypeGrid = null;
+  let searchable = mrmsHistoryCatalog.length ? mrmsHistoryCatalog : observed;
+  if (precipitationType) {
+    latestTypeGrid = displayedLatest.grid || lruGet(mrmsCache, `PTYPE|${displayedLatest.key}`);
+    if (!latestTypeGrid?.values?.length) {
+      latestTypeGrid = await decodedMrmsFrame(displayedLatest, 'PTYPE', null, { quiet: true });
+    }
+    if (!nowcastJobIsCurrent(token)) return;
+    searchable = await recentMrmsFrames('REFC', MAX_RADAR_FRAMES + NOWCAST_HISTORY_FRAMES);
+    if (!nowcastJobIsCurrent(token)) return;
+  }
+  const latest = searchable[searchable.length - 1];
   if (!latest) return;
-  nowcastSourceKey = latest.key;
+  nowcastSourceKey = displayedLatest.key;
   nowcastRegionKey = regionKey;
   nowcastGeneratedAt = 0;
   nowcastSummary = null;
@@ -900,7 +996,6 @@ async function buildNowcast(token, bounds, regionKey) {
     return;
   }
   // Scans older than the timeline shows are still fair game for the motion fit.
-  const searchable = mrmsHistoryCatalog.length ? mrmsHistoryCatalog : observed;
   const history = nowcastHistoryFrames(searchable, latest);
   if (!history.length) {
     markNowcastUnavailable('not enough recent scan history');
@@ -977,8 +1072,11 @@ async function buildNowcast(token, bounds, regionKey) {
     onForecast: (index, grid, motion) => {
       const leadMinutes = NOWCAST_DISPLAY_LEADS_MINUTES[index];
       if (!Number.isFinite(leadMinutes)) return;
+      const displayedGrid = precipitationType
+        ? precipitationTypeForecastGrid(grid, latestTypeGrid, leadMinutes)
+        : grid;
       const frame = nowcastForecastFrame(
-        latest, leadMinutes, grid, motion || motionInfo || { quality: 0 },
+        displayedLatest, leadMinutes, displayedGrid, motion || motionInfo || { quality: 0 },
       );
       if (frameTimeMillis(frame) <= Date.now()) return;
       if (replacing) pending.push(frame);

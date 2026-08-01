@@ -1,7 +1,7 @@
 // Bump on every release. The name is the cache's identity, so changing it is
 // what makes activate() drop the previous release's copies of the app shell —
 // otherwise a visitor who goes offline is served the old code indefinitely.
-const CACHE_NAME = "weather-portal-v19";
+const CACHE_NAME = "weather-portal-v20";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -14,6 +14,7 @@ const APP_SHELL = [
   "./js/s3.js",
   "./js/products.js",
   "./js/radarLayer.js",
+  "./js/dealias.js",
   "./js/mrms.js",
   "./js/nowcast.js",
   "./js/nowcast.worker.js",

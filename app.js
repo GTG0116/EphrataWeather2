@@ -725,6 +725,8 @@ const MAP_SETTING_SPECS = {
                        options: [["normal", "Normal"], ["bold", "Bold"], ["max", "Maximum"]] },
   animationSpeed:    { type: "choice", default: "normal", label: "Animation speed",
                        options: [["slow", "Slow"], ["normal", "Normal"], ["fast", "Fast"]] },
+  reduceAnimations:  { type: "toggle", default: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true,
+                       label: "Reduce animations", note: "Minimize interface, weather-scene, and map motion" },
 };
 
 // Alert outlines used to default to "Bold". Every saved settings object carries
@@ -751,6 +753,8 @@ let mapSettings = (() => {
   return resolved;
 })();
 
+document.documentElement.classList.toggle("reduce-motion", mapSettings.reduceAnimations);
+
 function saveMapSettings() {
   try { localStorage.setItem("mapSettings", JSON.stringify(mapSettings)); } catch {}
 }
@@ -763,6 +767,9 @@ const ALERT_BORDER_SCALE = { normal: 0.62, bold: 1, max: 1.45 };
 const ANIMATION_SPEED_MS = { slow: 1100, normal: RADAR_FRAME_MS, fast: 380 };
 function radarFrameDelay() {
   return ANIMATION_SPEED_MS[mapSettings.animationSpeed] ?? RADAR_FRAME_MS;
+}
+function mapMotionMs(duration) {
+  return mapSettings.reduceAnimations ? 0 : duration;
 }
 let activeSatelliteType = "geocolor";
 let activeSatelliteSource = (() => {
@@ -813,6 +820,7 @@ let alertPolygonData = null;
 let nwsAlertPolygonData = null;
 let alertFetchBox = null;           // {west,south,east,north} the alert overlay was last fetched for
 let alertPanRefreshInFlight = false;
+let alertPanRefreshQueued = false;  // camera moved again while a refresh was resolving
 let alertLoadSequence = 0;          // invalidates stale async alert loads after redraws/toggles
 let activeAlertFilter = (() => {
   const saved = localStorage.getItem("alertKindFilter");
@@ -1849,7 +1857,7 @@ async function locateOnMap() {
     const loc = await locateMe();
     if (loc) {
       updateUserLocationMarker(loc.lat, loc.lon);
-      if (radarMap) radarMap.flyTo({ center: [loc.lon, loc.lat], zoom: Math.max(radarMap.getZoom(), 9), duration: 900 });
+      if (radarMap) radarMap.flyTo({ center: [loc.lon, loc.lat], zoom: Math.max(radarMap.getZoom(), 9), duration: mapMotionMs(900) });
     }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "Find Me"; }
@@ -1911,7 +1919,7 @@ async function chooseLocation(location) {
   locationInput.value = selectedLocation.name;
   hideLocationSuggestions();
   if (radarMap) {
-    radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 900 });
+    radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: mapMotionMs(900) });
     mapMarker?.setLngLat([selectedLocation.lon, selectedLocation.lat]);
   }
   await refreshLiveData();
@@ -7461,7 +7469,7 @@ function hexToTransparent(hex) {
 // cloud banks, slanted rain, lightning flashes, swaying snow, drifting fog,
 // warm sunset bands, or twinkling stars, depending on real conditions.
 function drawAtmosphere(ts) {
-  skyT = (ts || 0) / 1000;
+  skyT = document.documentElement.classList.contains("reduce-motion") ? 0 : (ts || 0) / 1000;
   const stops = SKY[skyBucket] || SKY.clearDay;
   // Everything below reasons about the weather, not the hour: "rainNight"
   // slants and flashes exactly like "rain", it is just painted after dark.
@@ -8628,7 +8636,7 @@ function applyBoundarySettings() {
 // desktop monitor, not for picking your town out from under a radar sweep on a
 // phone. A modest bump keeps them recognisably part of the basemap while making
 // them legible through a translucent weather layer.
-const PLACE_LABEL_SCALE = 1.16;
+const PLACE_LABEL_SCALE = 1.1;
 // Which symbol layers count as a settlement name. POIs, roads, water and
 // country/state names are left at the basemap's own sizes.
 const SETTLEMENT_LABEL_RE = /settlement|^place-label|town|village|city/;
@@ -8763,6 +8771,7 @@ function applyMapChromeSettings() {
 
 // Everything the Settings panel can change about the map, applied to a live map.
 function applyMapSettings() {
+  document.documentElement.classList.toggle("reduce-motion", mapSettings.reduceAnimations);
   applyBoundarySettings();
   applyAlertBorderSettings();
   applyMapChromeSettings();
@@ -9275,7 +9284,7 @@ function fitCyclonesInView() {
     }
   }
   if (!any) return;
-  radarMap.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 60, maxZoom: 6, duration: 800 });
+  radarMap.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 60, maxZoom: 6, duration: mapMotionMs(800) });
 }
 
 const LSR_ICONS = {
@@ -9576,6 +9585,33 @@ function boxContains(outer, inner) {
     inner.south >= outer.south && inner.north <= outer.north;
 }
 
+async function refreshAlertsForCurrentView() {
+  if (!activeOverlays.has("Alerts") || !radarMap || !mapLoaded) return;
+  if (alertPanRefreshInFlight) {
+    alertPanRefreshQueued = true;
+    return;
+  }
+  if (alertFetchBox && boxContains(alertFetchBox, desiredAlertFetchBox())) return;
+  alertPanRefreshInFlight = true;
+  alertPanRefreshQueued = false;
+  try {
+    // Keep the currently painted polygons in place while the next camera box
+    // loads. addAlertsLayer replaces the source atomically when it is ready.
+    nwsAlertPolygonData = null;
+    await addAlertsLayer();
+  } catch (error) {
+    console.warn("Alert overlay refresh failed", error);
+  } finally {
+    alertPanRefreshInFlight = false;
+    const movedPastResult = activeOverlays.has("Alerts") && alertFetchBox &&
+      !boxContains(alertFetchBox, desiredAlertFetchBox());
+    if (alertPanRefreshQueued || movedPastResult) {
+      alertPanRefreshQueued = false;
+      setTimeout(refreshAlertsForCurrentView, 0);
+    }
+  }
+}
+
 async function nwsAlertFeatureCollection() {
   const loc = selectedLocation;
   // Fetch the regional queries for what the map is actually showing (plus
@@ -9835,19 +9871,14 @@ function mountAlertLayers() {
   }
 
   if (!popupWiredLayers.has("alerts-pan-refresh")) {
-    radarMap.on("moveend", async () => {
-      if (!activeOverlays.has("Alerts") || alertPanRefreshInFlight) return;
-      if (!radarMap || !mapLoaded) return;
-      if (alertFetchBox && boxContains(alertFetchBox, desiredAlertFetchBox())) return;
-      alertPanRefreshInFlight = true;
-      try {
-        nwsAlertPolygonData = null;
-        await addAlertsLayer();
-      } catch (e) {
-        console.warn("Alert overlay refresh failed", e);
-      } finally {
-        alertPanRefreshInFlight = false;
-      }
+    radarMap.on("moveend", refreshAlertsForCurrentView);
+    // A style/camera render can briefly evict a GeoJSON tile at high zoom.
+    // Reassert the source data after the camera settles instead of waiting for
+    // the next network refresh to make alerts visible again.
+    radarMap.on("idle", () => {
+      if (!activeOverlays.has("Alerts")) return;
+      if (ALERT_LAYER_IDS.some(id => !radarMap.getLayer(id))) mountAlertLayers();
+      ensureAlertLayersVisible();
     });
     popupWiredLayers.add("alerts-pan-refresh");
   }
@@ -9918,8 +9949,11 @@ const ALERT_LAYER_IDS = [
 function ensureAlertLayersVisible() {
   if (!radarMap || !mapLoaded) return;
   ALERT_LAYER_IDS.forEach(id => {
-    if (radarMap.getLayer(id)) radarMap.setFilter(id, null);
-    if (radarMap.getLayer(id)) radarMap.setLayoutProperty(id, "visibility", "visible");
+    if (!radarMap.getLayer(id)) return;
+    if (radarMap.getFilter(id)) radarMap.setFilter(id, null);
+    if (radarMap.getLayoutProperty(id, "visibility") !== "visible") {
+      radarMap.setLayoutProperty(id, "visibility", "visible");
+    }
   });
 }
 
@@ -10033,7 +10067,7 @@ function drawRadar(relocate = false) {
   setTimeout(() => { raiseBoundaryLayers(); applyMapSettings(); }, 0);
   radarMap.resize();
   if (relocate) {
-    radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: 700 });
+    radarMap.flyTo({ center: [selectedLocation.lon, selectedLocation.lat], zoom: Math.max(radarMap.getZoom(), 8), duration: mapMotionMs(700) });
   }
 }
 
@@ -10365,7 +10399,7 @@ function fitSatelliteExtent(extent, padding = 30) {
   const [west, east, south, north] = extent;
   radarMap.fitBounds(
     [[west, Math.max(-85, south)], [east, Math.min(85, north)]],
-    { padding, duration: 700 }
+    { padding, duration: mapMotionMs(700) }
   );
 }
 

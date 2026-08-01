@@ -251,8 +251,9 @@ function exceedProduct(id, name, qpeFolder, ffgFolder) {
 // The precipitation-type product. Its frames are the PrecipRate folder's, so it
 // scrubs on the 2-minute rate cadence; the flag and wet-bulb fields are paired
 // to each frame by time. `categorical: true` tells the renderer this is a
-// banded field: no smoothing across band edges, no user colour table, and a
-// legend of three ramps rather than one.
+// banded field: band-aware pooling, no user colour table, and a legend of
+// three ramps rather than one. The prepared texture can still receive the same
+// low spatial smoothing used by other MRMS layers.
 function precipTypeProduct() {
   return {
     id: 'PTYPE',

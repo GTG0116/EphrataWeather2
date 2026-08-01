@@ -1,7 +1,7 @@
 :root {
-  --font-sans: "Instrument Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-serif: "Instrument Sans", system-ui, sans-serif;
-  --font-display: "Barlow Condensed", "Instrument Sans", sans-serif;
+  --font-sans: "Manrope", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-serif: "Manrope", system-ui, sans-serif;
+  --font-display: "Sora", "Manrope", system-ui, sans-serif;
   --panel: rgba(255, 255, 255, 0.1);
   --panel-strong: rgba(255, 255, 255, 0.16);
   --panel-soft: rgba(255, 255, 255, 0.07);
@@ -37,7 +37,7 @@
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--accent) 72%, #ffffff 8%) rgba(255, 255, 255, 0.36);
+  scrollbar-color: color-mix(in srgb, var(--accent) 62%, rgba(255,255,255,.35)) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -46,19 +46,36 @@
 }
 
 *::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.11);
-  border-radius: 999px;
+  background: transparent;
 }
 
 *::-webkit-scrollbar-thumb {
-  border: 2px solid rgba(255, 255, 255, 0.34);
+  border: 3px solid transparent;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  background: color-mix(in srgb, var(--accent) 68%, rgba(255,255,255,.35));
+  background-clip: padding-box;
 }
+
+*::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+*::-webkit-scrollbar-corner { background: transparent; }
 
 html,
 body {
   scrollbar-width: none;
+}
+
+html { scroll-behavior: smooth; }
+
+/* The explicit preference mirrors the operating-system media query and also
+   covers canvas/map motion that CSS alone cannot infer. */
+html.reduce-motion { scroll-behavior: auto; }
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.001ms !important;
 }
 
 html::-webkit-scrollbar,
@@ -3159,7 +3176,10 @@ body.modal-open {
   display: grid;
   gap: 14px;
   min-width: 0;
-  overflow: hidden;
+  /* Overflow clipping promoted this entire column into a dark backdrop-filter
+     surface in Chromium, producing a rectangle exactly the size of the day's
+     details. Individual hourly content owns its own clipping instead. */
+  overflow: visible;
 }
 
 .climate-message {
@@ -4417,13 +4437,21 @@ body.modal-open {
 /* The popup element itself carries the width from POPUP_MAX_WIDTH in app.js —
    a viewport-relative box, so a phone never gets one running off the screen —
    and the content simply fills it. */
+.mapboxgl-ctrl,
+.map-frame-scrubber,
+.mrms-legend-box,
+.spc-legend-box {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
 .mapboxgl-popup-content {
   background: rgba(6, 12, 30, 0.96) !important;
   border: 1px solid rgba(255, 255, 255, 0.18) !important;
   border-radius: 16px !important;
   padding: 13px 15px 14px !important;
   color: #f8fbff !important;
-  font-family: "Inter", system-ui, sans-serif !important;
+  font-family: var(--font-display) !important;
   font-size: 0.86rem !important;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255,255,255,0.05) !important;
   backdrop-filter: blur(20px) !important;
