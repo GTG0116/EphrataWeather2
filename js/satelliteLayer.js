@@ -156,6 +156,8 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
     program: null,
     quad: null,
     tex: null,
+    textureWidth: 0,
+    textureHeight: 0,
     has: false,
     pending: null,
     uni: null,
@@ -184,6 +186,8 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       ]) this.u[name] = gl.getUniformLocation(p, name);
       this.quad = gl.createBuffer();
       this.tex = gl.createTexture();
+      this.textureWidth = 0;
+      this.textureHeight = 0;
       if (this.pending) {
         const pending = this.pending;
         this.pending = null;
@@ -242,7 +246,17 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      // Most consecutive frames in a sector share dimensions. Reusing the
+      // allocation avoids a driver-side texture destroy/recreate on every
+      // playback tick; texSubImage2D still uploads every source pixel, so
+      // imagery quality and loading speed are unchanged.
+      if (this.textureWidth === W && this.textureHeight === H) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+        this.textureWidth = W;
+        this.textureHeight = H;
+      }
 
       this.uni = uni;
     },
@@ -318,6 +332,7 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       if (this.quad) gl.deleteBuffer(this.quad);
       if (this.tex) gl.deleteTexture(this.tex);
       this.program = this.quad = this.tex = null;
+      this.textureWidth = this.textureHeight = 0;
       this.gl = null;
     },
   };

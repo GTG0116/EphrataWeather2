@@ -17,9 +17,13 @@ import {
   advectReflectivityStream,
   cropLatLonGrid,
 } from './nowcast.js';
-import { SATELLITES, SECTORS, listScenes, sceneBBox } from './goes.js';
-import { loadSceneAsync, ensureBandsAsync, clearSceneCache } from './satClient.js';
-import { bandsFor, buildRGBA } from './satProducts.js';
+import { SATELLITES, SECTORS, listScenes } from './goes.js';
+import {
+  loadSatelliteFrameAsync,
+  clearSceneCache,
+  cancelInFlightSatelliteDecode,
+} from './satClient.js';
+import { bandsFor } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 
 export const RADAR_PRODUCTS = {
@@ -163,6 +167,12 @@ let radarFrames = [];
 let radarFrameIndex = -1;
 let radarFrameMeta = null;
 let shownRadar = null;
+// Rendering follows a latest-wins queue. A range input can emit several events
+// before one large weather file has decoded; starting all of them at once turns
+// a scrub into competing downloads/decodes. Keep the current job, retain only
+// the newest pending index, and let stale jobs finish quietly into the cache.
+let radarFrameRequest = null;
+let radarFrameDrain = null;
 // How many of `radarFrames` are observations; anything after them is an
 // extrapolated frame appended by the nowcast.
 let radarObservedCount = 0;
@@ -196,10 +206,19 @@ let satelliteSourceKey = null;
 let satelliteProductKey = null;
 let satelliteFrames = [];
 let satelliteFrameIndex = -1;
-let satelliteScene = null;
 let satelliteFrameMeta = null;
 let satelliteDecodeBBox = null;
 const satelliteCache = new Map();
+const satelliteInflight = new Map();
+// Foreground selections and low-priority look-ahead share one drain. Keeping
+// them on the same lane prevents an idle prefetch from starting a second large
+// satellite decode while a user is scrubbing the timeline.
+let satelliteFrameRequest = null;
+let satelliteWarmRequest = null;
+let satelliteActiveWarm = null;
+let satelliteFrameDrain = null;
+let satelliteWarmToken = 0;
+let cancelSatelliteWarmCallback = null;
 
 function emitStatus(kind, phase, detail = '', progress = null) {
   const target = kind === 'satellite' ? satelliteHooks : radarHooks;
@@ -370,7 +389,48 @@ function radarResult() {
   };
 }
 
-async function showRadar(index, sequence = ++radarSequence) {
+function queueRadarFrame(index, sequence = ++radarSequence) {
+  return new Promise((resolve, reject) => {
+    const request = { index, sequence, waiters: [{ resolve, reject }] };
+    // A pending request has not touched the network yet. Fold its callers into
+    // the latest request rather than decoding every intermediate slider value.
+    if (radarFrameRequest) request.waiters.unshift(...radarFrameRequest.waiters);
+    radarFrameRequest = request;
+    if (!radarFrameDrain) drainRadarFrameRequests();
+  });
+}
+
+function drainRadarFrameRequests() {
+  if (radarFrameDrain) return;
+  radarFrameDrain = (async () => {
+    while (radarFrameRequest) {
+      const request = radarFrameRequest;
+      radarFrameRequest = null;
+      let result;
+      let error = null;
+      try {
+        // A newer selection made this request obsolete before it started.
+        result = request.sequence === radarSequence
+          ? await renderRadarFrame(request.index, request.sequence)
+          : radarResult();
+      } catch (caught) {
+        // Never surface an error from a request the user has already replaced.
+        if (request.sequence === radarSequence) error = caught;
+        else result = radarResult();
+      }
+      for (const waiter of request.waiters) {
+        if (error) waiter.reject(error);
+        else waiter.resolve(result);
+      }
+    }
+  })().finally(() => {
+    radarFrameDrain = null;
+    // A request can arrive between the loop's final check and this callback.
+    if (radarFrameRequest) drainRadarFrameRequests();
+  });
+}
+
+async function renderRadarFrame(index, sequence) {
   if (radarMode === 'mrms') return showMrmsRadar(index, sequence);
   const productInfo = RADAR_PRODUCTS[radarProductKey];
   const frame = radarFrames[Math.max(0, Math.min(radarFrames.length - 1, Number(index)))];
@@ -504,9 +564,9 @@ function frameTimeMillis(frame) {
    Background frame warming
    The frame the user asked for is always fetched first and on its own; this
    fills in the rest of the buffer afterwards, newest-backwards, one frame at a
-   time. Every step re-checks `radarSequence`, so switching product, mode, site
-   or tab abandons the warm immediately instead of finishing a download nobody
-   is going to look at.
+   time. Every step re-checks the loaded timeline context, so switching product,
+   mode, site or tab abandons the warm immediately without treating each normal
+   playback tick as a new timeline.
    ────────────────────────────────────────────────────────────────────────── */
 let warmSequence = 0;
 
@@ -514,12 +574,39 @@ function idle(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function radarWarmContext() {
+  const observed = radarFrames.slice(0, radarObservedCount || radarFrames.length);
+  return {
+    mode: radarMode,
+    productKey: radarProductKey,
+    siteId: radarSite?.[0] || '',
+    frameKeys: observed.map((frame) => frame?.key || '').join('|'),
+  };
+}
+
 // Warm the observed frames behind `skipKey` for whichever radar path is active.
 // Fire-and-forget: failures are the same "this frame is unavailable" the
-// foreground path already tolerates.
-function warmRadarFrames(sequence, skipKey) {
+// foreground path already tolerates. Its lifetime deliberately follows the
+// timeline context, not radarSequence: radarSequence changes for each slider or
+// playback selection, and used to stop warming after the first animation frame.
+function warmRadarFrames(context, skipKey) {
   const token = ++warmSequence;
-  const current = () => sequence === radarSequence && token === warmSequence && radarVisible;
+  const current = () => {
+    const now = radarWarmContext();
+    return token === warmSequence &&
+      radarVisible &&
+      now.mode === context.mode &&
+      now.productKey === context.productKey &&
+      now.siteId === context.siteId &&
+      now.frameKeys === context.frameKeys;
+  };
+  const waitForForeground = async () => {
+    while (radarFrameDrain || radarFrameRequest) {
+      await idle(40);
+      if (!current()) return false;
+    }
+    return current();
+  };
   (async () => {
     // Give the frame on screen a clear run at the network first.
     await idle(250);
@@ -538,6 +625,7 @@ function warmRadarFrames(sequence, skipKey) {
       if (!decoderId || !product) return;
       for (const frame of observed) {
         if (!current()) return;
+        if (!await waitForForeground()) return;
         // Silent: warming must never write over the status line describing the
         // frame the user is looking at.
         const grid = await decodedMrmsFrame(frame, decoderId, null, { quiet: true }).catch(() => null);
@@ -555,6 +643,7 @@ function warmRadarFrames(sequence, skipKey) {
 
     for (const frame of observed.slice(0, RADAR_WARM_LIMIT)) {
       if (!current()) return;
+      if (!await waitForForeground()) return;
       // Only the bytes are warmed here — the browser's HTTP cache keeps them, so
       // the decode when the user reaches this frame starts from local data
       // instead of a multi-megabyte download.
@@ -664,7 +753,7 @@ function applyNowcastFrames(frames) {
   // replaced it) — put whatever the timeline now points at on the map so the
   // label and the picture agree.
   if (selectedKey && selectedIndex < 0 && radarFrames.length) {
-    showMrmsRadar(radarFrameIndex).catch((error) =>
+    queueRadarFrame(radarFrameIndex).catch((error) =>
       console.warn('Radar frame unavailable', error));
   }
 }
@@ -1196,65 +1285,68 @@ function satelliteCacheKey(sourceKey, productKey, key, bbox) {
   return `${sourceKey}|${productKey}|${key}|${bbox ? bbox.join(',') : 'full'}`;
 }
 
-async function prepareSatelliteFrame(sourceKey, productKey, frame, bbox, sequence) {
+async function prepareSatelliteFrame(
+  sourceKey,
+  productKey,
+  frame,
+  bbox,
+  sequence,
+  { quiet = false, cache = true, shouldCache = null } = {},
+) {
   const cacheKey = satelliteCacheKey(sourceKey, productKey, frame.key, bbox);
   const cached = lruGet(satelliteCache, cacheKey);
   if (cached) return cached;
+  if (satelliteInflight.has(cacheKey)) return satelliteInflight.get(cacheKey);
   const source = satelliteConfig(sourceKey);
   const decoderId = productDecoderId(productKey);
-  emitStatus('satellite', 'downloading', `Downloading ${source.label}`, 0);
-  let scene = satelliteScene;
-  if (
-    !scene ||
-    scene.key !== frame.key ||
-    scene._sourceKey !== sourceKey ||
-    JSON.stringify(scene._bbox || null) !== JSON.stringify(bbox || null)
-  ) {
-    scene = await loadSceneAsync(
+  const task = (async () => {
+    if (!quiet) emitStatus('satellite', 'downloading', `Downloading ${source.label}`, 0);
+    const rendered = await loadSatelliteFrameAsync(
       source.satKey,
       source.sectorKey,
       frame.key,
       bandsFor(decoderId),
+      decoderId,
       (progress) => {
-        if (sequence === satelliteSequence)
+        if (!quiet && sequence === satelliteSequence)
           emitStatus('satellite', 'processing', `Processing ${source.label}`, progress);
       },
-      bbox
+      bbox,
+      { cache },
     );
-    scene._sourceKey = sourceKey;
-  } else {
-    await ensureBandsAsync(scene, source.satKey, source.sectorKey, bandsFor(decoderId));
-  }
-  const rgba = buildRGBA(scene, decoderId, { enhanceIR: true });
-  let visibleSamples = 0;
-  let maxSample = 0;
-  const sampleStride = Math.max(4, Math.floor(rgba.length / (4 * 4096)) * 4);
-  for (let offset = 3; offset < rgba.length; offset += sampleStride) {
-    if (rgba[offset] > 0) {
-      visibleSamples++;
-      maxSample = Math.max(maxSample, rgba[offset - 3], rgba[offset - 2], rgba[offset - 1]);
+    const { meta, rgba } = rendered;
+    let visibleSamples = 0;
+    let maxSample = 0;
+    const sampleStride = Math.max(4, Math.floor(rgba.length / (4 * 4096)) * 4);
+    for (let offset = 3; offset < rgba.length; offset += sampleStride) {
+      if (rgba[offset] > 0) {
+        visibleSamples++;
+        maxSample = Math.max(maxSample, rgba[offset - 3], rgba[offset - 2], rgba[offset - 1]);
+      }
     }
-  }
-  if (!visibleSamples) throw new Error(`${source.label} decoded without any visible pixels`);
-  const meta = {
-    width: scene.width,
-    height: scene.height,
-    xScale: scene.xScale,
-    xOffset: scene.xOffset,
-    yScale: scene.yScale,
-    yOffset: scene.yOffset,
-    proj: scene.proj,
-  };
-  const payload = {
-    scene,
-    meta,
-    rgba,
-    bbox: bbox || sceneBBox(scene),
-    visibleSamples,
-    maxSample,
-  };
-  lruSet(satelliteCache, cacheKey, payload, SATELLITE_CACHE_MAX);
-  return payload;
+    if (!visibleSamples) throw new Error(`${source.label} decoded without any visible pixels`);
+    const payload = {
+      meta,
+      rgba,
+      bbox: bbox || rendered.bbox,
+      visibleSamples,
+      maxSample,
+    };
+    // A look-ahead may finish after its source/product has been replaced. Its
+    // pixels are still a valid result for any foreground caller sharing this
+    // request, but must not displace a newer active image in the LRU.
+    if (!shouldCache || shouldCache()) {
+      lruSet(satelliteCache, cacheKey, payload, SATELLITE_CACHE_MAX);
+    }
+    return payload;
+  })();
+  satelliteInflight.set(cacheKey, task);
+  task.finally(() => {
+    // A canceled warm can be replaced by a new foreground request for the same
+    // frame. Do not let the older task erase that newer in-flight entry.
+    if (satelliteInflight.get(cacheKey) === task) satelliteInflight.delete(cacheKey);
+  }).catch(() => {});
+  return task;
 }
 
 function satelliteResult() {
@@ -1267,20 +1359,189 @@ function satelliteResult() {
   };
 }
 
-async function showSatellite(index, sequence = ++satelliteSequence) {
+function cancelSatelliteWarm() {
+  satelliteWarmToken++;
+  // A queued warm job has not started decoding yet, so drop it immediately.
+  // An already-running warm job is allowed to finish on the shared lane; its
+  // token makes its output ineligible for the cache after cancellation.
+  satelliteWarmRequest = null;
+  if (cancelSatelliteWarmCallback) {
+    cancelSatelliteWarmCallback();
+    cancelSatelliteWarmCallback = null;
+  }
+}
+
+function scheduleSatelliteLookAhead(index) {
+  cancelSatelliteWarm();
+  // A constrained device intentionally has room for only the visible RGBA
+  // image. Do not evict that image just to stage a successor; the foreground
+  // decode remains the better tradeoff there.
+  if (satelliteFrames.length < 2 || SATELLITE_CACHE_MAX < 2) return;
+  const token = satelliteWarmToken;
+  const sourceKey = satelliteSourceKey;
+  const productKey = satelliteProductKey;
+  const frameKeys = satelliteFrames.map((frame) => frame?.key || '').join('|');
+  const target = satelliteFrames[(index + 1) % satelliteFrames.length];
+  if (!target) return;
+
+  const current = () =>
+    token === satelliteWarmToken &&
+    satelliteVisible &&
+    satelliteSourceKey === sourceKey &&
+    satelliteProductKey === productKey &&
+    satelliteFrameIndex === index &&
+    satelliteFrames.map((frame) => frame?.key || '').join('|') === frameKeys;
+  const run = () => {
+    cancelSatelliteWarmCallback = null;
+    if (!current()) return;
+    // Retain the visible frame and exactly one successor in the existing LRU.
+    // That makes a looping animation smooth without increasing the timeline or
+    // keeping all ten full-resolution RGBA images resident at once.
+    queueSatelliteWarm({
+      sourceKey,
+      productKey,
+      target,
+      bbox: satelliteDecodeBBox,
+      sequence: satelliteSequence,
+      isCurrent: current,
+    });
+  };
+
+  // Let the foreground image paint before touching the next large source file.
+  // `requestIdleCallback` naturally gives panning, zooming and input priority;
+  // the bounded timeout still warms a frame on browsers without idle callbacks.
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(run, { timeout: 1000 });
+    cancelSatelliteWarmCallback = () => {
+      if (typeof cancelIdleCallback === 'function') cancelIdleCallback(id);
+    };
+  } else {
+    const id = setTimeout(run, 350);
+    cancelSatelliteWarmCallback = () => clearTimeout(id);
+  }
+}
+
+function queueSatelliteWarm(request) {
+  if (!request.isCurrent()) return;
+  // A later displayed frame supersedes any not-yet-started look-ahead. The
+  // foreground queue is always taken first by the shared drain below.
+  satelliteWarmRequest = request;
+  if (!satelliteFrameDrain) drainSatelliteFrameRequests();
+}
+
+function preemptActiveSatelliteWarm() {
+  const activeWarm = satelliteActiveWarm;
+  const activeWarmKey = activeWarm && satelliteCacheKey(
+    activeWarm.sourceKey,
+    activeWarm.productKey,
+    activeWarm.target.key,
+    activeWarm.bbox,
+  );
+  const activeWarmTask = activeWarmKey ? satelliteInflight.get(activeWarmKey) : null;
+  cancelSatelliteWarm();
+  // Only an idle look-ahead may be preempted. The shared drain never marks a
+  // foreground render as `satelliteActiveWarm`, so a user-requested frame is
+  // never canceled by another scrub event.
+  if (activeWarm && cancelInFlightSatelliteDecode() &&
+      satelliteInflight.get(activeWarmKey) === activeWarmTask) {
+    // Remove the rejected warm promise now so an immediately-following request
+    // for the same frame starts fresh instead of inheriting that cancellation.
+    // The task's own identity check in prepareSatelliteFrame cannot erase a
+    // replacement entry later.
+    satelliteInflight.delete(activeWarmKey);
+  }
+}
+
+function queueSatelliteFrame(index, sequence = ++satelliteSequence) {
+  preemptActiveSatelliteWarm();
+  return new Promise((resolve, reject) => {
+    const request = { index, sequence, waiters: [{ resolve, reject }] };
+    if (satelliteFrameRequest) request.waiters.unshift(...satelliteFrameRequest.waiters);
+    satelliteFrameRequest = request;
+    if (!satelliteFrameDrain) drainSatelliteFrameRequests();
+  });
+}
+
+function drainSatelliteFrameRequests() {
+  if (satelliteFrameDrain) return;
+  satelliteFrameDrain = (async () => {
+    while (satelliteFrameRequest || satelliteWarmRequest) {
+      // A user-selected frame always wins over idle prefetch work.
+      if (satelliteFrameRequest) {
+        const request = satelliteFrameRequest;
+        satelliteFrameRequest = null;
+        let result;
+        let error = null;
+        try {
+          result = request.sequence === satelliteSequence
+            ? await renderSatelliteFrame(request.index, request.sequence)
+            : satelliteResult();
+        } catch (caught) {
+          if (request.sequence === satelliteSequence) error = caught;
+          else result = satelliteResult();
+        }
+        for (const waiter of request.waiters) {
+          if (error) waiter.reject(error);
+          else waiter.resolve(result);
+        }
+        continue;
+      }
+
+      const warm = satelliteWarmRequest;
+      satelliteWarmRequest = null;
+      if (!warm?.isCurrent()) continue;
+      satelliteActiveWarm = warm;
+      try {
+        await prepareSatelliteFrame(
+          warm.sourceKey,
+          warm.productKey,
+          warm.target,
+          warm.bbox,
+          warm.sequence,
+          { quiet: true, cache: false, shouldCache: warm.isCurrent },
+        );
+      } catch {
+        // Look-ahead is optional. Foreground requests surface their own errors.
+      } finally {
+        if (satelliteActiveWarm === warm) satelliteActiveWarm = null;
+      }
+    }
+  })().finally(() => {
+    satelliteFrameDrain = null;
+    if (satelliteFrameRequest || satelliteWarmRequest) drainSatelliteFrameRequests();
+  });
+}
+
+async function renderSatelliteFrame(index, sequence) {
   const frame =
     satelliteFrames[Math.max(0, Math.min(satelliteFrames.length - 1, Number(index)))];
   if (!frame) throw new Error('No raw satellite frame is available');
   satelliteFrameIndex = satelliteFrames.indexOf(frame);
+  const sourceKey = satelliteSourceKey;
+  const productKey = satelliteProductKey;
+  const cacheStillCurrent = () =>
+    sequence === satelliteSequence &&
+    satelliteVisible &&
+    satelliteSourceKey === sourceKey &&
+    satelliteProductKey === productKey;
   const payload = await prepareSatelliteFrame(
-    satelliteSourceKey,
-    satelliteProductKey,
+    sourceKey,
+    productKey,
     frame,
     satelliteDecodeBBox,
-    sequence
+    sequence,
+    { shouldCache: cacheStillCurrent },
   );
   if (sequence !== satelliteSequence) return satelliteResult();
-  satelliteScene = payload.scene;
+  // A foreground caller can have joined an in-flight look-ahead whose original
+  // warm context was superseded. Promote this now-visible result back into the
+  // LRU, while stale background-only results remain discarded above.
+  lruSet(
+    satelliteCache,
+    satelliteCacheKey(satelliteSourceKey, satelliteProductKey, frame.key, satelliteDecodeBBox),
+    payload,
+    SATELLITE_CACHE_MAX,
+  );
   satelliteFrameMeta = {
     key: frame.key,
     time: frame.time,
@@ -1301,6 +1562,7 @@ async function showSatellite(index, sequence = ++satelliteSequence) {
     1
   );
   satelliteHooks.onFrame?.({ kind: 'satellite', ...satelliteResult() });
+  scheduleSatelliteLookAhead(satelliteFrameIndex);
   return satelliteResult();
 }
 
@@ -1410,7 +1672,7 @@ export async function loadRadar({
     const targetIndex = contextChanged || resetToLatest || radarFrameIndex < 0
       ? latestObservedIndex
       : Math.min(radarFrameIndex, radarFrames.length - 1);
-    const shown = await showMrmsRadar(targetIndex, sequence);
+    const shown = await queueRadarFrame(targetIndex, sequence);
     // Deliberately not awaited: the observed radar is already on the map, and the
     // extrapolated frames append themselves to the timeline as they finish.
     if (product.nowcast && sequence === radarSequence) {
@@ -1418,7 +1680,7 @@ export async function loadRadar({
     }
     // Likewise not awaited — the rest of the loop fills in behind the frame
     // that is already drawn.
-    if (sequence === radarSequence) warmRadarFrames(sequence, radarFrames[targetIndex]?.key);
+    if (sequence === radarSequence) warmRadarFrames(radarWarmContext(), radarFrames[targetIndex]?.key);
     return shown;
   }
 
@@ -1453,13 +1715,13 @@ export async function loadRadar({
     : (contextChanged || siteChanged || resetToLatest || radarFrameIndex < 0
       ? radarFrames.length - 1
       : Math.min(radarFrameIndex, radarFrames.length - 1));
-  const shown = await showRadar(targetIndex, sequence);
-  if (sequence === radarSequence) warmRadarFrames(sequence, radarFrames[targetIndex]?.key);
+  const shown = await queueRadarFrame(targetIndex, sequence);
+  if (sequence === radarSequence) warmRadarFrames(radarWarmContext(), radarFrames[targetIndex]?.key);
   return shown;
 }
 
 export function showRadarFrame(index) {
-  return showRadar(index);
+  return queueRadarFrame(index);
 }
 
 /**
@@ -1503,6 +1765,7 @@ export async function loadSatellite({
   productDecoderId(productKey);
   const sourceChanged = sourceKey !== satelliteSourceKey;
   const productChanged = productKey !== satelliteProductKey;
+  if (sourceChanged || productChanged) preemptActiveSatelliteWarm();
   satelliteSourceKey = sourceKey;
   satelliteProductKey = productKey;
   satelliteDecodeBBox = normalizeDecodeBBox(sourceKey, location);
@@ -1512,7 +1775,6 @@ export async function loadSatellite({
     satelliteFrames = [];
     satelliteFrameIndex = -1;
     satelliteFrameMeta = null;
-    satelliteScene = null;
     satelliteHooks.onFrame?.({ kind: 'satellite', ...satelliteResult() });
   }
   if (sourceChanged || productChanged || !satelliteFrames.length) {
@@ -1523,17 +1785,16 @@ export async function loadSatellite({
     if (sequence !== satelliteSequence) return satelliteResult();
     satelliteFrames = frames.slice(-MAX_SATELLITE_FRAMES);
     satelliteFrameIndex = satelliteFrames.length - 1;
-    satelliteScene = null;
   }
   if (!satelliteFrames.length) throw new Error(`No recent ${source.label} scenes were found`);
   const targetIndex = sourceChanged || productChanged || satelliteFrameIndex < 0
     ? satelliteFrames.length - 1
     : Math.min(satelliteFrameIndex, satelliteFrames.length - 1);
-  return showSatellite(targetIndex, sequence);
+  return queueSatelliteFrame(targetIndex, sequence);
 }
 
 export function showSatelliteFrame(index) {
-  return showSatellite(index);
+  return queueSatelliteFrame(index);
 }
 
 export function setOpacity(value) {
@@ -1550,7 +1811,10 @@ export function setVisibility({ radar = radarVisible, satellite = satelliteVisib
     radarSequence++;
     invalidateNowcastBuild();
   }
-  if (satelliteVisible && !nextSatelliteVisible) satelliteSequence++;
+  if (satelliteVisible && !nextSatelliteVisible) {
+    satelliteSequence++;
+    cancelSatelliteWarm();
+  }
   radarVisible = nextRadarVisible;
   satelliteVisible = nextSatelliteVisible;
   if (!radarVisible) {
@@ -1727,8 +1991,8 @@ export function radarSites() {
 }
 
 export function clearSatelliteDecoderCache() {
+  cancelSatelliteWarm();
   satelliteCache.clear();
-  satelliteScene = null;
   clearSceneCache();
 }
 

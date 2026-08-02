@@ -138,6 +138,16 @@ const BASEMAP_STYLES = [
   { id: "streets-v12", label: "Streets"   },
   { id: "outdoors-v12",label: "Outdoors"  },
 ];
+
+// Basemap labels are rendered inside Mapbox's WebGL canvas, so they do not
+// inherit the page's CSS fonts. Manrope is the app's primary family and is a
+// Mapbox-hosted glyph family; Arial Unicode keeps place names legible when
+// Manrope does not include a character in the active map language.
+const MAP_LABEL_FONT_STACKS = {
+  regular: ["Manrope Regular", "Arial Unicode MS Regular"],
+  medium:  ["Manrope Medium", "Arial Unicode MS Regular"],
+  bold:    ["Manrope Bold", "Arial Unicode MS Bold"],
+};
 const DROUGHT_URLS = [
   "https://www.ncei.noaa.gov/pub/data/nidis/geojson/us/usdm/USDM-current.geojson",
   "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Drought_Monitor/FeatureServer/0/query?where=1=1&outFields=DM&outSR=4326&f=geojson",
@@ -264,6 +274,30 @@ const WMO_CODES = {
   85: "Light snow showers", 86: "Heavy snow showers",
   95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail",
 };
+
+// Open-Meteo occasionally carries a frozen-precipitation code through a warm
+// frontal transition.  A code for freezing rain on an 80° afternoon is not
+// useful forecast wording, so only retain the frozen type when the forecast
+// air temperature is cold enough for it to be physically plausible.
+const FREEZING_PRECIP_MAX_TEMP_F = 38;
+const WARM_WEATHER_EQUIVALENTS = {
+  48: 45, // freezing fog -> fog
+  56: 51, // light freezing drizzle -> light drizzle
+  57: 53, // freezing drizzle -> drizzle
+  66: 61, // light freezing rain -> light rain
+  67: 65, // heavy freezing rain -> heavy rain
+};
+
+function normalizeWmoWeatherCode(code, temperatureF = null) {
+  if (code == null) return code;
+  const numericCode = Number(code);
+  if (!Number.isFinite(numericCode)) return code;
+  const temp = Number(temperatureF);
+  if (Number.isFinite(temp) && temp > FREEZING_PRECIP_MAX_TEMP_F) {
+    return WARM_WEATHER_EQUIVALENTS[numericCode] ?? numericCode;
+  }
+  return numericCode;
+}
 
 const HIST_MIN_YEAR = 1940;
 const HIST_ARCHIVE_DELAY = 5;
@@ -1461,8 +1495,8 @@ function townName(location = selectedLocation) {
   return (location.name || "Local").split(",")[0].trim();
 }
 
-function wmoDescription(code) {
-  return WMO_CODES[code] || "Unknown";
+function wmoDescription(code, temperatureF = null) {
+  return WMO_CODES[normalizeWmoWeatherCode(code, temperatureF)] || "Unknown";
 }
 
 function windDirLabel(deg) {
@@ -2810,6 +2844,30 @@ function precipNoun(code) {
 
 // Likelihood expressed as a noun phrase — "scattered rain", "a stray shower" —
 // rather than a bare percentage. The exact number is already on the chip below.
+// A sky code is not the same thing as a dry forecast. When the model gives a
+// strong chance of precipitation but leaves the WMO condition at "Overcast",
+// make the likely wet period the visible forecast condition instead.
+const LIKELY_PRECIP_CHANCE = 60;
+
+function hasLikelyPrecipitation(pop) {
+  const chance = Number(pop);
+  return Number.isFinite(chance) && chance >= LIKELY_PRECIP_CHANCE;
+}
+
+function periodPrecipNoun(code, precipWindow = null) {
+  const windowCode = precipWindow?.code;
+  return precipNoun(isWetCode(windowCode) ? windowCode : code);
+}
+
+function precipitationChancePhrase(pop, noun = "rain") {
+  return `a ${Number(pop) >= 80 ? "high" : "good"} chance of ${noun}`;
+}
+
+function forecastConditionDescription(code, pop, precipWindow = null) {
+  if (isWetCode(code) || !hasLikelyPrecipitation(pop)) return wmoDescription(code);
+  return `Chance of ${periodPrecipNoun(code, precipWindow)}`;
+}
+
 function precipPhrase(pop, noun = "rain") {
   if (pop == null) return null;
   if (pop >= 80) return `steady ${noun}`;
@@ -2844,7 +2902,11 @@ function nowSummary(hours, tz = selectedLocation.timezone, observed = null) {
   const window = next[0].isDaytime ? "through the rest of the day" : "through the night";
 
   const parts = [];
-  const wetAt = next.findIndex(h => isWetCode(h.weatherCode) && (h.probabilityOfPrecipitation?.value ?? 0) >= PRECIP_HOUR_THRESHOLD);
+  const wetAt = next.findIndex(h => {
+    const pop = h.probabilityOfPrecipitation?.value ?? 0;
+    return (isWetCode(h.weatherCode) && pop >= PRECIP_HOUR_THRESHOLD) ||
+      (!isWetCode(h.weatherCode) && hasLikelyPrecipitation(pop));
+  });
   const wet = wetAt >= 0 ? next[wetAt] : null;
   // The station's own report wins for what is happening right now; the model
   // only gets to say what happens next.
@@ -2856,7 +2918,9 @@ function nowSummary(hours, tz = selectedLocation.timezone, observed = null) {
     // How long the wet stretch that's already underway lasts.
     let lastWet = -1;
     for (let i = 0; i < next.length; i++) {
-      if (isWetCode(next[i].weatherCode) && (next[i].probabilityOfPrecipitation?.value ?? 0) >= PRECIP_HOUR_THRESHOLD) lastWet = i;
+      const pop = next[i].probabilityOfPrecipitation?.value ?? 0;
+      if ((isWetCode(next[i].weatherCode) && pop >= PRECIP_HOUR_THRESHOLD) ||
+          (!isWetCode(next[i].weatherCode) && hasLikelyPrecipitation(pop))) lastWet = i;
       else break;
     }
     const easesAt = lastWet >= 0 && lastWet < next.length - 1 ? clockLabel(next[lastWet].startTime, tz) : null;
@@ -2864,11 +2928,16 @@ function nowSummary(hours, tz = selectedLocation.timezone, observed = null) {
       ? `${noun[0].toUpperCase()}${noun.slice(1)} right now, easing off around ${easesAt}`
       : `${noun[0].toUpperCase()}${noun.slice(1)} right now and sticking around a while`);
   } else if (wet) {
-    const noun = precipNoun(wet.weatherCode);
+    const noun = periodPrecipNoun(wet.weatherCode);
     const when = clockLabel(wet.startTime, tz) || dayPartLabel(new Date(wet.startTime), tz);
-    parts.push(wetAt === 0
-      ? `${noun[0].toUpperCase()}${noun.slice(1)} starting up now`
-      : `${noun[0].toUpperCase()}${noun.slice(1)} moving in around ${when}`);
+    if (isWetCode(wet.weatherCode)) {
+      parts.push(wetAt === 0
+        ? `${noun[0].toUpperCase()}${noun.slice(1)} starting up now`
+        : `${noun[0].toUpperCase()}${noun.slice(1)} moving in around ${when}`);
+    } else {
+      const chance = capitalize(precipitationChancePhrase(wet.probabilityOfPrecipitation?.value, noun));
+      parts.push(wetAt === 0 ? `${chance} now` : `${chance} around ${when}`);
+    }
   } else if (observedObscured) {
     parts.push(`${observed} right now, and quiet otherwise ${window}`);
   } else {
@@ -3095,7 +3164,9 @@ function precipWindowFor(idxs, hi, times, nowSec) {
     hours: wet.length,
     periodHours: idxs.length,
     peakPop: pops.length ? Math.max(...pops) : null,
-    code: dominantWmoCode(wet.map(i => hi.weather_code?.[i])),
+    code: dominantWmoCode(wet.map(i => normalizeWmoWeatherCode(
+      hi.weather_code?.[i], hi.temperature_2m?.[i],
+    ))),
   };
 }
 
@@ -3117,16 +3188,18 @@ function buildForecastSeries(data, tzHint) {
 
   const hourly = times.slice(startIdx, startIdx + 48).map((t, k) => {
     const i = startIdx + k;
+    const weatherCode = normalizeWmoWeatherCode(hi.weather_code?.[i], hi.temperature_2m?.[i]);
+    const pop = hi.precipitation_probability?.[i] ?? null;
     return {
       startTime: new Date(t * 1000).toISOString(),
       temperature: round(hi.temperature_2m?.[i]),
       apparentTemperature: round(hi.apparent_temperature?.[i]),
-      shortForecast: wmoDescription(hi.weather_code?.[i]),
-      weatherCode: hi.weather_code?.[i] ?? null,
+      shortForecast: forecastConditionDescription(weatherCode, pop),
+      weatherCode: weatherCode ?? null,
       windSpeed: hi.wind_speed_10m?.[i] != null ? `${Math.round(hi.wind_speed_10m[i])} mph` : null,
       windGust: hi.wind_gusts_10m?.[i] != null ? `${Math.round(hi.wind_gusts_10m[i])} mph` : null,
       windDirection: windDirLabel(hi.wind_direction_10m?.[i]),
-      probabilityOfPrecipitation: { value: hi.precipitation_probability?.[i] ?? null },
+      probabilityOfPrecipitation: { value: pop },
       relativeHumidity: { value: hi.relative_humidity_2m?.[i] ?? null },
       precipAmount: hi.precipitation?.[i] ?? null,
       snowAmount: hi.snowfall?.[i] ?? null,
@@ -3170,21 +3243,27 @@ function buildForecastSeries(data, tzHint) {
         ? pick(idxs, hi.temperature_2m, vals => (isDaytime ? Math.max(...vals) : Math.min(...vals)))
         : fallbackTemp;
       const code = idxs.length
-        ? dominantWmoCode(idxs.map(i => hi.weather_code?.[i]))
-        : di.weather_code?.[index];
+        ? dominantWmoCode(idxs.map(i => normalizeWmoWeatherCode(
+          hi.weather_code?.[i], hi.temperature_2m?.[i],
+        )))
+        : normalizeWmoWeatherCode(di.weather_code?.[index], temperature);
       const windMax = idxs.length ? pick(idxs, hi.wind_speed_10m, vals => Math.max(...vals)) : di.wind_speed_10m_max?.[index];
       const gustMax = idxs.length ? pick(idxs, hi.wind_gusts_10m, vals => Math.max(...vals)) : di.wind_gusts_10m_max?.[index];
       const pop = idxs.length ? pick(idxs, hi.precipitation_probability, vals => Math.max(...vals)) : di.precipitation_probability_max?.[index];
       const direction = idxs.length
         ? meanWindDirection(idxs.map(i => hi.wind_direction_10m?.[i]))
         : di.wind_direction_10m_dominant?.[index];
+      // Build this before choosing the visible condition so a high-PoP sky
+      // period can use the forecast precipitation type and timing.
+      const precipWindow = precipWindowFor(idxs, hi, times, nowSec);
+      const shortForecast = forecastConditionDescription(code, pop, precipWindow);
 
       daily.push({
         startTime: new Date((idxs.length ? times[idxs[0]] : dayStart) * 1000).toISOString(),
         name: index === 0 ? (isDaytime ? "Today" : "Tonight") : (isDaytime ? weekday : `${weekday} Night`),
         isDaytime,
         temperature: round(temperature),
-        shortForecast: wmoDescription(code),
+        shortForecast,
         weatherCode: code ?? null,
         detailedForecast: "",
         windSpeed: windMax != null ? `${Math.round(windMax)} mph` : null,
@@ -3199,7 +3278,7 @@ function buildForecastSeries(data, tzHint) {
         // Computed here, against the full 8-day hourly arrays, rather than at
         // render time against the 48-hour slice — otherwise days 3–7 could
         // never say when their rain arrives.
-        precipWindow: precipWindowFor(idxs, hi, times, nowSec),
+        precipWindow,
       });
     });
   });
@@ -3371,7 +3450,7 @@ async function openMeteoWeatherPayload() {
   const hi = data.hourly || {};
 
   const cur = data.current || {};
-  const condition = wmoDescription(cur.weather_code);
+  const condition = wmoDescription(cur.weather_code, cur.temperature_2m);
   const firstDay = daily[0] || {};
   const visibilityMeters = hi.visibility?.[startIdx];
   const visibility = metersToMiles(visibilityMeters);
@@ -5716,6 +5795,8 @@ function generateDailySummary(day, precip, night, options = {}) {
   const sky = skyPhrase(day.weatherCode, true);
   const adjective = skyAdjective(day.weatherCode, true);
   const feel = temperatureFeel(high);
+  const wet = isWetCode(day.weatherCode);
+  const likelyPrecip = !wet && hasLikelyPrecipitation(pop);
   const highClause = high != null
     ? pickPhrase(HIGH_CLAUSES, "high", v)(`${uTempNum(high)}${tempUnit()}`)
     : null;
@@ -5723,10 +5804,12 @@ function generateDailySummary(day, precip, night, options = {}) {
   const sentences = [];
 
   // Opening line: the sky and the high, joined the way you'd say it aloud.
-  if (isWetCode(day.weatherCode)) {
-    const noun = precipNoun(day.weatherCode);
+  if (wet || likelyPrecip) {
+    const noun = periodPrecipNoun(day.weatherCode, day.precipWindow);
     const timing = wetSpellTiming(day, tz);
-    const lead = capitalize(day.weatherCode >= 95 ? "thunderstorms" : noun) + (timing ? ` ${timing}` : "");
+    const lead = wet
+      ? capitalize(day.weatherCode >= 95 ? "thunderstorms" : noun) + (timing ? ` ${timing}` : "")
+      : capitalize(precipitationChancePhrase(pop, noun)) + (timing ? ` ${timing}` : "");
     sentences.push(highClause
       ? pickPhrase(WET_OPENERS, "wet", v)({ lead, highClause })
       : `${lead}.`);
@@ -5744,8 +5827,11 @@ function generateDailySummary(day, precip, night, options = {}) {
   // noun phrase so it slots into one "Watch for …" frame without the grammar
   // going sideways when two of them land in the same day.
   const watchFor = [];
-  if (!isWetCode(day.weatherCode)) {
-    const phrase = precipPhrase(pop, precipNoun(night && isWetCode(night.weatherCode) ? night.weatherCode : day.weatherCode));
+  if (!wet && !likelyPrecip) {
+    const phrase = precipPhrase(pop, periodPrecipNoun(
+      night && isWetCode(night.weatherCode) ? night.weatherCode : day.weatherCode,
+      day.precipWindow,
+    ));
     if (phrase) {
       const timing = wetSpellTiming(day, tz);
       watchFor.push(`${phrase}${timing ? ` ${timing}` : ""}`);
@@ -5809,14 +5895,20 @@ function generateNightSummary(night, precip, variant = 0) {
   const low = night.temperature;
   const pop = precip ?? night.probabilityOfPrecipitation?.value;
   const wet = isWetCode(night.weatherCode);
+  const likelyPrecip = !wet && hasLikelyPrecipitation(pop);
   const lowText = low != null ? `${uTempNum(low)}${tempUnit()}` : null;
   const bits = [];
 
   if (wet) {
-    const noun = precipNoun(night.weatherCode);
+    const noun = periodPrecipNoun(night.weatherCode, night.precipWindow);
     bits.push(lowText
       ? pickPhrase(NIGHT_WET_FRAMES, "nightwet", v)({ noun, lowText })
       : `Overnight ${noun}`);
+  } else if (likelyPrecip) {
+    const chance = capitalize(precipitationChancePhrase(pop, periodPrecipNoun(night.weatherCode, night.precipWindow)));
+    bits.push(lowText
+      ? `${chance} overnight, with a low around ${lowText}`
+      : `${chance} overnight`);
   } else {
     const sky = skyPhrase(night.weatherCode, false);
     if (sky && lowText)   bits.push(pickPhrase(NIGHT_DRY_FRAMES, "nightdry", v)({ sky, lowText }));
@@ -5825,8 +5917,8 @@ function generateNightSummary(night, precip, variant = 0) {
     else                  bits.push("Quiet overnight");
   }
 
-  if (!wet) {
-    const phrase = precipPhrase(pop, precipNoun(night.weatherCode));
+  if (!wet && !likelyPrecip) {
+    const phrase = precipPhrase(pop, periodPrecipNoun(night.weatherCode, night.precipWindow));
     if (phrase) bits.push(pickPhrase(NIGHT_LATE_FRAMES, "nightlate", v)(phrase));
   }
   return `${bits.join(" ")}.`;
@@ -7893,6 +7985,7 @@ function setBasemap(styleId) {
   radarMap.once("style.load", () => {
     mapLoaded = true;
     radarMap.setProjection("mercator"); // keep flat projection across basemap swaps
+    applyBasemapLabelTypography();
     // Clear per-layer wiring flags so cursor handlers are re-added
     popupWiredLayers.delete("spc"); popupWiredLayers.delete("fire");
     popupWiredLayers.delete("wpc-rain"); popupWiredLayers.delete("all-alerts");
@@ -7952,6 +8045,7 @@ function initMap() {
   // basemap swap runs its own handler instead of two.
   radarMap.once("style.load", () => {
     mapLoaded = true;
+    applyBasemapLabelTypography();
     drawRadar(true);
     wireUnifiedClickHandler();
     wireInspectTool();
@@ -8630,6 +8724,29 @@ function applyBoundarySettings() {
   setLayerVisible("admin-country-line", mapSettings.countryBorders);
   applyBoundaryTheme();
   applyPlaceLabelSetting();
+}
+
+function basemapLabelFontStack(layer) {
+  const original = layer.layout?.["text-font"];
+  const originalText = Array.isArray(original)
+    ? JSON.stringify(original).toLowerCase()
+    : String(original || "").toLowerCase();
+  if (/bold|black|heavy|semibold|demi/.test(originalText)) return MAP_LABEL_FONT_STACKS.bold;
+  if (/medium/.test(originalText)) return MAP_LABEL_FONT_STACKS.medium;
+  return MAP_LABEL_FONT_STACKS.regular;
+}
+
+// Apply this while a fresh basemap style is loaded, before weather overlays add
+// their own symbol layers. That makes roads, water, cities, and other native
+// map labels share the app's typography without changing any overlay behavior.
+function applyBasemapLabelTypography() {
+  if (!radarMap || !radarMap.getStyle()) return;
+  for (const layer of radarMap.getStyle().layers || []) {
+    if (layer.type !== "symbol" || layer.layout?.["text-field"] == null) continue;
+    try {
+      radarMap.setLayoutProperty(layer.id, "text-font", basemapLabelFontStack(layer));
+    } catch {}
+  }
 }
 
 // Town names at the basemap's own size are set for reading a street map on a

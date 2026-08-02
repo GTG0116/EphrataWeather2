@@ -14,7 +14,8 @@
 // ensureBands only ever *adds* missing bands and never re-reads the ones already
 // sent.
 
-import { loadScene, ensureBands, bboxKey } from './goes.js';
+import { loadScene, ensureBands, bboxKey, sceneBBox } from './goes.js';
+import { buildRGBA } from './satProducts.js';
 
 // LRU of decoded scenes, so ensureBands can add bands without a re-download while
 // keeping memory bounded (each cached GOES scene pins its downloaded file bytes).
@@ -69,6 +70,48 @@ function slimScene(scene, bands, maxDim = 0) {
   return { slim, transfer };
 }
 
+function workerSceneFor(msg) {
+  // Look-ahead work deliberately does not touch the one cached source scene:
+  // it should make playback smoother without evicting the image a user may
+  // immediately recolour into another satellite product.
+  if (msg.cache === false) return null;
+  const scene = scenes.get(msg.key);
+  if (scene && (scene._bboxKey || '') !== bboxKey(msg.bbox)) return null;
+  return scene || null;
+}
+
+async function loadFrameScene(msg, progress) {
+  let scene = workerSceneFor(msg);
+  if (!scene) {
+    scene = await loadScene(
+      msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim, msg.bbox,
+    );
+    if (msg.cache !== false && cacheEpoch === msg.epoch) remember(msg.key, scene);
+    return scene;
+  }
+
+  // A previous response can have transferred a channel away from this worker,
+  // leaving a zero-length typed array behind. Treat it as absent so a later
+  // colour product always rereads the band instead of producing a blank frame.
+  for (const band of msg.bands) {
+    if (scene.channels[band] && !scene.channels[band].length) delete scene.channels[band];
+  }
+  await ensureBands(scene, msg.bands);
+  return scene;
+}
+
+function frameMeta(scene) {
+  return {
+    width: scene.width,
+    height: scene.height,
+    xScale: scene.xScale,
+    xOffset: scene.xOffset,
+    yScale: scene.yScale,
+    yOffset: scene.yOffset,
+    proj: scene.proj,
+  };
+}
+
 self.onmessage = async (e) => {
   const msg = e.data;
   const { id, type } = msg;
@@ -95,6 +138,23 @@ self.onmessage = async (e) => {
       if (epoch === cacheEpoch) remember(msg.key, scene);
       const { slim, transfer } = slimScene(scene, msg.bands, msg.maxDim);
       self.postMessage({ id, ok: true, scene: slim }, transfer);
+      return;
+    }
+    if (type === 'frame') {
+      const epoch = cacheEpoch;
+      const scene = await loadFrameScene({ ...msg, epoch }, progress);
+      // Build the GPU-ready pixels here as well. On a full-disk image this is a
+      // multi-million-pixel pass; doing it in the worker avoids a long page-thread
+      // task between otherwise smooth Mapbox frames.
+      const { slim } = slimScene(scene, msg.bands, msg.maxDim);
+      const rgba = buildRGBA(slim, msg.productId, { enhanceIR: true });
+      self.postMessage({
+        id,
+        ok: true,
+        meta: frameMeta(slim),
+        bbox: sceneBBox(slim),
+        rgba,
+      }, [rgba.buffer]);
       return;
     }
     if (type === 'ensure') {

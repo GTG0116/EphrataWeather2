@@ -234,6 +234,8 @@ export function createRadarLayer(id = 'radar') {
     quad: null,
     dataTex: null,
     lutTex: null,
+    dataTextureWidth: 0,
+    dataTextureHeight: 0,
     has: false,        // do we have a sweep to draw?
     pending: null,     // sweep payload set before onAdd / awaiting upload
     uni: null,         // numeric uniforms for the current sweep
@@ -266,6 +268,8 @@ export function createRadarLayer(id = 'radar') {
       this.quad = gl.createBuffer();
       this.dataTex = gl.createTexture();
       this.lutTex = gl.createTexture();
+      this.dataTextureWidth = 0;
+      this.dataTextureHeight = 0;
 
       // A style reload re-runs onAdd on the same logical layer — re-upload.
       if (this.pending) {
@@ -352,8 +356,18 @@ export function createRadarLayer(id = 'radar') {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, grid.w, grid.h, 0, gl.RGBA,
-        gl.UNSIGNED_BYTE, grid.data);
+      // Consecutive scans normally have the same polar texture dimensions.
+      // Update that allocation in place so playback does not force the driver
+      // to throw away and recreate a multi-megabyte texture every frame.
+      if (this.dataTextureWidth === grid.w && this.dataTextureHeight === grid.h) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA,
+          gl.UNSIGNED_BYTE, grid.data);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, grid.w, grid.h, 0, gl.RGBA,
+          gl.UNSIGNED_BYTE, grid.data);
+        this.dataTextureWidth = grid.w;
+        this.dataTextureHeight = grid.h;
+      }
 
       gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -440,6 +454,7 @@ export function createRadarLayer(id = 'radar') {
       if (this.dataTex) gl.deleteTexture(this.dataTex);
       if (this.lutTex) gl.deleteTexture(this.lutTex);
       this.program = this.quad = this.dataTex = this.lutTex = null;
+      this.dataTextureWidth = this.dataTextureHeight = 0;
       this.gl = null;
     },
   };

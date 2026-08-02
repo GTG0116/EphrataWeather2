@@ -260,6 +260,7 @@ export function createGridLayer(id = 'mrms') {
     renderingMode: '2d',
 
     map: null, gl: null, program: null, quad: null, dataTex: null, lutTex: null,
+    dataTextureWidth: 0, dataTextureHeight: 0,
     has: false, pending: null, uni: null, quadVerts: null, steps: 1024, opacity: 0.9,
     // Smoothing level: 0 none, 1 low, 2 medium, 3 high (Gaussian sigma in shader).
     smooth: 0,
@@ -284,6 +285,8 @@ export function createGridLayer(id = 'mrms') {
       this.quad = gl.createBuffer();
       this.dataTex = gl.createTexture();
       this.lutTex = gl.createTexture();
+      this.dataTextureWidth = 0;
+      this.dataTextureHeight = 0;
       if (this.pending) {
         const pending = this.pending;
         this.pending = null;
@@ -325,7 +328,16 @@ export function createGridLayer(id = 'mrms') {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
       const pixels = tex.packed ? expandPackedTexture(tex) : tex.data;
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      // MRMS frames in one product use a stable pooled grid. Reuse its GPU
+      // storage on playback; replacing texels in place avoids a costly texture
+      // reallocation while preserving the complete frame and its resolution.
+      if (this.dataTextureWidth === tex.W && this.dataTextureHeight === tex.H) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        this.dataTextureWidth = tex.W;
+        this.dataTextureHeight = tex.H;
+      }
 
       gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -384,6 +396,7 @@ export function createGridLayer(id = 'mrms') {
       if (this.dataTex) gl.deleteTexture(this.dataTex);
       if (this.lutTex) gl.deleteTexture(this.lutTex);
       this.program = this.quad = this.dataTex = this.lutTex = null;
+      this.dataTextureWidth = this.dataTextureHeight = 0;
       this.gl = null;
     },
   };

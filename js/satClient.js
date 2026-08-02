@@ -104,6 +104,27 @@ export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress, bbox =
     .then((m) => { m.scene._bbox = bbox; return m.scene; });
 }
 
+// Decode and colourise a frame entirely in the worker. `buildRGBA` is a full
+// image pass (often millions of pixels); keeping it off the page thread lets the
+// map continue to pan and paint while the next satellite image is prepared.
+// Background look-ahead requests set cache:false so they never evict the active
+// source scene that a product switch can reuse.
+export function loadSatelliteFrameAsync(
+  satKey,
+  sectorKey,
+  key,
+  bands,
+  productId,
+  onProgress,
+  bbox = null,
+  { cache = true } = {},
+) {
+  return call({
+    type: 'frame', satKey, sectorKey, key, bands, productId, bbox,
+    cache, maxDim: satelliteMaxDim(satKey, sectorKey),
+  }, onProgress).then((m) => ({ meta: m.meta, rgba: m.rgba, bbox: m.bbox }));
+}
+
 // Decode any of `bands` not already on the scene, merging the new channel arrays
 // into scene.channels. Returns the same scene for chaining. Himawari bands are
 // ten separately-fetched HSD segments each, so a transient S3 hiccup can drop a
@@ -150,4 +171,17 @@ export function evictScene(key) {
 // worker is kept alive for fast reuse, but its large scene/parser cache is not.
 export function clearSceneCache() {
   postControl({ type: 'clear' });
+}
+
+// A foreground selection is allowed to interrupt an *idle look-ahead* decode.
+// The controller only calls this while its shared lane confirms that the active
+// job is background work, so terminating the worker cannot cancel a frame the
+// user is currently waiting to see. The next request lazily starts a fresh
+// worker. Returning false preserves the decoded-scene cache when no request is
+// actually in flight.
+export function cancelInFlightSatelliteDecode() {
+  const target = worker;
+  if (!target || !pending.size) return false;
+  failWorker(target, new Error('satellite look-ahead canceled for a foreground frame'));
+  return true;
 }
