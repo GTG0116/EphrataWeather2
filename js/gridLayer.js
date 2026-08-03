@@ -331,8 +331,12 @@ export function createGridLayer(id = 'mrms') {
       // MRMS frames in one product use a stable pooled grid. Reuse its GPU
       // storage on playback; replacing texels in place avoids a costly texture
       // reallocation while preserving the complete frame and its resolution.
+      // NB: the width/height arguments are mandatory here. The shorter
+      // texSubImage2D(target, level, x, y, format, type, source) overload only
+      // accepts a TexImageSource (ImageData/ImageBitmap/canvas/video); handing it
+      // an ArrayBufferView throws "Overload resolution failed" and kills the frame.
       if (this.dataTextureWidth === tex.W && this.dataTextureHeight === tex.H) {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, tex.W, tex.H, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
       } else {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         this.dataTextureWidth = tex.W;
