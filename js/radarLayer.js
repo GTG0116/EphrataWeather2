@@ -181,8 +181,11 @@ function buildGrid(sweep, moment) {
   const w = gateCount;
   const h = NAZ;
   const bytes = w * h * 4;
-  const data = gridScratchFor(bytes);
-  data.fill(0, 0, bytes);
+  // The scratch may be bigger than this sweep needs (a previous, larger sweep
+  // sized it). View exactly this grid's bytes so uploads describe the frame and
+  // nothing beyond it.
+  const data = gridScratchFor(bytes).subarray(0, bytes);
+  data.fill(0);
   const nb = beams.length;
   // Beams are sorted by azimuth; as the bin centre sweeps upward, the first beam
   // past the centre only moves forward, so a single advancing cursor finds it.
@@ -359,8 +362,12 @@ export function createRadarLayer(id = 'radar') {
       // Consecutive scans normally have the same polar texture dimensions.
       // Update that allocation in place so playback does not force the driver
       // to throw away and recreate a multi-megabyte texture every frame.
+      // NB: the width/height arguments are mandatory here. The shorter
+      // texSubImage2D(target, level, x, y, format, type, source) overload only
+      // accepts a TexImageSource (ImageData/ImageBitmap/canvas/video); handing it
+      // an ArrayBufferView throws "Overload resolution failed" and kills the frame.
       if (this.dataTextureWidth === grid.w && this.dataTextureHeight === grid.h) {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA,
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, grid.w, grid.h, gl.RGBA,
           gl.UNSIGNED_BYTE, grid.data);
       } else {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, grid.w, grid.h, 0, gl.RGBA,

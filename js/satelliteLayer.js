@@ -250,8 +250,12 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       // allocation avoids a driver-side texture destroy/recreate on every
       // playback tick; texSubImage2D still uploads every source pixel, so
       // imagery quality and loading speed are unchanged.
+      // NB: the width/height arguments are mandatory here. The shorter
+      // texSubImage2D(target, level, x, y, format, type, source) overload only
+      // accepts a TexImageSource (ImageData/ImageBitmap/canvas/video); handing it
+      // an ArrayBufferView throws "Overload resolution failed" and kills the frame.
       if (this.textureWidth === W && this.textureHeight === H) {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
       } else {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
         this.textureWidth = W;
