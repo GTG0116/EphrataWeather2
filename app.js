@@ -1686,7 +1686,7 @@ function dailyHumidity(extras, index) {
   return weatherState.current?.humidity ?? null;
 }
 
-// Forecast-day peak wind gust, again preferring Open-Meteo's daily forecast
+// Forecast-day peak wind gust, preferring the selected provider's forecast
 // over anything tied to the current observation.
 function dailyGust(extras, index) {
   const forecast = extras?.wind_gusts_10m_max?.[index];
@@ -2562,6 +2562,45 @@ function isCanadianLocation(location = selectedLocation) {
   return /,\s*CA$/i.test(name) || /\bcanada\b/i.test(name);
 }
 
+// Country codes are captured by every current search/GPS path. The state-name
+// fallback keeps locations saved by older releases on the US provider without
+// accidentally sending legacy international favorites to api.weather.gov.
+const US_STATE_NAMES = new Set([
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+  "connecticut", "delaware", "district of columbia", "florida", "georgia",
+  "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky",
+  "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota",
+  "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire",
+  "new jersey", "new mexico", "new york", "north carolina", "north dakota",
+  "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island",
+  "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont",
+  "virginia", "washington", "west virginia", "wisconsin", "wyoming",
+  "puerto rico", "guam", "american samoa", "u.s. virgin islands",
+  "northern mariana islands",
+]);
+const US_STATE_CODES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+  "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+  "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+  "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+  "WV", "WI", "WY", "PR", "GU", "AS", "VI", "MP",
+]);
+
+function isUsLocation(location = selectedLocation) {
+  const cc = String(location?.countryCode || "").toUpperCase();
+  if (cc) return cc === "US";
+  const parts = String(location?.name || "").split(",").map(part => part.trim()).filter(Boolean);
+  const region = parts.at(-1) || "";
+  return US_STATE_CODES.has(region.toUpperCase()) || US_STATE_NAMES.has(region.toLowerCase()) ||
+    /\b(united states|usa)\b/i.test(location?.name || "");
+}
+
+function forecastProviderFor(location = selectedLocation) {
+  if (isCanadianLocation(location)) return "ECCC";
+  if (isUsLocation(location)) return "NWS";
+  return "Open-Meteo";
+}
+
 // Longitude-based IANA timezone fallback for Canadian points whose stored
 // timezone is missing or "auto" (e.g. GPS-located points).
 function canadianTimezone(lon) {
@@ -3204,7 +3243,7 @@ function buildForecastSeries(data, tzHint) {
       precipAmount: hi.precipitation?.[i] ?? null,
       snowAmount: hi.snowfall?.[i] ?? null,
       cloudCover: hi.cloud_cover?.[i] ?? null,
-      visibility: hi.visibility?.[i] ?? null,
+      visibility: hi.visibility?.[i] == null ? null : metersToMiles(hi.visibility[i]),
       // Renderers expect NWS-style dewpoint in Celsius
       dewpoint: { value: hi.dew_point_2m?.[i] != null ? (hi.dew_point_2m[i] - 32) * 5 / 9 : null },
       isDaytime: hi.is_day?.[i] == null ? true : hi.is_day[i] === 1,
@@ -3301,17 +3340,169 @@ function buildForecastSeries(data, tzHint) {
   };
 }
 
+// api.weather.gov exposes the official 12-hour, hourly, and raw grid forecasts
+// as three linked products. The period feeds provide the readable forecast;
+// raw grid fields fill in aviation/operations details that the period objects
+// do not carry (gusts, sky cover, visibility, ceiling, and UV).
+function isoDurationMs(duration = "") {
+  const match = String(duration).match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/);
+  if (!match) return 0;
+  return ((Number(match[1]) || 0) * 86400 + (Number(match[2]) || 0) * 3600 +
+    (Number(match[3]) || 0) * 60 + (Number(match[4]) || 0)) * 1000;
+}
+
+function gridValueAt(field, when) {
+  const at = new Date(when).getTime();
+  if (!Number.isFinite(at)) return null;
+  for (const item of (field?.values || [])) {
+    const [startText, duration] = String(item.validTime || "").split("/");
+    const start = new Date(startText).getTime();
+    const end = start + isoDurationMs(duration);
+    if (Number.isFinite(start) && at >= start && at < (end || start + 3600000)) return item.value ?? null;
+  }
+  return null;
+}
+
+function gridUnit(field = {}) {
+  return String(field.uom || field.unitCode || "").toLowerCase();
+}
+
+function gridSpeedMph(field, when) {
+  const value = gridValueAt(field, when);
+  if (value == null) return null;
+  const unit = gridUnit(field);
+  if (unit.includes("km_h") || unit.includes("km/h")) return value * 0.621371;
+  if (unit.includes("m_s") || unit.includes("m/s")) return value * 2.23694;
+  if (unit.includes("kt") || unit.includes("knot")) return value * 1.15078;
+  return Number(value);
+}
+
+function gridDistanceMiles(field, when) {
+  const value = gridValueAt(field, when);
+  if (value == null) return null;
+  const unit = gridUnit(field);
+  if (unit.includes("km")) return value * 0.621371;
+  if (unit.includes("ft")) return value / 5280;
+  if (unit.includes("mi")) return Number(value);
+  return value / 1609.344;
+}
+
+function gridHeightFeet(field, when) {
+  const value = gridValueAt(field, when);
+  if (value == null) return null;
+  const unit = gridUnit(field);
+  if (unit.includes("ft")) return Number(value);
+  return value * 3.28084;
+}
+
+function forecastTextWeatherCode(text = "") {
+  const value = String(text).toLowerCase();
+  if (/thunder|t-?storm/.test(value)) return 95;
+  if (/snow shower|snow squall/.test(value)) return 85;
+  if (/snow|sleet|ice pellet/.test(value)) return 73;
+  if (/freezing rain|freezing drizzle|ice storm/.test(value)) return 66;
+  if (/shower/.test(value)) return 80;
+  if (/rain/.test(value)) return 61;
+  if (/drizzle/.test(value)) return 51;
+  if (/fog|mist/.test(value)) return 45;
+  if (/overcast|cloudy/.test(value) && !/partly/.test(value)) return 3;
+  if (/partly/.test(value)) return 2;
+  if (/mostly sunny|mostly clear|few clouds/.test(value)) return 1;
+  if (/sunny|clear|fair/.test(value)) return 0;
+  return null;
+}
+
+function normalizedNwsTemperature(value, unitCode) {
+  const amount = value?.value ?? value;
+  if (amount == null) return null;
+  return String(value?.unitCode || unitCode || "").toLowerCase().includes("degc")
+    ? fahrenheit(Number(amount)) : Math.round(Number(amount));
+}
+
+function normalizedNwsWind(value) {
+  if (value == null || typeof value !== "object") return value;
+  const speed = gridUnit(value).includes("km_h") ? Number(value.value) * 0.621371 : Number(value.value);
+  return Number.isFinite(speed) ? `${Math.round(speed)} mph` : null;
+}
+
+function buildNwsForecastSeries(forecastData, hourlyData, gridData) {
+  const grid = gridData?.properties || {};
+  const enrich = period => {
+    const start = period.startTime;
+    const gust = gridSpeedMph(grid.windGust, start);
+    const visibility = gridDistanceMiles(grid.visibility, start);
+    const ceiling = gridHeightFeet(grid.ceilingHeight, start);
+    return {
+      ...period,
+      temperature: normalizedNwsTemperature(period.temperature, period.temperatureUnit),
+      windSpeed: normalizedNwsWind(period.windSpeed),
+      weatherCode: forecastTextWeatherCode(`${period.shortForecast || ""} ${period.detailedForecast || ""}`),
+      windGust: gust == null ? null : `${Math.round(gust)} mph`,
+      cloudCover: gridValueAt(grid.skyCover, start),
+      visibility: visibility == null ? null : Number(visibility.toFixed(1)),
+      ceiling: ceiling == null ? null : Math.round(ceiling),
+      apparentTemperature: normalizedNwsTemperature(
+        gridValueAt(grid.apparentTemperature, start), grid.apparentTemperature?.uom,
+      ),
+      uvIndex: gridValueAt(grid.maxUVIndex, start),
+      precipAmount: gridValueAt(grid.quantitativePrecipitation, start),
+      snowAmount: gridValueAt(grid.snowfallAmount, start),
+    };
+  };
+
+  const hourly = (hourlyData?.properties?.periods || []).map(enrich);
+  const daily = (forecastData?.properties?.periods || []).map(enrich);
+  const daytime = daily.filter(period => period.isDaytime !== false).slice(0, 7);
+  const valuesFor = (period, read) => {
+    const start = new Date(period.startTime).getTime();
+    const end = new Date(period.endTime || start + 12 * 3600000).getTime();
+    return hourly.filter(hour => {
+      const time = new Date(hour.startTime).getTime();
+      return time >= start && time < end;
+    }).map(read).filter(Number.isFinite);
+  };
+  const average = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const maximum = values => values.length ? Math.max(...values) : null;
+
+  return {
+    hourly,
+    daily,
+    dailyExtras: {
+      apparent_temperature_max: daytime.map(period => maximum(valuesFor(period, hour => hour.apparentTemperature))),
+      apparent_temperature_min: daytime.map(period => {
+        const nextNight = daily[daily.indexOf(period) + 1];
+        return nextNight ? minimumFinite(valuesFor(nextNight, hour => hour.apparentTemperature)) : null;
+      }),
+      uv_index_max: daytime.map(period => maximum(valuesFor(period, hour =>
+        hour.uvIndex == null ? null : Number(hour.uvIndex)))),
+      relative_humidity_2m_mean: daytime.map(period => average(valuesFor(period, hour => {
+        const humidity = nwsValue(hour, "relativeHumidity");
+        return humidity == null ? null : Number(humidity);
+      }))),
+      wind_gusts_10m_max: daytime.map(period => maximum(valuesFor(period, hour => numericWind(hour.windGust)))),
+      cloud_cover_mean: daytime.map(period => average(valuesFor(period, hour =>
+        hour.cloudCover == null ? null : Number(hour.cloudCover)))),
+      precipitation_sum: daytime.map(() => null),
+      snowfall_sum: daytime.map(() => null),
+    },
+  };
+}
+
+function minimumFinite(values) {
+  return values.length ? Math.min(...values) : null;
+}
+
 async function weatherPayload() {
   const loc = point();
   const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
-  // Forecast series comes from Open-Meteo's high-resolution runs; the NWS
-  // pipeline stays on for what it does best — the nearby ASOS/AWOS observation
-  // and the official alerts.
-  const openMeteoUrl = openMeteoForecastUrl(loc, selectedLocation.timezone);
-  const [openMeteo, stations, alertsData, airQuality, pollen, astronomy, tempest, shore] = await Promise.all([
-    getJson(openMeteoUrl),
+  // Use all three official NWS point products: readable daily/hourly periods
+  // plus the raw grid fields needed for gust, ceiling, visibility, cloud and UV.
+  const [forecast, hourlyForecast, gridForecast, stations, alertsData, airQuality, pollen, astronomy, tempest, shore] = await Promise.all([
+    getJson(props.forecast),
+    getJson(props.forecastHourly),
+    getJson(props.forecastGridData),
     getJson(props.observationStations),
     alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
@@ -3320,7 +3511,7 @@ async function weatherPayload() {
     usesTempestStation(loc) ? tempestCurrent().catch(() => null) : Promise.resolve(null),
     coastalObservationPayload(loc.lat, loc.lon).catch(() => null),
   ]);
-  const series = buildForecastSeries(openMeteo, selectedLocation.timezone);
+  const series = buildNwsForecastSeries(forecast, hourlyForecast, gridForecast);
   const station = stations.features?.[0];
   const stationId = station?.properties?.stationIdentifier;
   if (!stationId) throw new Error("No NWS observation station found nearby");
@@ -3338,10 +3529,10 @@ async function weatherPayload() {
   let condition = p.textDescription || firstHour.shortForecast || firstDay.shortForecast;
   // The station reports its own cloud layers; the model run is only the
   // fallback for stations that publish no sky condition.
-  let cloudCover = observedCloudCover(observation) ?? openMeteo?.current?.cloud_cover ?? null;
+  let cloudCover = observedCloudCover(observation) ?? firstHour.cloudCover ?? null;
   // No surface station measures UV, so this one genuinely has to come from the
   // model (a Tempest station overrides it further down).
-  let uv = openMeteo?.current?.uv_index ?? null;
+  let uv = firstHour.uvIndex ?? series.dailyExtras.uv_index_max?.[0] ?? null;
   let updated = p.timestamp;
   let currentSource = "NWS";
 
@@ -3417,6 +3608,7 @@ async function weatherPayload() {
     hourly: series.hourly,
     daily: series.daily,
     dailyExtras: series.dailyExtras,
+    forecastSource: "NWS api.weather.gov",
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "NWS",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
@@ -3424,7 +3616,8 @@ async function weatherPayload() {
     sources: [
       tempest ? "Tempest station " + TEMPEST_STATION_ID : null,
       shoreFields.length ? `NOAA CO-OPS ${shore.station.id}` : null,
-      "api.open-meteo.com (forecast)", "api.weather.gov (observations + alerts)",
+      "api.weather.gov (forecast + observations + alerts)",
+      "air-quality-api.open-meteo.com (air quality)",
       "pollen.googleapis.com",
     ].filter(Boolean),
   };
@@ -3479,6 +3672,7 @@ async function openMeteoWeatherPayload() {
     hourly,
     daily,
     dailyExtras,
+    forecastSource: "Open-Meteo",
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "Unavailable",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
@@ -3602,6 +3796,7 @@ async function canadaWeatherPayload() {
     hourly,
     daily,
     dailyExtras: {},
+    forecastSource: "Environment and Climate Change Canada",
     alerts: alertsData.alerts || [],
     alertSource: alertsData.source || "ECCC",
     pollenForecast: Array.isArray(pollen) ? pollen : [],
@@ -3610,10 +3805,12 @@ async function canadaWeatherPayload() {
   };
 }
 
-// Choose the best forecast provider for the selected location: Environment
-// Canada for Canada, NWS for the US, with Open-Meteo as the universal fallback.
+// Provider routing is country-aware: NWS for the US, ECCC for Canada, and
+// Open-Meteo everywhere else. The secondary fallback only runs after the
+// location's primary national service fails.
 async function primaryWeatherPayload() {
-  if (isCanadianLocation()) {
+  const provider = forecastProviderFor();
+  if (provider === "ECCC") {
     try {
       return await canadaWeatherPayload();
     } catch (error) {
@@ -3621,12 +3818,36 @@ async function primaryWeatherPayload() {
       return openMeteoWeatherPayload();
     }
   }
-  try {
-    return await weatherPayload();
-  } catch (error) {
-    console.warn("Observation/alert pipeline unavailable, falling back to Open-Meteo only", error);
-    return openMeteoWeatherPayload();
+  if (provider === "NWS") {
+    try {
+      return await weatherPayload();
+    } catch (error) {
+      console.warn("NWS forecast/observation pipeline unavailable, falling back to Open-Meteo", error);
+      return openMeteoWeatherPayload();
+    }
   }
+  return openMeteoWeatherPayload();
+}
+
+function flightCategoryFor(visibilityMiles, ceilingFeet) {
+  const visibility = visibilityMiles == null ? NaN : Number(visibilityMiles);
+  const ceiling = ceilingFeet == null ? NaN : Number(ceilingFeet);
+  const hasVisibility = Number.isFinite(visibility);
+  const hasCeiling = Number.isFinite(ceiling);
+  if (!hasVisibility && !hasCeiling) return "UNK";
+  if ((hasVisibility && visibility < 1) || (hasCeiling && ceiling < 500)) return "LIFR";
+  if ((hasVisibility && visibility < 3) || (hasCeiling && ceiling < 1000)) return "IFR";
+  if ((hasVisibility && visibility <= 5) || (hasCeiling && ceiling < 3000)) return "MVFR";
+  return "VFR";
+}
+
+function forecastFlightCategory(hour = {}) {
+  const measured = flightCategoryFor(hour.visibility, hour.ceiling);
+  if (measured !== "UNK") return { category: measured, estimated: false };
+  const text = String(hour.shortForecast || "").toLowerCase();
+  if (/dense fog|heavy (rain|snow)|blizzard/.test(text)) return { category: "IFR", estimated: true };
+  if (/fog|mist|rain|shower|snow|sleet|thunder|storm/.test(text)) return { category: "MVFR", estimated: true };
+  return { category: "VFR", estimated: true };
 }
 
 async function aviationPayload() {
@@ -3635,6 +3856,7 @@ async function aviationPayload() {
     stationId = metarStationOverride.toUpperCase();
     stationName = stationId;
   } else {
+    if (!isUsLocation()) return null;
     const loc = point();
     const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
     const stations = await getJson(gridPoint.properties.observationStations);
@@ -3656,10 +3878,7 @@ async function aviationPayload() {
     .filter(Number.isFinite)
     .map(value => Math.round(value * 3.28084))
     .sort((a, b) => a - b)[0] ?? null;
-  const flightRule = visibility == null ? "UNK" :
-    visibility < 1 || (ceiling != null && ceiling < 500) ? "LIFR" :
-    visibility < 3 || (ceiling != null && ceiling < 1000) ? "IFR" :
-    visibility <= 5 || (ceiling != null && ceiling < 3000) ? "MVFR" : "VFR";
+  const flightRule = flightCategoryFor(visibility, ceiling);
 
   return {
     source: "NWS api.weather.gov",
@@ -3680,6 +3899,43 @@ async function aviationPayload() {
       const base = layer.base?.value == null ? "" : ` ${Math.round(layer.base.value * 3.28084)} ft`;
       return `${layer.amount || "Cloud"}${base}`;
     }),
+  };
+}
+
+function droneOperatingAssessment(hour = {}) {
+  const wind = numericWind(hour.windSpeed);
+  const gust = numericWind(hour.windGust);
+  const visibility = hour.visibility == null ? NaN : Number(hour.visibility);
+  const ceiling = hour.ceiling == null ? NaN : Number(hour.ceiling);
+  const precipValue = hour.probabilityOfPrecipitation?.value;
+  const precip = precipValue == null ? NaN : Number(precipValue);
+  const condition = String(hour.shortForecast || "");
+  const reasons = [];
+  let level = 0;
+
+  const add = (severity, reason) => {
+    level = Math.max(level, severity);
+    if (!reasons.includes(reason)) reasons.push(reason);
+  };
+  if (/thunder|lightning/i.test(condition)) add(2, "thunderstorms/lightning");
+  if (/freezing rain|ice storm|snow squall/i.test(condition)) add(2, "icing or snow-squall conditions");
+  if (Number.isFinite(gust) && gust >= 30) add(2, `gusts near ${Math.round(gust)} mph`);
+  else if (Number.isFinite(gust) && gust >= 20) add(1, `gusts near ${Math.round(gust)} mph`);
+  if (Number.isFinite(wind) && wind >= 25) add(2, `sustained wind near ${Math.round(wind)} mph`);
+  else if (Number.isFinite(wind) && wind >= 15) add(1, `wind near ${Math.round(wind)} mph`);
+  if (Number.isFinite(visibility) && visibility < 1) add(2, `visibility near ${visibility.toFixed(1)} mi`);
+  else if (Number.isFinite(visibility) && visibility < 3) add(1, `visibility near ${visibility.toFixed(1)} mi`);
+  if (Number.isFinite(ceiling) && ceiling < 500) add(2, `ceiling near ${Math.round(ceiling)} ft`);
+  else if (Number.isFinite(ceiling) && ceiling < 1000) add(1, `ceiling near ${Math.round(ceiling)} ft`);
+  if (Number.isFinite(precip) && precip >= 70) add(2, `${Math.round(precip)}% precipitation chance`);
+  else if (Number.isFinite(precip) && precip >= 40) add(1, `${Math.round(precip)}% precipitation chance`);
+  if (/fog|mist|heavy rain|heavy snow/i.test(condition)) add(1, condition.toLowerCase());
+
+  const labels = ["Favorable", "Caution", "Poor"];
+  return {
+    level,
+    label: labels[level],
+    reasons: reasons.length ? reasons : ["no major weather limits in the available forecast"],
   };
 }
 
@@ -6537,6 +6793,73 @@ function renderMetar(aviation) {
     ["Source", "NWS api.weather.gov station observation"],
   ];
   document.querySelector("#metarDecoded").innerHTML = decoded.map(([term, desc]) => `<div><dt>${term}</dt><dd>${desc}</dd></div>`).join("");
+  renderOperationalForecasts(weatherState);
+}
+
+function operationalForecastHours(weather = weatherState) {
+  return (weather?.hourly || []).slice(0, 18).filter((_, index) => index % 2 === 0).slice(0, 8);
+}
+
+function operationsTimeLabel(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleTimeString([], {
+    timeZone: selectedLocation.timezone || "America/New_York",
+    hour: "numeric",
+  });
+}
+
+function renderOperationalForecasts(weather = weatherState) {
+  const aviationEl = document.querySelector("#aviationForecast");
+  const droneEl = document.querySelector("#droneForecast");
+  if (!aviationEl || !droneEl) return;
+  const hours = operationalForecastHours(weather);
+  const source = weather?.forecastSource || forecastProviderFor();
+
+  if (!hours.length) {
+    const empty = `<p class="ops-empty">Operational forecast guidance is unavailable for this location right now.</p>`;
+    aviationEl.innerHTML = empty;
+    droneEl.innerHTML = empty;
+    return;
+  }
+
+  aviationEl.innerHTML = `
+    <div class="ops-source">Derived from ${safeText(source)} hourly forecast</div>
+    <div class="ops-forecast-list">${hours.map(hour => {
+      const flight = forecastFlightCategory(hour);
+      const category = flight.category;
+      const wind = numericWind(hour.windSpeed);
+      const gust = numericWind(hour.windGust);
+      const details = [
+        hour.ceiling == null ? null : `${Math.round(hour.ceiling)} ft ceiling`,
+        hour.visibility == null ? null : `${fmtVis(hour.visibility)} visibility`,
+        wind == null ? null : `${fmtWind(wind)}${gust != null ? ` gust ${fmtWind(gust)}` : ""}`,
+      ].filter(Boolean);
+      if (hour.ceiling == null && hour.visibility == null) details.unshift("no ceiling/visibility restriction published");
+      return `<div class="ops-row">
+        <time>${safeText(operationsTimeLabel(hour.startTime))}</time>
+        <span class="ops-badge flight-${category.toLowerCase()}">${safeText(category)}${flight.estimated ? " est." : ""}</span>
+        <div><strong>${safeText(hour.shortForecast || "Forecast")}</strong><small>${safeText(details.join(" · "))}</small></div>
+      </div>`;
+    }).join("")}</div>
+    <p class="ops-disclaimer">Planning outlook only. Check current METARs, TAFs, NOTAMs, and official aviation briefings before flight.</p>`;
+
+  droneEl.innerHTML = `
+    <div class="ops-source">Weather suitability from ${safeText(source)}</div>
+    <div class="ops-forecast-list">${hours.map(hour => {
+      const assessment = droneOperatingAssessment(hour);
+      const wind = numericWind(hour.windSpeed);
+      const weather = [
+        wind == null ? null : `${fmtWind(wind)} wind`,
+        hour.probabilityOfPrecipitation?.value == null ? null : `${Math.round(hour.probabilityOfPrecipitation.value)}% precip`,
+      ].filter(Boolean).join(" · ");
+      return `<div class="ops-row">
+        <time>${safeText(operationsTimeLabel(hour.startTime))}</time>
+        <span class="ops-badge drone-${assessment.level}">${safeText(assessment.label)}</span>
+        <div><strong>${safeText(assessment.reasons.join(", "))}</strong><small>${safeText(weather || hour.shortForecast || "Forecast")}</small></div>
+      </div>`;
+    }).join("")}</div>
+    <p class="ops-disclaimer">Advisory weather screen, not a go/no-go decision. Apply your aircraft limits, local rules, airspace authorization, VLOS requirements, and pilot judgment.</p>`;
 }
 
 // Kp runs 0-9; the descriptions are NOAA's own wording for the G scale.
