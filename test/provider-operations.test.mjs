@@ -22,7 +22,7 @@ function loadHelpers() {
     'isCanadianLocation', 'isUsLocation', 'forecastProviderFor', 'numericWind',
     'flightCategoryFor', 'forecastFlightCategory', 'droneOperatingAssessment', 'isoDurationMs', 'gridValueAt',
     'gridUnit', 'gridSpeedMph', 'gridDistanceMiles', 'gridHeightFeet',
-    'forecastTextWeatherCode',
+    'forecastTextWeatherCode', 'preferredNwsStation',
   ];
   const context = {
     US_STATE_NAMES: new Set(['pennsylvania', 'new york']),
@@ -49,6 +49,23 @@ test('the US weather pipeline consumes all official NWS point forecast links', (
   assert.doesNotMatch(source, /openMeteoForecastUrl/);
 });
 
+test('NWS current conditions fall back to official hourly and grid fields when a station omits readings', () => {
+  const source = extractFunction('weatherPayload');
+  assert.match(source, /normalizedNwsTemperature\(firstHour\.dewpoint\)/);
+  assert.match(source, /nwsValue\(firstHour, "relativeHumidity"\)/);
+  assert.match(source, /firstHour\.visibility/);
+  assert.match(source, /numericWind\(firstHour\.windGust\)/);
+  assert.match(source, /gridForecast\?\.properties\?\.pressure/);
+});
+
+test('complete ICAO observations are preferred over sparse coastal or mesonet platforms', () => {
+  const { preferredNwsStation } = loadHelpers();
+  const sparse = { properties: { stationIdentifier: 'SFOC1' } };
+  const airport = { properties: { stationIdentifier: 'KSFO' } };
+  assert.equal(preferredNwsStation([sparse, airport]), airport);
+  assert.equal(preferredNwsStation([sparse]), sparse);
+});
+
 test('aviation categories follow standard ceiling and visibility thresholds', () => {
   const { flightCategoryFor, forecastFlightCategory } = loadHelpers();
   assert.equal(flightCategoryFor(10, 5000), 'VFR');
@@ -60,7 +77,8 @@ test('aviation categories follow standard ceiling and visibility thresholds', ()
     { ...forecastFlightCategory({ shortForecast: 'Mostly Clear' }) },
     { category: 'VFR', estimated: true },
   );
-  assert.equal(forecastFlightCategory({ shortForecast: 'Rain Showers' }).category, 'MVFR');
+  assert.equal(forecastFlightCategory({ shortForecast: 'Chance Rain Showers' }).category, 'VFR');
+  assert.equal(forecastFlightCategory({ shortForecast: 'Patchy Fog' }).category, 'MVFR');
 });
 
 test('drone planning guidance escalates wind and convective hazards', () => {

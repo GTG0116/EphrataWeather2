@@ -115,9 +115,9 @@ const WeatherIcons = {
                 // Storm streaks flank the bolt (which occupies x 26-40) rather
                 // than running through it; snowflakes need more room than plain
                 // rain streaks because their arms are ~3.7 units wide.
-                const x = kind === "storm" ? 22 + i * 22
+                const x = kind === "storm" ? 21 + i * 22
                         : kind === "snow"  ? 21 + i * 11
-                        : 24 + i * 8.5;
+                        : 20 + i * 8;
                 if (kind === "snow") {
                     out += `
                     <g style="${anim ? `transform-box:fill-box;transform-origin:center;animation:wxFlake 2.1s linear ${(i * 0.34).toFixed(2)}s infinite;` : ""}">
@@ -196,11 +196,17 @@ const WeatherIcons = {
                 return wrap(cloud(-2, -3, 1, 1, 8) + drops(4, 50));
 
             case "storm": {
-                const bolt = `<path d="M34 44l-7.5 10.5H32l-3 8.5 10.5-12.5H33l4-6.5z" fill="rgba(255,232,160,.95)" stroke="none"
-                    style="${anim ? "animation:wxBolt 3.2s linear infinite;" : ""}"/>`;
+                const boltGradient = `${uid}BoltGradient`;
+                const boltPath = "M36 40L27 50.5h6L30 59l11-12.5h-6.5L39 40z";
+                const bolt = `
+                    <defs><linearGradient id="${boltGradient}" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stop-color="#fff7c2"/><stop offset="1" stop-color="#fbbf24"/>
+                    </linearGradient></defs>
+                    <path d="${boltPath}" fill="url(#${boltGradient})" stroke="rgba(255,255,255,.78)" stroke-width="1.05" stroke-linejoin="round"
+                        style="${anim ? "transform-origin:34px 49px;animation:wxBolt 3.2s ease-in-out infinite;" : ""}"/>`;
                 // The bolt is a solid shape, so the rain streaks behind it are
                 // cut away where it overlaps rather than crossing through it.
-                const boltCut = `<path d="M34 44l-7.5 10.5H32l-3 8.5 10.5-12.5H33l4-6.5z" fill="#000" stroke="#000" stroke-width="3.4" stroke-linejoin="round"/>`;
+                const boltCut = `<path d="${boltPath}" fill="#000" stroke="#000" stroke-width="3.4" stroke-linejoin="round"/>`;
                 return wrap(
                     cloud(-2, -5, 1, 1, 8) +
                     mask(uid, boltCut) +
@@ -214,11 +220,14 @@ const WeatherIcons = {
             case "fog": {
                 let lines = "";
                 for (let i = 0; i < 3; i++) {
-                    const x1 = 15 + (i % 2) * 6, x2 = 49 - (i % 2) * 5, y = 45 + i * 6;
+                    const x1 = 14 + (i % 2) * 7, x2 = 50 - (i % 2) * 6, y = 40 + i * 8;
                     lines += `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" fill="none" stroke="${soft}" stroke-width="${(sw * 1.05).toFixed(2)}" stroke-linecap="round" opacity="${1 - i * 0.2}"
                         style="${anim ? `animation:wxDrift ${5 + i * 1.4}s ease-in-out infinite;` : ""}"/>`;
                 }
-                return wrap(cloud(-2, -10, 0.9, 0.85, 8) + lines);
+                // Keep a deliberate gap between the obscuring cloud and the
+                // first fog bank; when the two touched, patchy-fog icons read
+                // like three lines drawn through the cloud outline.
+                return wrap(cloud(-1, -15, 0.86, 0.85, 8) + lines);
             }
 
             case "sunset": {

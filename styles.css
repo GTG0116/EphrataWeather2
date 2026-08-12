@@ -1611,6 +1611,13 @@ body.map-mode .shell {
   overflow-y: auto;
   overscroll-behavior: contain;
   animation: mapPanelIn 180ms ease both;
+  /* Opening Map Customization used to make a scrollbar appear and steal 10px
+     from the panel, so the closed summary and open body no longer lined up. */
+  scrollbar-width: none;
+}
+
+.map-panel::-webkit-scrollbar {
+  display: none;
 }
 
 .map-panel[hidden] {
@@ -1680,6 +1687,7 @@ body.map-mode .shell {
 
 #radarMap .mapboxgl-ctrl button {
   filter: invert(1);
+  transition: background-color 160ms ease, opacity 160ms ease;
 }
 
 /* ── Bottom credit strip ──
@@ -1780,6 +1788,111 @@ body.map-mode .shell {
   transform: translateY(-1px);
 }
 
+.section-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.info-viewer-btn,
+.mini-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.info-viewer-btn {
+  min-height: 32px;
+  padding: 0 11px;
+  border-radius: 999px;
+}
+
+.mini-info-btn {
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border-radius: 50%;
+  font-family: Georgia, serif;
+}
+
+.info-viewer-btn:hover,
+.mini-info-btn:hover {
+  border-color: color-mix(in srgb, var(--accent-2) 55%, transparent);
+  background: color-mix(in srgb, var(--accent-2) 14%, rgba(255, 255, 255, 0.1));
+}
+
+.product-title-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.product-title-row h2,
+.product-title-row h3 {
+  margin: 0;
+}
+
+.metric-info-btn {
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  flex: 0 0 22px;
+  font-size: 0.65rem;
+}
+
+.section-view-switch {
+  display: flex;
+  gap: 7px;
+  margin: 0 0 16px;
+  padding: 5px;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: rgba(3, 9, 24, 0.3);
+  scrollbar-width: none;
+}
+
+.section-view-switch::-webkit-scrollbar { display: none; }
+
+.section-view-switch button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 800;
+  transition: color 170ms ease, background 190ms ease, box-shadow 190ms ease, transform 170ms ease;
+}
+
+.section-view-switch button:hover {
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.section-view-switch button.active {
+  color: #101827;
+  background: #fff;
+  box-shadow: 0 5px 16px rgba(2, 6, 23, 0.2);
+  transform: translateY(0);
+}
+
 .aviation-grid,
 .space-readouts {
   display: grid;
@@ -1838,7 +1951,25 @@ body.map-mode .shell {
 }
 
 .aviation-grid {
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.aviation-view-panel[hidden] {
+  display: none;
+}
+
+.aviation-view-panel {
+  width: 100%;
+  max-width: 1040px;
+}
+
+.section-panel-enter {
+  animation: sectionPanelEnter 240ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+@keyframes sectionPanelEnter {
+  from { opacity: 0; transform: translateY(9px) scale(.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .ops-card h2 {
@@ -2923,7 +3054,8 @@ body.modal-open {
 /* ── Locate Me button ─────────────────────────────── */
 .locate-me-btn,
 .notify-btn,
-.settings-btn {
+.settings-btn,
+.report-bug-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2936,14 +3068,21 @@ body.modal-open {
   cursor: pointer;
   font-weight: 800;
   font: inherit;
+  text-decoration: none;
   white-space: nowrap;
   transition: transform 160ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
 }
 .locate-me-btn:hover,
 .notify-btn:hover,
-.settings-btn:hover {
+.settings-btn:hover,
+.report-bug-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px color-mix(in srgb, var(--accent-2) 18%, transparent);
+}
+.report-bug-btn:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .locate-me-btn:disabled,
 .notify-btn:disabled {
@@ -3278,6 +3417,91 @@ body.modal-open {
   overflow: visible;
 }
 
+.product-guide-list {
+  display: grid;
+  gap: 10px;
+}
+
+.product-guide-item {
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-soft);
+}
+
+.product-guide-item h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 9px;
+  font-size: 0.88rem;
+}
+
+.product-guide-item p {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.product-guide-item p strong {
+  color: var(--text);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.product-guide-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.product-guide-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  border-radius: 7px;
+}
+
+.product-guide-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.product-guide-icon.severe {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.14);
+}
+
+.product-guide-icon.severe svg {
+  fill: currentColor;
+}
+
+.product-guide-icon.flood {
+  color: #60a5fa;
+  background: rgba(96, 165, 250, 0.14);
+}
+
+.product-guide-icon.flood svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+@media (max-width: 520px) {
+  .product-guide-item p {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
 .climate-message {
   padding: 28px;
   color: var(--muted);
@@ -3598,7 +3822,8 @@ body.modal-open {
   }
   .locate-me-btn span,
   .notify-btn span,
-  .settings-btn span {
+  .settings-btn span,
+  .report-bug-btn span {
     display: none;
   }
 
@@ -3769,6 +3994,37 @@ body.modal-open {
   box-shadow: 0 18px 40px rgba(2, 6, 23, 0.45);
 }
 
+.layer-control-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px 0 9px;
+}
+
+.layer-control-section + .layer-control-section {
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.layer-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.layer-section-heading > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.layer-section-heading small {
+  color: rgba(232, 240, 255, 0.48);
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
 .layer-group-row {
   display: flex;
   align-items: center;
@@ -3782,7 +4038,6 @@ body.modal-open {
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: rgba(232, 240, 255, 0.4);
-  min-width: 52px;
   flex-shrink: 0;
 }
 
@@ -4434,6 +4689,7 @@ body.modal-open {
 ═══════════════════════════════════════════════ */
 .map-options-details {
   margin-top: 10px;
+  width: 100%;
 }
 
 .map-options-details[open] .chevron {
@@ -4456,6 +4712,7 @@ body.modal-open {
   list-style: none;
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
   user-select: none;
+  width: 100%;
 }
 
 .map-options-summary:hover {
@@ -4480,6 +4737,7 @@ body.modal-open {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  width: 100%;
 }
 
 .map-opt-group {
@@ -4539,6 +4797,92 @@ body.modal-open {
 .spc-legend-box {
   font-family: var(--font-display);
   letter-spacing: -0.015em;
+}
+
+.layer-option {
+  position: relative;
+  display: inline-flex;
+}
+
+.overlay-pills .layer-option > button[data-layer] {
+  padding-right: 27px;
+}
+
+.layer-pills-row .layer-info-btn {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 5px;
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  padding: 0;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: currentColor;
+  background: rgba(255, 255, 255, 0.1);
+  font: 800 0.65rem/1 Georgia, serif;
+  opacity: 0.7;
+}
+
+.layer-pills-row .layer-info-btn:hover {
+  transform: translateY(-50%);
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.layer-help-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  color: #a9c7ff;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 750;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.layer-help-toggle:hover {
+  color: #fff;
+}
+
+.map-layer-help {
+  max-height: min(260px, 38vh);
+  overflow-y: auto;
+  padding: 9px 10px;
+  border: 1px solid rgba(143, 181, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(20, 34, 61, 0.88);
+}
+
+.map-layer-help[hidden] {
+  display: none;
+}
+
+.map-layer-help-item {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.28fr) minmax(0, 1fr);
+  gap: 9px;
+  color: rgba(232, 240, 255, 0.72);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.map-layer-help-item + .map-layer-help-item {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.map-layer-help-item strong {
+  color: #fff;
 }
 
 .mapboxgl-popup-content {
@@ -5197,6 +5541,23 @@ body.modal-open {
      the pickers would otherwise stretch the whole column past the viewport. */
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+}
+
+.coastal-view-panel[hidden] {
+  display: none;
+}
+
+.coastal-view-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.coastal-view-intro {
+  margin: -2px 2px 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 .coastal-empty {

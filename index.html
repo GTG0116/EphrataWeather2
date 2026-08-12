@@ -24,7 +24,7 @@
          that exist but are unstyled and do nothing. A changed URL cannot be
          answered from a cache entry for the old one. Bump all three together on
          every release. -->
-    <link rel="stylesheet" href="styles.css?v=20260805a">
+    <link rel="stylesheet" href="styles.css?v=20260812c">
   </head>
   <body data-theme="sunny">
     <canvas id="atmosphereCanvas" aria-hidden="true"></canvas>
@@ -57,6 +57,10 @@
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1z"/></svg>
             <span>Settings</span>
           </button>
+          <a class="report-bug-btn" href="https://forms.gle/eHZf1wqfEWk6WKn2A" target="_blank" rel="noopener noreferrer" title="Report a bug" aria-label="Report a bug (opens in a new tab)">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2h8l1 4H7l1-4z"/><rect x="5" y="6" width="14" height="14" rx="6"/><path d="M9 11h6M9 15h6M3 10h2M19 10h2M3 16h2M19 16h2M12 6V3"/></svg>
+            <span>Report bug</span>
+          </a>
           <button class="refresh-button" id="refreshButton" type="button">Refresh</button>
         </div>
       </header>
@@ -152,10 +156,16 @@
         <section class="screen" id="extended" aria-labelledby="extended-title">
           <div class="section-head">
             <div>
-              <p class="eyebrow">Model Blend</p>
+              <p class="eyebrow" id="extended-source-label">NWS Forecast</p>
               <h2 id="extended-title">Extended Forecast</h2>
             </div>
-            <span>Daily outlook with fair weather scoring</span>
+            <div class="section-head-actions">
+              <span id="extended-source-note">Official NWS point forecast with SPC/WPC outlook tags</span>
+              <button type="button" class="info-viewer-btn" data-info-key="forecast-tags" aria-label="Explain forecast card tags">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                Forecast tags
+              </button>
+            </div>
           </div>
           <div class="daily-grid" id="dailyGrid"></div>
         </section>
@@ -167,8 +177,17 @@
               <p class="eyebrow">Surf, Sea &amp; Tide</p>
               <h2 id="coastal-title">Coastal Forecast</h2>
             </div>
-            <span id="coastalStatus">Checking for marine data…</span>
+            <div class="section-head-actions">
+              <span id="coastalStatus">Checking for marine data…</span>
+              <button type="button" class="info-viewer-btn" data-info-key="coastal-guide" aria-label="Explain coastal forecast products">Product guide</button>
+            </div>
           </div>
+          <nav class="section-view-switch" id="coastalViewSwitch" aria-label="Coastal forecast views">
+            <button type="button" data-coastal-view="overview" class="active" aria-pressed="true">Overview</button>
+            <button type="button" data-coastal-view="tides" aria-pressed="false">Tides</button>
+            <button type="button" data-coastal-view="waves" aria-pressed="false">Waves</button>
+            <button type="button" data-coastal-view="outlooks" aria-pressed="false">NWS Outlooks</button>
+          </nav>
           <div class="coastal-body" id="coastalBody"></div>
         </section>
 
@@ -207,14 +226,29 @@
               <div class="map-hud-panels">
                 <!-- Layer controls -->
                 <div class="map-controls-wrap map-panel" id="mapControlsPanel">
-                  <div class="layer-group-row">
-                    <span class="layer-group-label">Base</span>
-                    <div class="layer-pills-row" id="baseLayerPills"></div>
-                  </div>
-                  <div class="layer-group-row">
-                    <span class="layer-group-label">Overlays</span>
-                    <div class="layer-pills-row" id="overlayLayerPills"></div>
-                  </div>
+                  <section class="layer-control-section" aria-labelledby="base-layer-heading">
+                    <div class="layer-section-heading">
+                      <div>
+                        <span class="layer-group-label" id="base-layer-heading">Map layer</span>
+                        <small>Choose one</small>
+                      </div>
+                    </div>
+                    <div class="layer-pills-row" id="baseLayerPills" role="radiogroup" aria-labelledby="base-layer-heading"></div>
+                  </section>
+                  <section class="layer-control-section" aria-labelledby="overlay-layer-heading">
+                    <div class="layer-section-heading">
+                      <div>
+                        <span class="layer-group-label" id="overlay-layer-heading">Weather overlays</span>
+                        <small>Add any that help</small>
+                      </div>
+                      <button type="button" class="layer-help-toggle" id="layerHelpToggle" aria-expanded="false" aria-controls="mapLayerHelp" title="Learn what each weather overlay shows" aria-label="Information about weather overlays">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                        What are these?
+                      </button>
+                    </div>
+                    <div class="layer-pills-row overlay-pills" id="overlayLayerPills"></div>
+                    <div class="map-layer-help" id="mapLayerHelp" hidden></div>
+                  </section>
 
                   <!-- SPC sub-controls (shown when SPC active) -->
                   <div class="sub-controls" id="spcSubControls" hidden>
@@ -278,34 +312,16 @@
 
                   <!-- Radar / satellite timeline controls -->
                   <div class="sub-controls" id="radarSubControls" hidden>
-                    <div class="ctrl-row">
-                      <span class="ctrl-label">Radar</span>
-                      <div class="ctrl-btn-group" id="radarModeBtns">
-                        <button type="button" data-radar-mode="mrms">MRMS</button>
-                        <button type="button" data-radar-mode="single">Single site</button>
-                      </div>
-                    </div>
                     <div class="ctrl-row" id="mrmsProductRow">
                       <span class="ctrl-label">Product</span>
                       <select id="mrmsProductSelect" class="mrms-select" aria-label="Radar data product">
-                        <optgroup label="MRMS radar products" data-radar-products="mrms">
-                          <option value="refl">Composite Reflectivity (+30 min)</option>
-                          <option value="rate">Precipitation Type</option>
-                          <option value="mesh">Hail (MESH)</option>
-                          <option value="qpe6h">6-Hr Precip</option>
-                          <option value="qpe24h">24-Hr Precip</option>
-                          <option value="lightning">Lightning Probability</option>
-                          <option value="rotation">Azimuthal Shear</option>
-                        </optgroup>
-                        <optgroup label="Single-site NEXRAD" data-radar-products="single">
-                          <option value="nexrad_ref">Reflectivity</option>
-                          <option value="nexrad_vel">Velocity</option>
-                          <option value="nexrad_sw">Spectrum Width</option>
-                          <option value="nexrad_rho">Correlation Coeff.</option>
-                          <option value="nexrad_zdr">Differential Reflectivity</option>
-                          <option value="nexrad_phi">Differential Phase</option>
-                          <option value="nexrad_kdp">Specific Differential Phase</option>
-                        </optgroup>
+                        <option value="rate">Precipitation Type</option>
+                        <option value="refl">Composite Reflectivity (+30 min)</option>
+                        <option value="mesh">Hail (MESH)</option>
+                        <option value="qpe6h">6-Hr Precip</option>
+                        <option value="qpe24h">24-Hr Precip</option>
+                        <option value="lightning">Lightning Probability</option>
+                        <option value="rotation">Azimuthal Shear</option>
                       </select>
                     </div>
                     <div class="ctrl-row radar-palette-row">
@@ -385,10 +401,23 @@
 
         <!-- AVIATION & SPACE -->
         <section class="screen" id="aviation" aria-labelledby="aviation-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">NWS Aviation &amp; Flight Planning</p>
+              <h2 id="aviation-title">Flying Conditions</h2>
+            </div>
+            <button type="button" class="info-viewer-btn" data-info-key="aviation-guide" aria-label="Explain aviation weather products">Product guide</button>
+          </div>
+          <nav class="section-view-switch" id="aviationViewSwitch" aria-label="Flying condition views">
+            <button type="button" data-aviation-view="current" class="active" aria-pressed="true">Current Flight</button>
+            <button type="button" data-aviation-view="forecast" aria-pressed="false">Forecast</button>
+            <button type="button" data-aviation-view="drone" aria-pressed="false">Drone</button>
+            <button type="button" data-aviation-view="space" aria-pressed="false">Space Weather</button>
+          </nav>
           <div class="aviation-grid">
-            <article class="tile metar-card">
+            <article class="tile metar-card aviation-view-panel" data-aviation-panel="current">
               <p class="eyebrow">Nearest Aviation Weather</p>
-              <h2 id="aviation-title">NWS Aviation Conditions</h2>
+              <div class="product-title-row"><h2>NWS Aviation Conditions</h2><button type="button" class="mini-info-btn" data-info-key="metar" aria-label="What is a METAR?">i</button></div>
               <form class="metar-search-form" id="metarSearchForm" autocomplete="off">
                 <input type="text" id="metarStationInput" class="metar-search-input" placeholder="Search METAR station (e.g. KPAE)" maxlength="6" spellcheck="false" aria-label="METAR station ID" />
                 <button type="submit" class="metar-search-btn">Go</button>
@@ -398,9 +427,9 @@
               <pre id="metarRaw"></pre>
               <dl id="metarDecoded"></dl>
             </article>
-            <article class="tile space-card">
+            <article class="tile space-card aviation-view-panel" data-aviation-panel="space" hidden>
               <p class="eyebrow">Heliophysics</p>
-              <h2>Space Weather Monitor</h2>
+              <div class="product-title-row"><h2>Space Weather Monitor</h2><button type="button" class="mini-info-btn" data-info-key="space-weather" aria-label="Explain space weather">i</button></div>
               <div class="space-readouts" id="spaceReadouts"></div>
               <div class="aurora-bar">
                 <span style="width: 0%"></span>
@@ -408,15 +437,15 @@
               <p id="spaceNote">Loading live space weather from NOAA SWPC…</p>
               <p class="space-updated" id="spaceUpdated">NOAA SWPC</p>
             </article>
-            <article class="tile ops-card">
+            <article class="tile ops-card aviation-view-panel" data-aviation-panel="forecast" hidden>
               <p class="eyebrow">Next 18 Hours</p>
-              <h2>Aviation Forecast</h2>
+              <div class="product-title-row"><h2>Aviation Forecast</h2><button type="button" class="mini-info-btn" data-info-key="flight-categories" aria-label="Explain flight categories">i</button></div>
               <p class="ops-intro">Forecast flight categories, ceiling, visibility, and winds at the selected location.</p>
               <div id="aviationForecast"></div>
             </article>
-            <article class="tile ops-card drone-card">
+            <article class="tile ops-card drone-card aviation-view-panel" data-aviation-panel="drone" hidden>
               <p class="eyebrow">Small UAS Planning</p>
-              <h2>Drone Operations Forecast</h2>
+              <div class="product-title-row"><h2>Drone Operations Forecast</h2><button type="button" class="mini-info-btn" data-info-key="drone-guidance" aria-label="Explain drone weather guidance">i</button></div>
               <p class="ops-intro">A weather-only screen for wind, gusts, visibility, precipitation, and convective hazards.</p>
               <div id="droneForecast"></div>
             </article>
@@ -463,7 +492,7 @@
     </div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.js"></script>
-    <script src="icons.js?v=20260731"></script>
-    <script src="app.js?v=20260805a"></script>
+    <script src="icons.js?v=20260812c"></script>
+    <script src="app.js?v=20260812c"></script>
   </body>
 </html>

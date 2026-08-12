@@ -51,17 +51,19 @@ function loadForecastHelpers() {
   };
   vm.runInNewContext(`${helpers}\nglobalThis.forecastHelpers = {
     normalizeWmoWeatherCode, wmoDescription, forecastConditionDescription,
-    buildForecastSeries,
+    buildForecastSeries, precipNoun, precipitationChancePhrase,
   };`, context);
   return context.forecastHelpers;
 }
 
 test('warm forecast temperatures do not display freezing rain wording', () => {
-  const { normalizeWmoWeatherCode, wmoDescription } = loadForecastHelpers();
+  const { normalizeWmoWeatherCode, wmoDescription, precipNoun } = loadForecastHelpers();
   assert.equal(normalizeWmoWeatherCode(66, 78), 61);
   assert.equal(wmoDescription(66, 78), 'Light rain');
   assert.equal(normalizeWmoWeatherCode(67, 31), 67);
   assert.equal(wmoDescription(67, 31), 'Heavy freezing rain');
+  assert.equal(precipNoun(61), 'rain');
+  assert.equal(precipNoun(66), 'freezing rain');
 });
 
 test('a high precipitation chance is displayed as a chance of rain, not only overcast', () => {
@@ -70,6 +72,13 @@ test('a high precipitation chance is displayed as a chance of rain, not only ove
   assert.equal(forecastConditionDescription(3, 70, { code: 95 }), 'Chance of storms');
   assert.equal(forecastConditionDescription(3, 59), 'Overcast');
   assert.equal(forecastConditionDescription(61, 70), 'Light rain');
+});
+
+test('precipitation probability wording does not turn a chance into certainty', () => {
+  const { precipitationChancePhrase } = loadForecastHelpers();
+  assert.equal(precipitationChancePhrase(53, 'rain'), 'a chance of rain');
+  assert.equal(precipitationChancePhrase(70, 'rain'), 'a good chance of rain');
+  assert.equal(precipitationChancePhrase(85, 'storms'), 'a high chance of storms');
 });
 
 function buildUniformForecast({ code, temperature, pop }) {

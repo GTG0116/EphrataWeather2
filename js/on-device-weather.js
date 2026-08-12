@@ -884,55 +884,64 @@ function nowcastForecastFrame(sourceFrame, leadMinutes, grid, motion) {
 }
 
 // Carry the latest precipitation classification along the reflectivity
-// nowcast. The motion engine forecasts echo position/intensity; this maps the
-// latest rain/ice/snow bands onto that reduced grid and grows the nearby band
-// mask by the distance uncertainty at each lead. It is intentionally labelled
-// extrapolated: changing thermal profiles are not a numerical-model forecast.
-function precipitationTypeForecastGrid(reflectivity, latestType, leadMinutes) {
+// nowcast. The earlier implementation repeatedly dilated the type mask as lead
+// time increased. That made a small area of light precipitation look enormous
+// by +30 minutes even when the reflectivity forecast itself had not grown.
+// Instead, move the classification with the measured dominant echo motion and
+// use only a one-cell lookup fallback for small grid-alignment differences.
+// It remains explicitly labelled extrapolated: changing thermal profiles are
+// not a numerical-model forecast.
+export function precipitationTypeForecastGrid(reflectivity, latestType, leadMinutes, motion = {}) {
   if (!latestType?.values?.length) return reflectivity;
   const count = reflectivity.ni * reflectivity.nj;
-  let bands = new Int8Array(count).fill(-1);
+  motion = motion || {};
+  const summary = motion.summary || motion.dominant || {};
+  const dx = Number(summary.dxCellsPerMinute) * Number(leadMinutes) || 0;
+  const dy = Number(summary.dyCellsPerMinute) * Number(leadMinutes) || 0;
+  const searchRadius = 1;
+
+  const bandNear = (row, col) => {
+    const direct = latestType.values[row * latestType.ni + col];
+    if (Number.isFinite(direct)) return Math.floor(direct);
+    const votes = [0, 0, 0];
+    for (let oy = -searchRadius; oy <= searchRadius; oy++) {
+      const y = row + oy;
+      if (y < 0 || y >= latestType.nj) continue;
+      for (let ox = -searchRadius; ox <= searchRadius; ox++) {
+        const x = col + ox;
+        if (x < 0 || x >= latestType.ni || (!ox && !oy)) continue;
+        const encoded = latestType.values[y * latestType.ni + x];
+        const band = Number.isFinite(encoded) ? Math.floor(encoded) : -1;
+        if (band >= 0 && band < votes.length) votes[band]++;
+      }
+    }
+    const winner = votes[1] > votes[0] ? (votes[2] > votes[1] ? 2 : 1) : (votes[2] > votes[0] ? 2 : 0);
+    return votes[winner] ? winner : -1;
+  };
+
+  const values = new Float32Array(count).fill(NaN);
+  const rateCenti = new Uint16Array(count);
   for (let row = 0; row < reflectivity.nj; row++) {
     const lat = reflectivity.lat1 - row * reflectivity.dj;
-    const sourceRow = Math.round((latestType.lat1 - lat) / latestType.dj);
+    // Positive dy is south/down in the nowcast grid, so tracing the forecast
+    // cell back to its latest observed type adds the displacement to latitude.
+    const sourceLat = lat + dy * reflectivity.dj;
+    const sourceRow = Math.round((latestType.lat1 - sourceLat) / latestType.dj);
     if (sourceRow < 0 || sourceRow >= latestType.nj) continue;
     for (let col = 0; col < reflectivity.ni; col++) {
       const lon = reflectivity.lon1 + col * reflectivity.di;
-      const sourceCol = Math.round((lon - latestType.lon1) / latestType.di);
+      const sourceLon = lon - dx * reflectivity.di;
+      const sourceCol = Math.round((sourceLon - latestType.lon1) / latestType.di);
       if (sourceCol < 0 || sourceCol >= latestType.ni) continue;
-      const encoded = latestType.values[sourceRow * latestType.ni + sourceCol];
-      if (Number.isFinite(encoded)) bands[row * reflectivity.ni + col] = Math.floor(encoded);
+      const index = row * reflectivity.ni + col;
+      const dbz = reflectivity.values[index];
+      const band = bandNear(sourceRow, sourceCol);
+      if (!Number.isFinite(dbz) || dbz < 5 || band < 0) continue;
+      const rate = Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6);
+      const shade = Math.max(0.01, Math.min(0.98, Math.log10(rate + 1) / 2));
+      values[index] = band + shade;
+      rateCenti[index] = Math.min(65535, Math.round(rate * 100));
     }
-  }
-  const spread = Math.max(1, Math.min(5, Math.ceil(leadMinutes / 6)));
-  for (let pass = 0; pass < spread; pass++) {
-    const next = Int8Array.from(bands);
-    for (let row = 1; row < reflectivity.nj - 1; row++) {
-      for (let col = 1; col < reflectivity.ni - 1; col++) {
-        const index = row * reflectivity.ni + col;
-        if (bands[index] >= 0) continue;
-        const votes = [0, 0, 0];
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-          if (!dx && !dy) continue;
-          const band = bands[index + dy * reflectivity.ni + dx];
-          if (band >= 0 && band < 3) votes[band]++;
-        }
-        const winner = votes[1] > votes[0] ? (votes[2] > votes[1] ? 2 : 1) : (votes[2] > votes[0] ? 2 : 0);
-        if (votes[winner]) next[index] = winner;
-      }
-    }
-    bands = next;
-  }
-  const values = new Float32Array(count).fill(NaN);
-  const rateCenti = new Uint16Array(count);
-  for (let index = 0; index < count; index++) {
-    const dbz = reflectivity.values[index];
-    const band = bands[index];
-    if (!Number.isFinite(dbz) || dbz < 5 || band < 0) continue;
-    const rate = Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6);
-    const shade = Math.max(0.01, Math.min(0.98, Math.log10(rate + 1) / 2));
-    values[index] = band + shade;
-    rateCenti[index] = Math.min(65535, Math.round(rate * 100));
   }
   return { ...reflectivity, values, rateCenti, product: MRMS_PRODUCTS.PTYPE };
 }
@@ -1162,7 +1171,7 @@ async function buildNowcast(token, bounds, regionKey) {
       const leadMinutes = NOWCAST_DISPLAY_LEADS_MINUTES[index];
       if (!Number.isFinite(leadMinutes)) return;
       const displayedGrid = precipitationType
-        ? precipitationTypeForecastGrid(grid, latestTypeGrid, leadMinutes)
+        ? precipitationTypeForecastGrid(grid, latestTypeGrid, leadMinutes, motion || motionInfo)
         : grid;
       const frame = nowcastForecastFrame(
         displayedLatest, leadMinutes, displayedGrid, motion || motionInfo || { quality: 0 },

@@ -694,12 +694,14 @@ function buildSkyScene(rawBucket) {
   const bucket = baseSky(rawBucket);
   const night = isNightSky(rawBucket);
   const heavy = bucket === "storm";
-  const rainN = bucket === "rain" ? 380 : heavy ? 560 : bucket === "fog" ? 40 : 0;
+  // Fewer, depth-varied particles read as weather rather than a screen-space
+  // texture and keep the canvas calm behind text-heavy cards.
+  const rainN = bucket === "rain" ? 250 : heavy ? 380 : bucket === "fog" ? 24 : 0;
   const drops = Array.from({ length: rainN }, () => ({
     x: Math.random(), y: Math.random(), l: skyRnd(0.03, 0.085), s: skyRnd(0.55, 1.05),
-    w: skyRnd(0.7, 1.7), a: skyRnd(0.22, 0.6),
+    w: skyRnd(0.65, 1.45), a: skyRnd(0.16, 0.48), depth: skyRnd(0.72, 1.18),
   }));
-  const flakes = bucket === "snow" ? Array.from({ length: 280 }, () => ({
+  const flakes = bucket === "snow" ? Array.from({ length: 190 }, () => ({
     x: Math.random(), y: Math.random(), r: skyRnd(0.9, 3.1), s: skyRnd(0.03, 0.09),
     ph: Math.random() * 9, sw: skyRnd(0.004, 0.016), a: skyRnd(0.35, 0.95),
   })) : [];
@@ -709,25 +711,28 @@ function buildSkyScene(rawBucket) {
   const starN = bucket === "clearNight" ? 240 : (night && (bucket === "rain" || bucket === "snow" || bucket === "fog") ? 70 : 0);
   const starDim = bucket === "clearNight" ? 1 : 0.45;
   const stars = Array.from({ length: starN }, () => ({
-    x: Math.random(), y: Math.random() * 0.82, r: skyRnd(0.4, 1.5), ph: Math.random() * 9, a: skyRnd(0.3, 1) * starDim,
+    x: Math.random(), y: Math.random() * 0.82, r: skyRnd(0.4, 1.5), ph: Math.random() * 9,
+    a: skyRnd(0.3, 1) * starDim, twinkle: skyRnd(0.45, 1.05),
   }));
   const n = { clearDay: 3, partly: 7, overcast: 11, rain: 9, storm: 10, snow: 8, fog: 5, sunset: 6, clearNight: 3 }[bucket] || 0;
   const lowDeck = bucket === "overcast" || bucket === "storm" || bucket === "rain";
   const clouds = Array.from({ length: n }, () => ({
     x: Math.random(), y: skyRnd(0.05, lowDeck ? 0.5 : 0.42), w: skyRnd(0.28, 0.72), h: skyRnd(0.07, 0.19),
-    s: skyRnd(0.004, 0.016) * (bucket === "storm" ? 2.2 : 1), a: skyRnd(0.1, 0.34),
+    s: skyRnd(0.004, 0.016) * (bucket === "storm" ? 2.2 : 1), a: skyRnd(0.1, 0.3), shape: skyRnd(0, Math.PI * 2),
   }));
   const fogBanks = (bucket === "fog" || bucket === "snow" || bucket === "overcast")
     ? Array.from({ length: bucket === "fog" ? 7 : 3 }, () => ({
         y: skyRnd(0.3, 1), h: skyRnd(0.14, 0.4), s: skyRnd(0.006, 0.022), a: skyRnd(0.1, 0.3), x: Math.random(),
       }))
     : [];
-  skyScene = { drops, flakes, stars, clouds, fogBanks, flash: { next: skyT + skyRnd(1.5, 5), on: 0, x: 0.5 } };
+  skyScene = { drops, flakes, stars, clouds, fogBanks, flash: { next: skyT + skyRnd(1.5, 5), on: 0, x: 0.5, bolt: [] } };
 }
 buildSkyScene(skyBucket);
 let radarActive = true;
 let radarLatestResetKey = null;
-let activeRadarMode = localStorage.getItem("radarMode") === "single" ? "single" : "mrms";
+// MRMS is the only radar source exposed by the app. Keeping this explicit also
+// migrates browsers that previously saved the removed single-site mode.
+let activeRadarMode = "mrms";
 let selectedRadarSite = (localStorage.getItem("radarSite") || "").toUpperCase();
 let radarSiteMarkers = [];
 let activeOverlays = new Set();
@@ -823,6 +828,7 @@ let hourlyChartMetric = "temperature";
 let frame = 0;
 let weatherState = fallbackWeather;
 let mapState = {};
+let currentMetricGuide = [];
 let selectedLocation = (() => {
   try {
     const saved = localStorage.getItem("weatherLastLocation");
@@ -908,8 +914,7 @@ const ON_DEVICE_RADAR_LEGENDS = {
 };
 let activeMrmsProduct = (() => {
   const saved = localStorage.getItem("mrmsProduct");
-  if (activeRadarMode === "single") return ON_DEVICE_RADAR_PRODUCTS[saved] ? saved : "nexrad_ref";
-  return MRMS_PRODUCTS[saved] ? saved : "refl";
+  return MRMS_PRODUCTS[saved] ? saved : "rate";
 })();
 let onDeviceWeatherApi = null;
 let onDeviceWeatherPromise = null;
@@ -1616,6 +1621,145 @@ function openDetails(eyebrow, title, rows, summary = "") {
       ${rows.map(([term, desc, icon]) => `<div><dt>${icon ? uiIcon(icon) : ""}<span>${safeText(term)}</span></dt><dd>${safeText(desc)}</dd></div>`).join("")}
     </dl>
   `;
+  showDetailModal();
+}
+
+const PRODUCT_GUIDES = {
+  "forecast-tags": {
+    eyebrow: "Forecast Card Guide",
+    title: "Forecast tags, products, and risk levels",
+    summary: "The icon tells you which outlook product the tag belongs to. The abbreviation tells you the risk level. These outlooks describe potential; they are not active warnings.",
+    rows: [
+      ["Triangle icon · Severe storms", "The Storm Prediction Center (SPC) Convective Outlook maps the chance of organized severe thunderstorms, including damaging wind, large hail, and tornadoes.", "A triangle beside a risk abbreviation means the tag is about severe thunderstorms—not flooding.", "severe"],
+      ["Rain-cloud icon · Flooding", "The Weather Prediction Center (WPC) Excessive Rainfall Outlook maps the chance that rainfall will exceed local flash-flood guidance.", "A rain cloud beside a risk abbreviation means the tag is about excessive rain and flash flooding—not the SPC severe-storm risk.", "flood"],
+      ["FWI", "The Fair Weather Index is this app's 0–100 outdoor-comfort score, calculated from temperature, humidity, wind, clouds, and precipitation.", "Higher scores generally mean more comfortable weather for ordinary outdoor plans. It is not an official NWS hazard product.", "fwi"],
+      ["TSTM · SPC only", "TSTM is the SPC general-thunderstorm category and has no matching WPC rainfall level.", "Thunderstorms are possible, but SPC has not assigned an organized severe-weather risk at this location.", "severe"],
+      ["MRGL · Marginal", "MRGL is the lowest risk level used by both the SPC severe-storm outlook and WPC excessive-rainfall outlook.", "Triangle: isolated severe storms are possible. Rain cloud: isolated flash flooding is possible.", "both"],
+      ["SLGT · Slight", "SLGT is the second risk level used by both SPC and WPC.", "Triangle: scattered severe storms are possible. Rain cloud: scattered flash flooding is possible, generally with a better-defined heavy-rain threat.", "both"],
+      ["ENH · Enhanced · SPC only", "ENH is an SPC severe-weather category; WPC does not use an Enhanced level in its excessive-rainfall outlook.", "Numerous severe storms are possible, and the threat is more concentrated or substantial than a Slight risk.", "severe"],
+      ["MDT · Moderate", "MDT is a high-end risk level used by both SPC and WPC.", "Triangle: widespread severe storms are likely. Rain cloud: numerous flash floods are likely, with some potentially significant.", "both"],
+      ["HIGH", "HIGH is the highest risk level used by both SPC and WPC and is issued only for exceptional situations.", "Triangle: a major severe-weather outbreak is expected. Rain cloud: widespread, potentially catastrophic flash flooding is expected.", "both"],
+    ],
+  },
+  "coastal-guide": {
+    eyebrow: "Coastal Product Guide",
+    title: "How to read the coastal section",
+    summary: "The views separate what is happening now from tides, wave guidance, and official NWS text products.",
+    rows: [
+      ["Rip Current Risk", "An NWS surf-zone product that assesses the chance of dangerous currents pulling swimmers away from shore; where unavailable, the app displays a clearly labeled model estimate.", "Low does not mean no risk. Moderate or High means swimmers should use guarded beaches and follow local beach guidance."],
+      ["Sea State", "A snapshot combining current or near-current wave height, period, swell, water temperature, and modeled ocean current near the selected point.", "It describes how rough and energetic the water is now; higher waves or longer-period swell can make surf more powerful."],
+      ["Tides", "NOAA CO-OPS astronomical tide predictions plus a live water-level gauge when one is available.", "Predictions show expected high and low tides. Actual water can run above or below them because of wind, pressure, and storm surge."],
+      ["Wave Forecast", "Open-Meteo marine-model guidance for significant wave height, swell, direction, and period.", "It shows the expected sea trend, but it is model guidance rather than a direct buoy observation."],
+      ["NWS Outlooks", "Official NWS surf-zone and coastal-waters text forecasts from the local forecast office.", "These provide local hazards and context that a single wave number cannot capture."],
+    ],
+  },
+  "aviation-guide": {
+    eyebrow: "Aviation Product Guide",
+    title: "How to read the flying section",
+    summary: "Each view serves a different planning question. None replaces an official flight briefing, NOTAM review, or pilot judgment.",
+    rows: [
+      ["Current Flight", "A decoded NWS/FAA surface observation from the nearest suitable aviation station.", "It describes observed ceiling, visibility, wind, temperature, sky cover, and pressure at that station—not necessarily conditions along an entire route."],
+      ["Forecast", "An 18-hour aviation screen derived from the selected location's official NWS hourly forecast for U.S. locations.", "It highlights hours when ceiling, visibility, or wind may move conditions from VFR toward IFR."],
+      ["Drone", "A weather-only small-UAS planning screen using wind, gust, visibility, precipitation, and thunderstorms.", "Favorable, Caution, or Poor summarizes weather limitations only; it is not a legal flight authorization or aircraft-specific go/no-go decision."],
+      ["Space Weather", "NOAA SWPC measurements and outlooks for solar and geomagnetic activity.", "Elevated activity can affect radio and satellite navigation and can make aurora visible farther from the poles."],
+    ],
+  },
+  metar: {
+    eyebrow: "Aviation Observation",
+    title: "METAR and flight rules",
+    summary: "A METAR is a standardized airport weather observation, usually issued hourly and updated during significant changes.",
+    rows: [
+      ["METAR", "A standardized airport surface-weather observation, usually issued hourly and updated when conditions change significantly.", "It reports what was observed at one station; it is not a forecast."],
+      ["VFR", "The Visual Flight Rules category based on observed ceiling and visibility.", "Ceiling is above 3,000 ft and visibility is greater than 5 statute miles."],
+      ["MVFR", "The Marginal VFR category based on observed ceiling or visibility.", "Ceiling is 1,000–3,000 ft and/or visibility is 3–5 miles."],
+      ["IFR", "The Instrument Flight Rules category based on observed ceiling or visibility.", "Ceiling is 500–999 ft and/or visibility is 1 to less than 3 miles."],
+      ["LIFR", "The Low IFR category for the lowest ceiling or visibility conditions.", "Ceiling is below 500 ft and/or visibility is below 1 mile."],
+    ],
+  },
+  "flight-categories": {
+    eyebrow: "Forecast Guidance",
+    title: "Forecast flight categories",
+    summary: "Categories are calculated from NWS forecast ceiling and visibility when published. An “est.” tag means the category was inferred from forecast wording.",
+    rows: [
+      ["Flight category", "A compact aviation classification calculated from forecast ceiling and visibility; “est.” means it was inferred from forecast wording.", "VFR is least restrictive, followed by MVFR, IFR, and LIFR as ceiling or visibility worsens."],
+      ["Ceiling", "The forecast height of the lowest broken or overcast cloud layer, not simply any cloud in the sky.", "A lower ceiling can change the displayed flight category and limit visual flight."],
+      ["Visibility", "The forecast horizontal surface visibility at the selected location.", "Lower visibility can change the flight category even when the ceiling is high."],
+      ["Wind", "The NWS forecast for sustained wind and gusts at the selected point.", "Local terrain and runway exposure can produce conditions different from the point forecast."],
+    ],
+  },
+  "drone-guidance": {
+    eyebrow: "Small UAS Guidance",
+    title: "Drone weather suitability",
+    summary: "This screen summarizes weather only. It does not know your aircraft limits, airspace authorization, nearby obstacles, or operational rules.",
+    rows: [
+      ["Drone suitability", "An app-generated weather screen based on forecast wind, gusts, visibility, ceiling, precipitation, and thunderstorms.", "It evaluates weather only and does not account for airspace, aircraft limits, obstacles, or regulations."],
+      ["Favorable", "The lowest concern level in the app's drone-weather screen.", "No major weather threshold is evident in the available forecast fields."],
+      ["Caution", "The middle concern level in the app's drone-weather screen.", "One or more conditions may challenge a small aircraft, such as stronger wind, lower visibility, or precipitation."],
+      ["Poor", "The highest concern level in the app's drone-weather screen.", "The forecast contains weather that commonly makes small-UAS operations unsafe, including strong gusts or thunderstorms."],
+    ],
+  },
+  "space-weather": {
+    eyebrow: "NOAA SWPC",
+    title: "Space weather products",
+    summary: "Space weather describes solar and geomagnetic activity above Earth's atmosphere.",
+    rows: [
+      ["Kp Index", "A NOAA-reported 0–9 index of global geomagnetic disturbance.", "Higher values indicate a more disturbed magnetic field and can move aurora farther from the poles."],
+      ["Solar Wind", "Measurements of charged particles flowing from the Sun near Earth.", "Higher speed and a favorable magnetic orientation can intensify geomagnetic activity."],
+      ["Radio / Navigation", "NOAA space-weather scales and observations relevant to communications and satellite systems.", "Strong events can disrupt high-frequency radio and degrade satellite-navigation accuracy."],
+    ],
+  },
+};
+
+function showProductGuide(key) {
+  const guide = PRODUCT_GUIDES[key];
+  if (!guide) return;
+  const guideIcon = type => {
+    const severe = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg>`;
+    const flood = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><path d="M8 18.5v2M12 17v2M16 18.5v2"/></svg>`;
+    if (type === "severe") return `<span class="product-guide-icon severe">${severe}</span>`;
+    if (type === "flood") return `<span class="product-guide-icon flood">${flood}</span>`;
+    if (type === "both") return `<span class="product-guide-icons"><span class="product-guide-icon severe">${severe}</span><span class="product-guide-icon flood">${flood}</span></span>`;
+    return "";
+  };
+  modalEyebrow.textContent = guide.eyebrow;
+  modalTitle.textContent = guide.title;
+  modalBody.innerHTML = `
+    ${guide.summary ? `<p class="modal-summary">${safeText(guide.summary)}</p>` : ""}
+    <div class="product-guide-list">
+      ${guide.rows.map(([term, whatItIs, whatItMeans, symbol]) => `
+        <article class="product-guide-item">
+          <h3>${guideIcon(symbol)}<span>${safeText(term)}</span></h3>
+          <p><strong>What it is</strong>${safeText(whatItIs)}</p>
+          <p><strong>What it means</strong>${safeText(whatItMeans || whatItIs)}</p>
+        </article>`).join("")}
+    </div>`;
+  showDetailModal();
+}
+
+const CURRENT_METRIC_DEFINITIONS = {
+  air: "Air quality summarizes common outdoor pollutants using the reported air-quality index and, when available, pollutant concentrations from Open-Meteo.",
+  pollen: "Pollen is the predicted airborne concentration of major plant allergens near the selected location, supplied by Google Pollen.",
+  uv: "The UV Index is a 0-and-up scale for the strength of sunburn-producing ultraviolet radiation at the surface.",
+  dew: "Dew point is the temperature at which the air would become saturated. It is a direct measure of how much moisture is in the air.",
+  humidity: "Relative humidity is how full the air is with water vapor compared with the maximum it could hold at the current temperature.",
+  wind: "Wind is the sustained surface speed; gusts are brief increases above that sustained value. Local terrain and buildings can make either vary nearby.",
+};
+
+function showCurrentMetricGuide(index) {
+  const [icon, name, value, whatItMeans] = currentMetricGuide[Number(index)] || [];
+  if (!name) return;
+  const whatItIs = CURRENT_METRIC_DEFINITIONS[icon] || `${name} is a current weather reading for the selected location.`;
+  modalEyebrow.textContent = "Current Conditions Guide";
+  modalTitle.textContent = name;
+  modalBody.innerHTML = `
+    <p class="modal-summary">Current value: <strong>${safeText(value)}</strong></p>
+    <div class="product-guide-list">
+      <article class="product-guide-item">
+        <h3>${uiIcon(icon)}<span>${safeText(name)}</span></h3>
+        <p><strong>What it is</strong>${safeText(whatItIs)}</p>
+        <p><strong>What it means</strong>${safeText(whatItMeans || "No interpretation is available for this reading.")}</p>
+      </article>
+    </div>`;
   showDetailModal();
 }
 
@@ -2877,7 +3021,7 @@ function precipNoun(code) {
   if (code == null) return "rain";
   if (code >= 95) return "storms";
   if (code >= 85 || (code >= 71 && code <= 77)) return "snow";
-  if (code >= 66 || code >= 56) return "freezing rain";
+  if ((code >= 66 && code <= 67) || (code >= 56 && code <= 57)) return "freezing rain";
   return "rain";
 }
 
@@ -2899,7 +3043,9 @@ function periodPrecipNoun(code, precipWindow = null) {
 }
 
 function precipitationChancePhrase(pop, noun = "rain") {
-  return `a ${Number(pop) >= 80 ? "high" : "good"} chance of ${noun}`;
+  const chance = Number(pop);
+  const qualifier = chance >= 80 ? "high chance" : chance >= 60 ? "good chance" : "chance";
+  return `a ${qualifier} of ${noun}`;
 }
 
 function forecastConditionDescription(code, pop, precipWindow = null) {
@@ -2969,7 +3115,7 @@ function nowSummary(hours, tz = selectedLocation.timezone, observed = null) {
   } else if (wet) {
     const noun = periodPrecipNoun(wet.weatherCode);
     const when = clockLabel(wet.startTime, tz) || dayPartLabel(new Date(wet.startTime), tz);
-    if (isWetCode(wet.weatherCode)) {
+    if (isWetCode(wet.weatherCode) && hasLikelyPrecipitation(wet.probabilityOfPrecipitation?.value)) {
       parts.push(wetAt === 0
         ? `${noun[0].toUpperCase()}${noun.slice(1)} starting up now`
         : `${noun[0].toUpperCase()}${noun.slice(1)} moving in around ${when}`);
@@ -3043,9 +3189,15 @@ async function airQualityPayload() {
   const loc = point();
   const data = await getJson(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.lat}&longitude=${loc.lon}&current=us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide&timezone=${encodeURIComponent(loc.timezone || "America/New_York")}`);
   const current = data.current || {};
+  const aqi = Number(current.us_aqi);
+  const category = !Number.isFinite(aqi) ? "" : aqi <= 50 ? "Good" : aqi <= 100 ? "Moderate" :
+    aqi <= 150 ? "Unhealthy for sensitive groups" : aqi <= 200 ? "Unhealthy" :
+      aqi <= 300 ? "Very unhealthy" : "Hazardous";
+  const pollutants = current.pm2_5 == null ? "" :
+    `PM2.5 ${f(current.pm2_5, 1)} µg/m³, O₃ ${f(current.ozone, 1)} µg/m³`;
   return {
     label: current.us_aqi == null ? "Unavailable" : `${Math.round(current.us_aqi)} AQI`,
-    detail: current.pm2_5 == null ? "Open-Meteo air quality" : `PM2.5 ${f(current.pm2_5, 1)} ug/m3, O3 ${f(current.ozone, 1)} ug/m3`,
+    detail: [category, pollutants].filter(Boolean).join(" · ") || "Open-Meteo air quality",
     raw: current,
   };
 }
@@ -3492,6 +3644,15 @@ function minimumFinite(values) {
   return values.length ? Math.min(...values) : null;
 }
 
+function preferredNwsStation(features = []) {
+  // NWS station lists can begin with a tide/mesonet platform that publishes
+  // temperature but no visibility, ceiling, pressure, or sky cover. Prefer a
+  // four-letter U.S. ICAO/FAA station for complete current and aviation data.
+  return features.find(feature => /^[KP][A-Z0-9]{3}$/i.test(feature?.properties?.stationIdentifier || ""))
+    || features[0]
+    || null;
+}
+
 async function weatherPayload() {
   const loc = point();
   const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
@@ -3512,7 +3673,7 @@ async function weatherPayload() {
     coastalObservationPayload(loc.lat, loc.lon).catch(() => null),
   ]);
   const series = buildNwsForecastSeries(forecast, hourlyForecast, gridForecast);
-  const station = stations.features?.[0];
+  const station = preferredNwsStation(stations.features || []);
   const stationId = station?.properties?.stationIdentifier;
   if (!stationId) throw new Error("No NWS observation station found nearby");
   const observation = await getJson(`https://api.weather.gov/stations/${stationId}/observations/latest`);
@@ -3520,12 +3681,14 @@ async function weatherPayload() {
   const firstHour = series.hourly[0] || {};
   const firstDay = series.daily[0] || {};
   let temp = fahrenheit(propertyValue(observation, "temperature")) ?? firstHour.temperature;
-  let dewPoint = fahrenheit(propertyValue(observation, "dewpoint"));
+  let dewPoint = fahrenheit(propertyValue(observation, "dewpoint"))
+    ?? normalizedNwsTemperature(firstHour.dewpoint);
   let wind = mph(propertyValue(observation, "windSpeed")) ?? parseInt(firstHour.windSpeed, 10);
-  let gust = mph(propertyValue(observation, "windGust")) ?? wind;
-  let pressure = paToInHg(propertyValue(observation, "barometricPressure"));
-  const visibility = metersToMiles(propertyValue(observation, "visibility"));
-  let humidity = propertyValue(observation, "relativeHumidity");
+  let gust = mph(propertyValue(observation, "windGust")) ?? numericWind(firstHour.windGust) ?? wind;
+  let pressure = paToInHg(propertyValue(observation, "barometricPressure"))
+    ?? paToInHg(gridValueAt(gridForecast?.properties?.pressure, firstHour.startTime));
+  let visibility = metersToMiles(propertyValue(observation, "visibility")) ?? firstHour.visibility ?? null;
+  let humidity = propertyValue(observation, "relativeHumidity") ?? nwsValue(firstHour, "relativeHumidity");
   let condition = p.textDescription || firstHour.shortForecast || firstDay.shortForecast;
   // The station reports its own cloud layers; the model run is only the
   // fallback for stations that publish no sky condition.
@@ -3533,7 +3696,7 @@ async function weatherPayload() {
   // No surface station measures UV, so this one genuinely has to come from the
   // model (a Tempest station overrides it further down).
   let uv = firstHour.uvIndex ?? series.dailyExtras.uv_index_max?.[0] ?? null;
-  let updated = p.timestamp;
+  let updated = p.timestamp || firstHour.startTime || new Date().toISOString();
   let currentSource = "NWS";
 
   // Barrier islands and spits have no FAA or NWS station of their own, so the
@@ -3846,7 +4009,11 @@ function forecastFlightCategory(hour = {}) {
   if (measured !== "UNK") return { category: measured, estimated: false };
   const text = String(hour.shortForecast || "").toLowerCase();
   if (/dense fog|heavy (rain|snow)|blizzard/.test(text)) return { category: "IFR", estimated: true };
-  if (/fog|mist|rain|shower|snow|sleet|thunder|storm/.test(text)) return { category: "MVFR", estimated: true };
+  // A shower or thunderstorm is an operational hazard, but it does not by
+  // itself define a flight category; that classification is based on ceiling
+  // and visibility. Only wording that directly implies a restriction is used
+  // as the fallback when those fields are absent.
+  if (/fog|mist|moderate (rain|snow)|\bsnow\b|\bsleet\b/.test(text)) return { category: "MVFR", estimated: true };
   return { category: "VFR", estimated: true };
 }
 
@@ -3860,7 +4027,7 @@ async function aviationPayload() {
     const loc = point();
     const gridPoint = await getJson(`https://api.weather.gov/points/${loc.lat},${loc.lon}`);
     const stations = await getJson(gridPoint.properties.observationStations);
-    const station = stations.features?.[0];
+    const station = preferredNwsStation(stations.features || []);
     stationId = station?.properties?.stationIdentifier;
     if (!stationId) throw new Error("No NWS aviation station found nearby");
     stationName = station?.properties?.name || stationId;
@@ -4655,12 +4822,14 @@ async function spcForecastPayload() {
 
   return [
     {
+      day: 1,
       catLabel: findCatLabel(cat1),
       tornado: t1.risk, tornCig: t1.cig,
       wind:    w1.risk, windCig: w1.cig,
       hail:    h1.risk, hailCig: h1.cig,
     },
     {
+      day: 2,
       catLabel: findCatLabel(cat2),
       tornado: t2.risk, tornCig: t2.cig,
       wind:    w2.risk, windCig: w2.cig,
@@ -4688,7 +4857,8 @@ async function wpcForecastPayload() {
     WPC_ERO_URLS.map(url => fetchOutlookGeoJson(url).catch(() => null))
   );
 
-  return results.map(r => ({
+  return results.map((r, index) => ({
+    day: index + 1,
     label: r.status === "fulfilled" ? findWpcLabel(r.value) : null,
   }));
 }
@@ -4989,11 +5159,11 @@ function fwiNote(score) {
 // so they stay accurate no matter what the real reading is.
 function uvNote(uv) {
   if (uv == null || Number.isNaN(uv)) return "Estimated daylight exposure.";
-  if (uv < 3) return "Low. No real precaution needed.";
-  if (uv < 6) return "Moderate. Sunscreen if you're out for a while.";
-  if (uv < 8) return "High. Sunscreen if you're out past noon.";
-  if (uv < 11) return "Very high. Limit midday sun and cover up.";
-  return "Extreme. Avoid direct sun between 10 and 4.";
+  if (uv < 3) return "Low. Minimal protection is generally needed.";
+  if (uv < 6) return "Moderate. Use sunscreen and seek shade around midday.";
+  if (uv < 8) return "High. Reduce midday exposure and use sun protection.";
+  if (uv < 11) return "Very high. Minimize midday exposure and cover up.";
+  return "Extreme. Avoid midday sun when possible and use full protection.";
 }
 
 function humidityNote(rh) {
@@ -5244,12 +5414,14 @@ function renderCurrent() {
     ["humidity", "Relative Humidity", `${f(current.humidity)}%`, humidityNote(current.humidity)],
     ["wind", "Wind", fmtWind(current.wind), windNote(current.wind, current.gust)],
   ].filter(Boolean);
+  currentMetricGuide = metrics;
 
-  metricGrid.innerHTML = metrics.map(([icon, name, value, detail]) => `
+  metricGrid.innerHTML = metrics.map(([icon, name, value, detail], index) => `
     <article class="tile metric">
       <div class="metric-head">
         ${uiIcon(icon)}
         <p class="eyebrow">${name}</p>
+        <button type="button" class="mini-info-btn metric-info-btn" data-current-metric-info="${index}" aria-label="Explain ${safeText(name)}">i</button>
       </div>
       <span>${value}</span>
       <small>${detail}</small>
@@ -5939,6 +6111,37 @@ function getDailyPairs(all = []) {
   return pairs;
 }
 
+// Outlook feeds are numbered relative to today, while an NWS daily forecast
+// can begin with tomorrow once today's daytime period has ended. Match by the
+// period's local calendar date instead of its position in the forecast array so
+// an expired Day 1 risk is never attached to tomorrow's card overnight.
+function localCalendarParts(value, timeZone = "UTC") {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  const read = type => Number(parts.find(part => part.type === type)?.value);
+  const year = read("year"), month = read("month"), day = read("day");
+  return year && month && day ? { year, month, day } : null;
+}
+
+function localCalendarDayOffset(from, to, timeZone = "UTC") {
+  const a = localCalendarParts(from, timeZone);
+  const b = localCalendarParts(to, timeZone);
+  if (!a || !b) return null;
+  const aUtc = Date.UTC(a.year, a.month - 1, a.day);
+  const bUtc = Date.UTC(b.year, b.month - 1, b.day);
+  return Math.round((bUtc - aUtc) / 86400000);
+}
+
+function outlookForForecastPeriod(outlooks = [], period, now = new Date(), timeZone = "UTC") {
+  if (!period?.startTime) return null;
+  const offset = localCalendarDayOffset(now, period.startTime, timeZone);
+  if (offset == null || offset < 0) return null;
+  return outlooks.find(outlook => Number(outlook?.day) === offset + 1) || null;
+}
+
 // Trim any leftover provider prose down to a sentence or two, dropping the
 // boilerplate precipitation-accumulation lines nobody reads.
 function condenseProviderText(detailed, fallback) {
@@ -6213,6 +6416,15 @@ function renderDaily() {
 
   const extras = weatherState.dailyExtras || {};
   const pollenForecast = weatherState.pollenForecast || [];
+  const outlookTimeZone = selectedLocation.timezone || "UTC";
+  const sourceLabel = document.querySelector("#extended-source-label");
+  const sourceNote = document.querySelector("#extended-source-note");
+  const source = String(weatherState.forecastSource || "");
+  const nwsForecast = /NWS|weather\.gov/i.test(source);
+  if (sourceLabel) sourceLabel.textContent = nwsForecast ? "Official NWS Forecast" : (source || "Forecast");
+  if (sourceNote) sourceNote.textContent = nwsForecast
+    ? "NWS point forecast · official SPC/WPC outlook tags"
+    : `${source || "Weather forecast"} · outlook tags shown where available`;
   dailyGrid.innerHTML = days.map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
     const dayHumidity = dailyHumidity(extras, index);
@@ -6237,18 +6449,18 @@ function renderDaily() {
       variant:     index,
     });
 
-    const spcDay = index < 2 ? (weatherState.spcDays?.[index] || null) : null;
+    const spcDay = outlookForForecastPeriod(weatherState.spcDays, day, new Date(), outlookTimeZone);
     const spcCat = spcDay?.catLabel || null;
     const spcColor = spcRiskColor(spcCat);
     const spcBadge = (spcColor && spcCat !== "TSTM")
-      ? `<span class="spc-risk-badge" style="background:${spcColor}22;color:${spcColor};border:1px solid ${spcColor}88" title="SPC Day ${index + 1} ${spcLabel(spcCat)} risk"><svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 110 1.5.75.75 0 010-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg> ${safeText(spcCat)}</span>`
+      ? `<span class="spc-risk-badge" aria-label="SPC severe thunderstorm risk: ${safeText(spcLabel(spcCat))}" style="background:${spcColor}22;color:${spcColor};border:1px solid ${spcColor}88" title="Triangle = severe thunderstorms · SPC Day ${spcDay.day} ${spcLabel(spcCat)}"><svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 14.5a.75.75 0 110 1.5.75.75 0 010-1.5zm-.75-5.5h1.5v5h-1.5V11z"/></svg> ${safeText(spcCat)}</span>`
       : "";
 
-    const wpcDay = index < 5 ? (weatherState.wpcDays?.[index] || null) : null;
+    const wpcDay = outlookForForecastPeriod(weatherState.wpcDays, day, new Date(), outlookTimeZone);
     const wpcCat = wpcDay?.label || null;
     const wpcColor = spcRiskColor(wpcCat);
     const wpcBadge = (wpcColor && wpcCat)
-      ? `<span class="spc-risk-badge wpc-risk-badge" style="background:${wpcColor}22;color:${wpcColor};border:1px solid ${wpcColor}88" title="WPC Day ${index + 1} Excessive Rainfall — ${wpcCat}"><svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="vertical-align:-1px" aria-hidden="true"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><line x1="8" y1="19" x2="8" y2="21"/><line x1="12" y1="17" x2="12" y2="19"/><line x1="16" y1="19" x2="16" y2="21"/></svg> ${safeText(wpcCat)}</span>`
+      ? `<span class="spc-risk-badge wpc-risk-badge" aria-label="WPC excessive rainfall and flash flooding risk: ${safeText(wpcCat)}" style="background:${wpcColor}22;color:${wpcColor};border:1px solid ${wpcColor}88" title="Rain cloud = excessive rainfall and flash flooding · WPC Day ${wpcDay.day} ${wpcCat}"><svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="vertical-align:-1px" aria-hidden="true"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><line x1="8" y1="19" x2="8" y2="21"/><line x1="12" y1="17" x2="12" y2="19"/><line x1="16" y1="19" x2="16" y2="21"/></svg> ${safeText(wpcCat)}</span>`
       : "";
 
     return `
@@ -6401,23 +6613,27 @@ function showDailyDetails(index) {
 
   // Hazard outlook callouts (SPC severe / WPC excessive rain) for nearby days.
   const risks = [];
-  if (index < 3) {
-    const spcDay = weatherState.spcDays?.[index];
+  {
+    const spcDay = outlookForForecastPeriod(
+      weatherState.spcDays, day, new Date(), selectedLocation.timezone || "UTC",
+    );
     const catLabel = spcDay?.catLabel || null;
     if (catLabel) {
       risks.push({ color: spcRiskColor(catLabel) || "#fbbf24", icon: "severe",
         title: catLabel === "TSTM" ? "General thunderstorms possible" : `${spcLabel(catLabel)} of severe storms`,
-        sub: `${spcDaySummary(spcDay)} — SPC Day ${index + 1} convective outlook`.trim() });
+        sub: `${spcDaySummary(spcDay)} — SPC Day ${spcDay.day} convective outlook`.trim() });
     }
   }
-  if (index < 5) {
-    const wpcDay = weatherState.wpcDays?.[index];
+  {
+    const wpcDay = outlookForForecastPeriod(
+      weatherState.wpcDays, day, new Date(), selectedLocation.timezone || "UTC",
+    );
     if (wpcDay?.label) {
       const wpcNames = { MRGL: "Marginal", SLGT: "Slight", MDT: "Moderate", HIGH: "High" };
       const wpcSummary = wpcDaySummary(wpcDay.label);
       risks.push({ color: spcRiskColor(wpcDay.label) || "#60a5fa", icon: "precip",
         title: `${wpcNames[wpcDay.label] || wpcDay.label} risk of excessive rainfall`,
-        sub: `${wpcSummary ? `${wpcSummary} — ` : ""}WPC Day ${index + 1} excessive rainfall outlook` });
+        sub: `${wpcSummary ? `${wpcSummary} — ` : ""}WPC Day ${wpcDay.day} excessive rainfall outlook` });
     }
   }
   const riskHtml = risks.length ? `<div class="day-modal-risks">${risks.map(risk => `
@@ -6923,6 +7139,8 @@ let coastalError = null;
 let coastalSegmentIndex = 0;      // which SRF beach segment is on screen
 let coastalWatersIndex = 0;       // which CWF marine zone is on screen
 let coastalWaveMode = "hourly";   // hourly | daily
+let activeCoastalView = "overview";
+let activeAviationView = "current";
 let coastalTideStationId = null;  // user's pick from the nearby prediction stations
 
 const COASTAL_PRESETS = [
@@ -7008,6 +7226,67 @@ function coastalSourceLine() {
   return parts.join(" · ");
 }
 
+const sectionViewTransitionTokens = new Map();
+
+function syncSectionView(switchSelector, buttonAttribute, panelAttribute, activeValue, animate = false) {
+  document.querySelectorAll(`${switchSelector} [${buttonAttribute}]`).forEach(button => {
+    const active = button.getAttribute(buttonAttribute) === activeValue;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const panels = [...document.querySelectorAll(`[${panelAttribute}]`)];
+  const incoming = panels.find(panel => panel.getAttribute(panelAttribute) === activeValue);
+  const outgoing = panels.find(panel => !panel.hidden && panel !== incoming);
+  const reduceMotion = document.documentElement.classList.contains("reduce-motion") ||
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const token = (sectionViewTransitionTokens.get(panelAttribute) || 0) + 1;
+  sectionViewTransitionTokens.set(panelAttribute, token);
+
+  if (!animate || reduceMotion || !incoming || !outgoing || typeof incoming.animate !== "function") {
+    panels.forEach(panel => { panel.hidden = panel !== incoming; });
+    if (animate && !reduceMotion && incoming) {
+      incoming.classList.remove("section-panel-enter");
+      // Force the keyframe to restart when a user returns to a panel they have
+      // already visited. CSS animation is the fallback for browsers without
+      // the Web Animations API.
+      void incoming.offsetWidth;
+      incoming.classList.add("section-panel-enter");
+      window.setTimeout(() => incoming.classList.remove("section-panel-enter"), 260);
+    }
+    return Promise.resolve();
+  }
+
+  outgoing.getAnimations?.().forEach(animation => animation.cancel());
+  incoming.getAnimations?.().forEach(animation => animation.cancel());
+  const exit = outgoing.animate([
+    { opacity: 1, transform: "translateY(0) scale(1)" },
+    { opacity: 0, transform: "translateY(-5px) scale(.995)" },
+  ], { duration: 130, easing: "ease-in", fill: "both" });
+
+  return exit.finished.catch(() => {}).then(() => {
+    if (sectionViewTransitionTokens.get(panelAttribute) !== token) return;
+    panels.forEach(panel => { panel.hidden = panel !== incoming; });
+    incoming.animate([
+      { opacity: 0, transform: "translateY(9px) scale(.995)" },
+      { opacity: 1, transform: "translateY(0) scale(1)" },
+    ], { duration: 240, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" });
+  });
+}
+
+function syncCoastalView(animate = false) {
+  return syncSectionView("#coastalViewSwitch", "data-coastal-view", "data-coastal-panel", activeCoastalView, animate);
+}
+
+function syncAviationView(animate = false) {
+  return syncSectionView("#aviationViewSwitch", "data-aviation-view", "data-aviation-panel", activeAviationView, animate);
+}
+
+function coastalViewPanel(id, content, emptyText) {
+  return `<div class="coastal-view-panel" data-coastal-panel="${id}"${id === activeCoastalView ? "" : " hidden"}>
+    ${content || `<article class="tile coastal-empty"><h3>Nothing to show in this view</h3><p>${safeText(emptyText)}</p></article>`}
+  </div>`;
+}
+
 function renderCoastal() {
   const body = document.querySelector("#coastalBody");
   const status = document.querySelector("#coastalStatus");
@@ -7031,16 +7310,16 @@ function renderCoastal() {
 
   if (status) status.textContent = coastalSourceLine();
   coastalChartSpecs = {};
-  body.innerHTML = [
-    renderBeachPicker(),
-    renderRipAndSea(),
-    renderCoastalMetrics(),
-    renderShoreObsPanel(),
-    renderTidePanel(),
-    renderWavePanel(),
-    renderSurfForecastPanel(),
-    renderCoastalWatersPanel(),
-  ].filter(Boolean).join("");
+  const overview = [renderRipAndSea(), renderCoastalMetrics(), renderShoreObsPanel()].filter(Boolean).join("");
+  const tides = renderTidePanel();
+  const waves = renderWavePanel();
+  const outlooks = [renderSurfForecastPanel(), renderCoastalWatersPanel()].filter(Boolean).join("");
+  body.innerHTML = renderBeachPicker() +
+    coastalViewPanel("overview", overview, "Current coastal conditions are unavailable for this point.") +
+    coastalViewPanel("tides", tides, "No NOAA tide-prediction station covers this point.") +
+    coastalViewPanel("waves", waves, "No marine wave-model forecast covers this point.") +
+    coastalViewPanel("outlooks", outlooks, "No NWS surf-zone or coastal-waters text forecast covers this point.");
+  syncCoastalView();
   wireCoastalCharts();
 }
 
@@ -7899,6 +8178,11 @@ function drawAtmosphere(ts) {
   const canvasRect = canvas.getBoundingClientRect();
   const viewTop = Math.max(0, -canvasRect.top);
   const viewH = Math.max(1, Math.min(window.innerHeight, h - viewTop));
+  // The map covers the lower viewport, so horizon-positioned celestial bodies
+  // looked chopped in half at the map's top edge. On that screen, keep every
+  // sun/moon variant in the same upper-sky anchor above the map controls.
+  const mapSky = document.body.classList.contains("map-mode");
+  const mapCelestialY = viewTop + viewH * 0.085;
   const bufferW = Math.round(w * dpr);
   const bufferH = Math.round(h * dpr);
   if (canvas.width !== bufferW || canvas.height !== bufferH) {
@@ -7916,7 +8200,9 @@ function drawAtmosphere(ts) {
 
   if (skyScene.stars.length) {
     skyScene.stars.forEach((s) => {
-      ctx.globalAlpha = s.a * (0.55 + 0.45 * Math.sin(t * 1.7 + s.ph));
+      // A restrained shimmer avoids the noisy on/off sparkle of the previous
+      // full-opacity pulse while keeping the sky visibly alive.
+      ctx.globalAlpha = s.a * (0.82 + 0.18 * Math.sin(t * s.twinkle + s.ph));
       ctx.fillStyle = "#eaf3ff";
       ctx.beginPath(); ctx.arc(s.x * w, s.y * h, s.r, 0, 6.284); ctx.fill();
     });
@@ -7928,17 +8214,19 @@ function drawAtmosphere(ts) {
   // a bright disc punched through an overcast sky was the giveaway that the
   // night scene was just the clear-night scene wearing a different gradient.
   if (skyBucket === "clearNight") {
-    const mx = w * 0.82, my = h * 0.17;
-    const mg = ctx.createRadialGradient(mx, my, 0, mx, my, h * 0.45);
+    const mx = w * 0.82, my = mapSky ? mapCelestialY : viewTop + viewH * 0.17;
+    const mg = ctx.createRadialGradient(mx, my, 0, mx, my, viewH * 0.45);
     mg.addColorStop(0, "rgba(226,238,255,.45)"); mg.addColorStop(0.12, "rgba(190,214,255,.14)"); mg.addColorStop(1, "rgba(190,214,255,0)");
     ctx.fillStyle = mg; ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "rgba(238,245,255,.92)";
-    ctx.beginPath(); ctx.arc(mx, my, Math.max(16, h * 0.034), 0, 6.284); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx, my, Math.max(16, viewH * 0.034), 0, 6.284); ctx.fill();
   }
 
   if (bucket === "clearDay" || bucket === "partly") {
-    const sx = w * 0.82, sy = h * (bucket === "clearDay" ? 0.14 : 0.18), pulse = 0.9 + 0.1 * Math.sin(t * 0.8);
-    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, h * 0.85 * pulse);
+    const sx = w * 0.82;
+    const sy = mapSky ? mapCelestialY : viewTop + viewH * (bucket === "clearDay" ? 0.14 : 0.18);
+    const pulse = 0.9 + 0.1 * Math.sin(t * 0.8);
+    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, viewH * 0.85 * pulse);
     sg.addColorStop(0, "rgba(255,247,214,.95)"); sg.addColorStop(0.055, "rgba(255,240,190,.5)");
     sg.addColorStop(0.26, "rgba(255,232,170,.15)"); sg.addColorStop(1, "rgba(255,232,170,0)");
     ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
@@ -7955,7 +8243,8 @@ function drawAtmosphere(ts) {
   }
 
   if (bucket === "sunset") {
-    const sx = w * 0.68, sy = viewTop + viewH * 0.72;
+    const sx = w * (mapSky ? 0.82 : 0.68);
+    const sy = mapSky ? mapCelestialY : viewTop + viewH * 0.72;
     const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, viewH * 0.95);
     sg.addColorStop(0, "rgba(255,236,190,.95)"); sg.addColorStop(0.045, "rgba(255,197,120,.58)");
     sg.addColorStop(0.28, "rgba(255,140,90,.19)"); sg.addColorStop(1, "rgba(255,120,80,0)");
@@ -7966,12 +8255,26 @@ function drawAtmosphere(ts) {
     ? ({ overcast: "96,110,128", storm: "70,84,102", rain: "84,100,120", snow: "126,142,166", fog: "104,116,132", clearNight: "160,185,220" }[bucket] || "150,170,196")
     : ({ overcast: "245,248,252", storm: "150,165,182", rain: "180,195,210", snow: "235,242,250", fog: "240,244,248", sunset: "255,205,170" }[bucket] || "255,255,255");
   skyScene.clouds.forEach((cl) => {
-    const x = ((cl.x + t * cl.s) % 1.4 - 0.2) * w, y = cl.y * h, cw = cl.w * w, ch = cl.h * h;
-    const cg = ctx.createRadialGradient(x, y, 0, x, y, cw * 0.5);
-    cg.addColorStop(0, `rgba(${tint},${cl.a})`); cg.addColorStop(0.55, `rgba(${tint},${cl.a * 0.45})`); cg.addColorStop(1, `rgba(${tint},0)`);
-    ctx.fillStyle = cg;
-    ctx.save(); ctx.translate(x, y); ctx.scale(1, ch / (cw * 0.5));
-    ctx.beginPath(); ctx.arc(0, 0, cw * 0.5, 0, 6.284); ctx.fill(); ctx.restore();
+    const x = ((cl.x + t * cl.s) % 1.5 - 0.25) * w, y = cl.y * h, cw = cl.w * w, ch = cl.h * h;
+    // Three softly overlapping lobes make a coherent cloud bank instead of a
+    // row of identical fuzzy discs. Shape is fixed per scene, so it drifts
+    // without boiling or changing outline from frame to frame.
+    const lobes = [
+      [-0.23, 0.08, 0.58, 0.72],
+      [0.02, -0.08 - Math.sin(cl.shape) * 0.04, 0.7, 1],
+      [0.27, 0.06, 0.52, 0.68],
+    ];
+    lobes.forEach(([ox, oy, sx, sy], index) => {
+      const lx = x + ox * cw, ly = y + oy * ch;
+      const radius = cw * sx * 0.48;
+      const cg = ctx.createRadialGradient(lx, ly, 0, lx, ly, radius);
+      cg.addColorStop(0, `rgba(${tint},${cl.a * (index === 1 ? 1 : 0.8)})`);
+      cg.addColorStop(0.58, `rgba(${tint},${cl.a * 0.42})`);
+      cg.addColorStop(1, `rgba(${tint},0)`);
+      ctx.fillStyle = cg;
+      ctx.save(); ctx.translate(lx, ly); ctx.scale(1, (ch * sy) / Math.max(1, radius));
+      ctx.beginPath(); ctx.arc(0, 0, radius, 0, 6.284); ctx.fill(); ctx.restore();
+    });
   });
 
   skyScene.fogBanks.forEach((f) => {
@@ -7988,10 +8291,10 @@ function drawAtmosphere(ts) {
     const slant = bucket === "storm" ? 0.34 : 0.18;
     ctx.lineCap = "round";
     skyScene.drops.forEach((d) => {
-      const y = ((d.y + t * d.s) % 1.15) * h - h * 0.08;
-      const x = ((d.x + (y / h) * slant) % 1) * w, len = d.l * h;
+      const y = ((d.y + t * d.s * d.depth) % 1.15) * h - h * 0.08;
+      const x = ((d.x + t * 0.018 + (y / h) * slant) % 1) * w, len = d.l * h * d.depth;
       ctx.strokeStyle = night ? `rgba(150,186,220,${d.a * 0.8})` : `rgba(214,236,255,${d.a})`;
-      ctx.lineWidth = d.w;
+      ctx.lineWidth = d.w * d.depth;
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - len * slant, y + len); ctx.stroke();
     });
   }
@@ -8012,7 +8315,18 @@ function drawAtmosphere(ts) {
 
   if (bucket === "storm") {
     const flash = skyScene.flash;
-    if (t > flash.next) { flash.on = 1; flash.next = t + skyRnd(2.2, 6.5); flash.x = skyRnd(0.15, 0.85); }
+    if (t > flash.next) {
+      flash.on = 1;
+      flash.next = t + skyRnd(3.2, 7.5);
+      flash.x = skyRnd(0.15, 0.85);
+      let bx = flash.x, by = 0.05;
+      flash.bolt = [[bx, by]];
+      for (let i = 0; i < 7; i++) {
+        bx += skyRnd(-0.035, 0.035);
+        by += 0.07;
+        flash.bolt.push([bx, by]);
+      }
+    }
     if (flash.on > 0) {
       flash.on = Math.max(0, flash.on - 0.055);
       const e = flash.on * flash.on, fx = flash.x * w;
@@ -8021,8 +8335,7 @@ function drawAtmosphere(ts) {
       ctx.fillStyle = fg; ctx.fillRect(0, 0, w, h);
       if (flash.on > 0.72) {
         ctx.strokeStyle = `rgba(238,246,255,${0.85 * e})`; ctx.lineWidth = 1.8; ctx.beginPath();
-        let bx = fx, by = h * 0.05; ctx.moveTo(bx, by);
-        for (let i = 0; i < 7; i++) { bx += (Math.random() - 0.5) * w * 0.04; by += h * 0.07; ctx.lineTo(bx, by); }
+        flash.bolt.forEach(([bx, by], index) => index ? ctx.lineTo(bx * w, by * h) : ctx.moveTo(bx * w, by * h));
         ctx.stroke();
       }
     }
@@ -8100,7 +8413,7 @@ function renderMapSidebar() {
       <h3>${fmtTemp(current.temp)} — ${safeText(current.condition || "Conditions")}</h3>
       <div class="sidebar-chip-row">
         <div class="sidebar-chip">
-          <span class="sidebar-chip-label">Feels</span>
+          <span class="sidebar-chip-label">Temp</span>
           <span class="sidebar-chip-val">${uTempNum(current.temp)}°</span>
         </div>
         <div class="sidebar-chip">
@@ -10539,29 +10852,63 @@ function animateRadarLayer() {
   radarAnimationTimer = setTimeout(tick, radarFrameDelay());
 }
 
+const MAP_LAYER_INFO = {
+  Radar: "MRMS radar combines many radar sites into one nationwide view. The default Precipitation Type product separates rain, snow, and ice.",
+  Satellite: "GOES satellite imagery shows clouds, moisture, and storm structure from space.",
+  SPC: "Storm Prediction Center outlooks show where severe thunderstorms are possible and how the risk changes over the next several days.",
+  Alerts: "Active official warnings, watches, and advisories from the National Weather Service or Environment Canada.",
+  "Fire Wx": "Storm Prediction Center fire-weather outlooks highlight areas where wind and dry fuels may support dangerous fire spread.",
+  "WPC Rain": "Weather Prediction Center excessive-rainfall outlooks show where heavy rain could cause flash flooding.",
+  LSR: "Local Storm Reports are recent reports of hail, wind damage, flooding, tornadoes, and other significant weather.",
+  Drought: "The U.S. Drought Monitor's weekly assessment, from abnormally dry conditions through exceptional drought.",
+  Cyclones: "Current National Hurricane Center and Joint Typhoon Warning Center tropical cyclone tracks and positions.",
+};
+
+function showMapLayerHelp(layerName = null) {
+  const box = document.querySelector("#mapLayerHelp");
+  const toggle = document.querySelector("#layerHelpToggle");
+  if (!box) return;
+  const entries = layerName
+    ? [[layerName, MAP_LAYER_INFO[layerName]]]
+    : Object.entries(MAP_LAYER_INFO).filter(([name]) => !["Radar", "Satellite"].includes(name));
+  box.innerHTML = entries.map(([name, description]) => `
+    <div class="map-layer-help-item">
+      <strong>${safeText(name)}</strong>
+      <span>${safeText(description)}</span>
+    </div>`).join("");
+  box.hidden = false;
+  toggle?.setAttribute("aria-expanded", "true");
+}
+
 function renderLayers() {
   const baseEl = document.querySelector("#baseLayerPills");
   const overlayEl = document.querySelector("#overlayLayerPills");
   if (!baseEl || !overlayEl) return;
 
   const BASE_LAYERS = [
-    { id: "Radar",     isActive: () => radarActive,     toggle: () => { radarActive = !radarActive; } },
-    { id: "Satellite", isActive: () => satelliteActive, toggle: () => { satelliteActive = !satelliteActive; } },
+    { id: "Radar",     isActive: () => radarActive },
+    { id: "Satellite", isActive: () => satelliteActive },
   ];
   const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
-    `<button type="button" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}">${l.id}</button>`
+    `<button type="button" role="radio" aria-checked="${l.isActive()}" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}" title="${safeText(MAP_LAYER_INFO[l.id])}">${l.id}</button>`
   ).join("");
 
   overlayEl.innerHTML = OVERLAY_LAYERS.map(l =>
-    `<button type="button" data-layer="${l}" class="${activeOverlays.has(l) ? "active" : ""}">${l}</button>`
+    `<span class="layer-option">
+      <button type="button" data-layer="${l}" aria-pressed="${activeOverlays.has(l)}" class="${activeOverlays.has(l) ? "active" : ""}" title="${safeText(MAP_LAYER_INFO[l])}">${l}</button>
+      <button type="button" class="layer-info-btn" data-layer-info="${l}" title="${safeText(MAP_LAYER_INFO[l])}" aria-label="What is ${l}?">i</button>
+    </span>`
   ).join("");
 
   baseEl.querySelectorAll("button[data-layer]").forEach(btn => {
     btn.addEventListener("click", () => {
       const layer = BASE_LAYERS.find(l => l.id === btn.dataset.layer);
-      if (layer) layer.toggle();
+      if (!layer || layer.isActive()) return;
+      radarActive = layer.id === "Radar";
+      satelliteActive = layer.id === "Satellite";
+      stopRadarAnimation();
       renderLayers();
       drawRadar(false);
       if (
@@ -10573,6 +10920,10 @@ function renderLayers() {
         fitSatelliteExtent(currentSatExtent());
       }
     });
+  });
+
+  overlayEl.querySelectorAll("button[data-layer-info]").forEach(btn => {
+    btn.addEventListener("click", () => showMapLayerHelp(btn.dataset.layerInfo));
   });
 
   overlayEl.querySelectorAll("button[data-layer]").forEach(btn => {
@@ -11436,6 +11787,15 @@ document.querySelector("#mapLayersToggle")?.addEventListener("click", () => {
 document.querySelector("#mapInfoToggle")?.addEventListener("click", () => {
   toggleMapPanel("#mapSidebar", "#mapInfoToggle");
 });
+document.querySelector("#layerHelpToggle")?.addEventListener("click", event => {
+  const box = document.querySelector("#mapLayerHelp");
+  if (!box) return;
+  if (box.hidden) showMapLayerHelp();
+  else {
+    box.hidden = true;
+    event.currentTarget.setAttribute("aria-expanded", "false");
+  }
+});
 document.querySelector("#mapFullscreenBtn")?.addEventListener("click", () => setMapFullscreen());
 
 refreshButton.addEventListener("click", refreshLiveData);
@@ -11539,6 +11899,17 @@ alertsPanel.addEventListener("click", event => {
 detailModal.addEventListener("click", event => {
   if (event.target.closest("[data-close-modal]")) closeDetails();
 });
+document.addEventListener("click", event => {
+  const infoButton = event.target.closest("[data-info-key]");
+  if (infoButton) {
+    showProductGuide(infoButton.dataset.infoKey);
+    return;
+  }
+  const metricInfo = event.target.closest("[data-current-metric-info]");
+  if (metricInfo) {
+    showCurrentMetricGuide(metricInfo.dataset.currentMetricInfo);
+  }
+});
 document.querySelector("#settingsButton")?.addEventListener("click", openSettings);
 settingsModal?.addEventListener("click", event => {
   if (event.target.closest("[data-close-settings]")) { closeSettings(); return; }
@@ -11619,35 +11990,10 @@ document.querySelectorAll("#radarPlayButton, #mapFramePlayButton").forEach(btn =
 document.querySelector("#radarOpacitySlider")?.addEventListener("input", event => {
   setRainfallOpacity(Number(event.target.value));
 });
-document.querySelector("#radarModeBtns")?.addEventListener("click", event => {
-  const button = event.target.closest("[data-radar-mode]");
-  if (!button || button.dataset.radarMode === activeRadarMode) return;
-  const previousMode = activeRadarMode;
-  localStorage.setItem(
-    previousMode === "single" ? "radarSingleProduct" : "radarMrmsProduct",
-    activeMrmsProduct
-  );
-  activeRadarMode = button.dataset.radarMode === "single" ? "single" : "mrms";
-  const saved = localStorage.getItem(
-    activeRadarMode === "single" ? "radarSingleProduct" : "radarMrmsProduct"
-  );
-  activeMrmsProduct = activeRadarMode === "single"
-    ? (ON_DEVICE_RADAR_PRODUCTS[saved] ? saved : "nexrad_ref")
-    : (MRMS_PRODUCTS[saved] ? saved : "refl");
-  localStorage.setItem("radarMode", activeRadarMode);
-  localStorage.setItem("mrmsProduct", activeMrmsProduct);
-  radarLatestResetKey = `${activeRadarMode}:${activeMrmsProduct}`;
-  onDeviceRadarFrameInfo = [];
-  renderRadarSubControls();
-  drawRadar(false);
-});
 document.querySelector("#mrmsProductSelect")?.addEventListener("change", event => {
   activeMrmsProduct = event.target.value;
   localStorage.setItem("mrmsProduct", activeMrmsProduct);
-  localStorage.setItem(
-    activeRadarMode === "single" ? "radarSingleProduct" : "radarMrmsProduct",
-    activeMrmsProduct
-  );
+  localStorage.setItem("radarMrmsProduct", activeMrmsProduct);
   radarLatestResetKey = `${activeRadarMode}:${activeMrmsProduct}`;
   onDeviceRadarFrameInfo = [];
   radarFrames = [];
@@ -11661,8 +12007,33 @@ document.querySelector("#radarPaletteInput")?.addEventListener("change", event =
 document.querySelector("#radarPaletteReset")?.addEventListener("click", () => {
   resetActiveRadarPalette().catch(error => setFrameTimeLabel(`Color reset failed: ${error.message}`));
 });
+document.querySelector(".map-options-details")?.addEventListener("toggle", event => {
+  const details = event.currentTarget;
+  if (!details.open) return;
+  const panel = details.closest(".map-panel");
+  if (!panel) return;
+  requestAnimationFrame(() => {
+    const targetTop = Math.max(0, details.offsetTop + details.offsetHeight - panel.clientHeight + 12);
+    panel.scrollTo({
+      top: targetTop,
+      behavior: mapSettings.reduceAnimations ? "auto" : "smooth",
+    });
+  });
+});
 
 const coastalBody = document.querySelector("#coastalBody");
+document.querySelector("#coastalViewSwitch")?.addEventListener("click", event => {
+  const button = event.target.closest("[data-coastal-view]");
+  if (!button) return;
+  activeCoastalView = button.dataset.coastalView;
+  syncCoastalView(true);
+});
+document.querySelector("#aviationViewSwitch")?.addEventListener("click", event => {
+  const button = event.target.closest("[data-aviation-view]");
+  if (!button) return;
+  activeAviationView = button.dataset.aviationView;
+  syncAviationView(true);
+});
 coastalBody?.addEventListener("click", event => {
   const preset = event.target.closest("[data-coastal-preset]");
   if (preset) {
@@ -11706,6 +12077,7 @@ window.addEventListener("resize", () => {
 
 renderLayers();
 renderCoastal();   // placeholder until the first refresh resolves the marine sources
+syncAviationView();
 registerAppWorker();
 initHistoricalCalendar();
 scheduleMorningNotificationCheck();
