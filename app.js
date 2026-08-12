@@ -1729,8 +1729,16 @@ function showProductGuide(key) {
       ${guide.rows.map(([term, whatItIs, whatItMeans, symbol]) => `
         <article class="product-guide-item">
           <h3>${guideIcon(symbol)}<span>${safeText(term)}</span></h3>
-          <p><strong>What it is</strong>${safeText(whatItIs)}</p>
-          <p><strong>What it means</strong>${safeText(whatItMeans || whatItIs)}</p>
+          <div class="product-guide-explanations">
+            <section class="product-guide-explanation product-guide-definition">
+              <div class="product-guide-label"><span aria-hidden="true">i</span><strong>What it is</strong></div>
+              <p>${safeText(whatItIs)}</p>
+            </section>
+            <section class="product-guide-explanation product-guide-meaning">
+              <div class="product-guide-label"><span aria-hidden="true">→</span><strong>What it means</strong></div>
+              <p>${safeText(whatItMeans || whatItIs)}</p>
+            </section>
+          </div>
         </article>`).join("")}
     </div>`;
   showDetailModal();
@@ -1756,8 +1764,16 @@ function showCurrentMetricGuide(index) {
     <div class="product-guide-list">
       <article class="product-guide-item">
         <h3>${uiIcon(icon)}<span>${safeText(name)}</span></h3>
-        <p><strong>What it is</strong>${safeText(whatItIs)}</p>
-        <p><strong>What it means</strong>${safeText(whatItMeans || "No interpretation is available for this reading.")}</p>
+        <div class="product-guide-explanations">
+          <section class="product-guide-explanation product-guide-definition">
+            <div class="product-guide-label"><span aria-hidden="true">i</span><strong>What it is</strong></div>
+            <p>${safeText(whatItIs)}</p>
+          </section>
+          <section class="product-guide-explanation product-guide-meaning">
+            <div class="product-guide-label"><span aria-hidden="true">→</span><strong>What it means</strong></div>
+            <p>${safeText(whatItMeans || "No interpretation is available for this reading.")}</p>
+          </section>
+        </div>
       </article>
     </div>`;
   showDetailModal();
@@ -2612,6 +2628,7 @@ function mergeAlerts(...groups) {
 }
 
 function tagsForAlert(alert) {
+  if (alert.source === "ECCC") return ecccWarningTags(alert.event, alert.riskColor);
   const p = alert.parameters || {};
   const detectionTag = severeDetectionTag(alert);
   // NWS alerts carry the hazard tags from the bottom of the raw product as
@@ -2769,10 +2786,32 @@ function ecccSeverity(p) {
   const colour = String(p.risk_colour_en || "").toLowerCase();
   if (colour === "red") return "Extreme";
   if (colour === "orange") return "Severe";
+  if (colour === "yellow") return "Moderate";
   const type = String(p.alert_type || "").toLowerCase();
   if (type === "warning") return "Severe";
-  if (type === "watch" || colour === "yellow") return "Moderate";
+  if (type === "watch") return "Moderate";
   return "Minor";
+}
+
+const ECCC_WARNING_DAMAGE_LEVELS = {
+  yellow: "Moderate",
+  orange: "High",
+  red: "Extreme",
+};
+
+function ecccRiskColor(value = "") {
+  const color = String(value).trim().toLowerCase();
+  return ECCC_WARNING_DAMAGE_LEVELS[color] ? color : "";
+}
+
+function isColorTieredEcccWarning(event = "") {
+  return /\b(tornado|severe thunderstorm) warning\b/i.test(event);
+}
+
+function ecccWarningTags(event = "", riskColor = "") {
+  const color = ecccRiskColor(riskColor);
+  if (!color || !isColorTieredEcccWarning(event)) return [];
+  return [titleCaseAlertName(color), `${ECCC_WARNING_DAMAGE_LEVELS[color]} damage`];
 }
 
 // The feed's id field embeds the publication batch, so the same alert gets a
@@ -2784,12 +2823,14 @@ function ecccStableAlertId(p = {}) {
     p.feature_name_en || "", p.validity_datetime || p.publication_datetime || ""].join("|");
 }
 
-// Canadian alert text shares one free-form format across event types, so no
-// hazard tags are derived for ECCC alerts (unlike NWS/IEM parameters).
+// ECCC tornado and severe-thunderstorm warnings use color tiers in place of
+// the NWS damage-threat wording. Preserve that tier so cards, notifications,
+// map popups, and the details modal can all describe the same alert level.
 function normalizeEcccAlert(feature) {
   const p = feature.properties || {};
   const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
-  return {
+  const riskColor = ecccRiskColor(p.risk_colour_en);
+  const alert = {
     id: ecccStableAlertId(p),
     event,
     headline: p.feature_name_en ? `${event} for ${p.feature_name_en}` : event,
@@ -2802,8 +2843,14 @@ function normalizeEcccAlert(feature) {
     parameters: {},
     areaDesc: [p.feature_name_en, p.province].filter(Boolean).join(", "),
     source: "ECCC",
+    riskColor,
+    damageThreat: isColorTieredEcccWarning(event) ? ECCC_WARNING_DAMAGE_LEVELS[riskColor] || "" : "",
     affectedZones: [],
   };
+  const displayEvent = alertDisplayEvent(alert);
+  alert.headline = p.feature_name_en ? `${displayEvent} for ${p.feature_name_en}` : displayEvent;
+  alert.tags = tagsForAlert(alert);
+  return alert;
 }
 
 // The weather-alerts collection keeps alerts around after they end (status_en
@@ -2841,7 +2888,7 @@ async function alertsPayload(lat, lon) {
   const ecccAlerts = ecccResult.status === "fulfilled" ? ecccResult.value : [];
   const alerts = mergeAlerts(nwsAlerts, ecccAlerts).map(alert => ({
     ...alert,
-    tags: alert.source === "ECCC" ? [] : tagsForAlert(alert),
+    tags: alert.tags || tagsForAlert(alert),
   }));
   const sources = [
     nwsResult.status === "fulfilled" && "NWS api.weather.gov alerts",
@@ -5658,6 +5705,9 @@ function alertPriority(alert) {
   const event = (alert.event || "").toLowerCase();
   const severity = (alert.severity || "").toLowerCase();
   const tags = (alert.tags || []).join(" ").toLowerCase();
+  const ecccColor = alert.source === "ECCC" ? ecccRiskColor(alert.riskColor) : "";
+  if (event.includes("tornado warning") && ecccColor === "red") return 1000;
+  if (event.includes("tornado warning") && ecccColor === "orange") return 900;
   if (event.includes("tornado warning") && tags.includes("emergency")) return 1000;
   if (event.includes("tornado warning") && (tags.includes("pds") || tags.includes("observed"))) return 900;
   if (event.includes("tornado warning")) return 800;
@@ -6728,6 +6778,10 @@ function parseAlertSections(text = "") {
 function alertDisplayEvent(alert) {
   const event = alert.event || "Weather Alert";
   const tags = (alert.tags || []).map(t => t.toLowerCase());
+  const ecccColor = alert.source === "ECCC" ? ecccRiskColor(alert.riskColor) : "";
+  if (ecccColor && isColorTieredEcccWarning(event)) {
+    return `${titleCaseAlertName(ecccColor)} ${event}`;
+  }
   if (event.toLowerCase() === "flash flood warning" &&
       (tags.some(t => t.includes("emergency")) || tags.some(t => t.includes("catastrophic")))) {
     return "Flash Flood Emergency";
@@ -6779,6 +6833,39 @@ const ALERT_LEVEL_CATEGORIES = {
     { label: "BLIZZARD", color: "#7dd3fc", desc: "Snow and sustained winds 35+ mph causing whiteout conditions. Do not travel. Potentially life-threatening." },
   ],
 };
+
+// Canadian color tiers represent the same escalation as the corresponding
+// NWS warning ladders, but keep ECCC's color and impact terminology. The
+// descriptions intentionally mirror the existing US guidance at each level.
+const ECCC_ALERT_LEVEL_CATEGORIES = {
+  "Tornado Warning": [
+    { label: "YELLOW · MODERATE", riskColor: "yellow", color: "#eab308", desc: "A tornado is imminent or occurring. Take shelter immediately in a lowest-floor interior room away from windows." },
+    { label: "ORANGE · HIGH", riskColor: "orange", color: "#f97316", desc: "An especially dangerous tornado threat is underway, and a strong tornado is likely. Take shelter immediately in a lowest-floor interior room away from windows." },
+    { label: "RED · EXTREME", riskColor: "red", color: "#dc2626", desc: "A confirmed, exceptionally dangerous tornado is producing devastating damage. This is the highest-level tornado warning — act immediately." },
+  ],
+  "Severe Thunderstorm Warning": [
+    { label: "YELLOW · MODERATE", riskColor: "yellow", color: "#eab308", desc: "Damaging winds and/or large hail from severe thunderstorms. Move indoors and away from windows." },
+    { label: "ORANGE · HIGH", riskColor: "orange", color: "#f97316", desc: "Particularly dangerous storm with winds 70–80+ mph or hail 1.75\"+ diameter. Seek sturdy shelter immediately." },
+    { label: "RED · EXTREME", riskColor: "red", color: "#dc2626", desc: "Extremely dangerous storm with wind damage threat 80+ mph and/or hail 2.75\"+ diameter. Catastrophic damage likely." },
+  ],
+};
+
+function activeNwsAlertLevel(event = "", tags = []) {
+  const currentTagsLower = tags.map(tag => String(tag).toLowerCase());
+  if (/\bwatch\b/i.test(event)) {
+    if (currentTagsLower.some(tag => tag.includes("pds") || tag.includes("particularly dangerous"))) return "PDS WATCH";
+    return "WATCH";
+  }
+  if (currentTagsLower.some(tag => tag.includes("emergency"))) return "EMERGENCY";
+  if (currentTagsLower.some(tag => tag.includes("pds") || tag.includes("particularly dangerous"))) return "PDS";
+  if (currentTagsLower.some(tag => tag.includes("destructive"))) return "DESTRUCTIVE";
+  if (currentTagsLower.some(tag => tag.includes("considerable"))) return "CONSIDERABLE";
+  // "Observed" confirms how a tornado was detected; it does not create a
+  // separate tornado-warning level. Flash-flood warnings do have an Observed
+  // row, so retain that behavior only for that event.
+  if (/flash flood warning/i.test(event) && currentTagsLower.some(tag => tag.includes("observed"))) return "OBSERVED";
+  return "WARNING";
+}
 
 // Custom safety tips per alert type. If not defined, precautionary actions from alert text are shown.
 const ALERT_CUSTOM_TIPS = {
@@ -6848,7 +6935,6 @@ function showAlertDetails(indexOrAlert) {
   const displayEvent = alertDisplayEvent(alert);
   const severity = alert.severity || "";
   const tags = alert.tags || [];
-  const currentTagsLower = tags.map(t => t.toLowerCase());
 
   modalEyebrow.textContent = "Weather Alert";
   modalTitle.textContent = displayEvent;
@@ -6922,19 +7008,13 @@ function showAlertDetails(indexOrAlert) {
   // WATCH"); when no PDS tag is found the regular WATCH row highlights —
   // previously the fallback returned "WARNING", which matches no watch row,
   // so watches never highlighted a level at all.
-  const categories = ALERT_LEVEL_CATEGORIES[event] || null;
-  const activeLevel = categories ? (() => {
-    if (/\bwatch\b/i.test(event)) {
-      if (currentTagsLower.some(t => t.includes("pds") || t.includes("particularly dangerous"))) return "PDS WATCH";
-      return "WATCH";
-    }
-    if (currentTagsLower.some(t => t.includes("emergency"))) return "EMERGENCY";
-    if (currentTagsLower.some(t => t.includes("pds") || t.includes("particularly dangerous"))) return "PDS";
-    if (currentTagsLower.some(t => t.includes("destructive"))) return "DESTRUCTIVE";
-    if (currentTagsLower.some(t => t.includes("considerable"))) return "CONSIDERABLE";
-    if (currentTagsLower.some(t => t.includes("observed"))) return "OBSERVED";
-    return "WARNING";
-  })() : null;
+  const ecccCategories = alert.source === "ECCC" ? ECCC_ALERT_LEVEL_CATEGORIES[event] : null;
+  const categories = ecccCategories || ALERT_LEVEL_CATEGORIES[event] || null;
+  const activeLevel = categories
+    ? (ecccCategories
+      ? categories.find(category => category.riskColor === ecccRiskColor(alert.riskColor))?.label || null
+      : activeNwsAlertLevel(event, tags))
+    : null;
   const categoriesHtml = categories ? `<div class="alert-level-table">
     <div class="alert-level-title">${safeText(displayEvent.toUpperCase())} LEVELS</div>
     ${categories.map(cat => `<div class="alert-level-row${cat.label === activeLevel ? " active-level" : ""}">
@@ -10248,6 +10328,8 @@ async function ecccAlertMapFeatures(box) {
         expires: alert.expires,
         description: alert.description,
         areaDesc: alert.areaDesc,
+        riskColor: alert.riskColor,
+        damageThreat: alert.damageThreat,
         zoneName: feature.properties?.feature_name_en || "",
         kind: alertKindFor(alert.event, feature.properties?.alert_type),
         fillColor: color.fill,
@@ -10464,13 +10546,21 @@ function buildAlertBodyHtml(feature, alertIdx, popupId) {
     ];
   } else {
     const evtLower = (p.event || "").toLowerCase();
-    const matchedAlert = (weatherState.alerts || []).find(a => a.event?.toLowerCase() === evtLower);
-    title = safeText(matchedAlert ? alertDisplayEvent(matchedAlert) : (p.event || "Weather Alert"));
+    const matchedAlert = (weatherState.alerts || []).find(alert =>
+      alert.event?.toLowerCase() === evtLower &&
+      (p.ecccAlert
+        ? alert.source === "ECCC" && ecccRiskColor(alert.riskColor) === ecccRiskColor(p.riskColor)
+        : alert.source !== "ECCC")
+    );
+    title = safeText(matchedAlert
+      ? alertDisplayEvent(matchedAlert)
+      : alertDisplayEvent({ event: p.event || "Weather Alert", source: p.ecccAlert ? "ECCC" : "NWS", riskColor: p.riskColor }));
     subtitle = p.ecccAlert ? "ECCC Alert" : "NWS Alert";
     iconStyle = `background:${safeText(p.fillColor || "#f59e0b")}22;border:1px solid ${safeText(p.lineColor || "#fbbf24")}66;`;
     chips = [
       expiresChip(p.expires),
       p.severity,
+      ...(p.ecccAlert ? ecccWarningTags(p.event, p.riskColor) : []),
       p.zoneName || p.areaDesc,
     ];
   }
@@ -10573,7 +10663,11 @@ function mountAlertLayers() {
     radarMap.addSource("alerts-source", {
       type: "geojson",
       data: filterAlertCollectionForMap(alertPolygonData || emptyCollection, "iem"),
-      maxzoom: 10,
+      // Generate real source tiles through the map's closest useful zooms.
+      // Stopping at 10 made county/watch polygons depend on heavily overscaled
+      // low-zoom tiles, where some features could disappear as users zoomed in.
+      maxzoom: 22,
+      tolerance: 0.25,
     });
   }
   if (!radarMap.getLayer("alerts-fill")) {
@@ -10594,7 +10688,8 @@ function mountAlertLayers() {
     radarMap.addSource("nws-alerts-source", {
       type: "geojson",
       data: filterAlertCollectionForMap(nwsAlertPolygonData || emptyCollection, "nws"),
-      maxzoom: 10,
+      maxzoom: 22,
+      tolerance: 0.25,
     });
   }
   if (!radarMap.getLayer("nws-alerts-fill")) {
@@ -12145,7 +12240,12 @@ window._viewAlertFromMapFeature = function(popupId, featureIdx) {
   } else {
     // NWS zone/county or ECCC alert — try matching by event type first
     const evtLower = (p.event || "").toLowerCase();
-    const alertIdx = alerts.findIndex(a => a.event?.toLowerCase() === evtLower);
+    const alertIdx = alerts.findIndex(alert =>
+      alert.event?.toLowerCase() === evtLower &&
+      (p.ecccAlert
+        ? alert.source === "ECCC" && ecccRiskColor(alert.riskColor) === ecccRiskColor(p.riskColor)
+        : alert.source !== "ECCC")
+    );
     if (alertIdx !== -1) {
       showAlertDetails(alertIdx);
     } else {
@@ -12153,12 +12253,14 @@ window._viewAlertFromMapFeature = function(popupId, featureIdx) {
       showAlertDetails({
         event: p.event || "Weather Alert",
         severity: p.severity || "Moderate",
-        tags: [],
+        tags: p.ecccAlert ? ecccWarningTags(p.event, p.riskColor) : [],
         description: p.description || "",
         instruction: p.instruction || "",
         expires: p.expires,
         areaDesc: p.zoneName || p.areaDesc || "",
         source: p.ecccAlert ? "ECCC" : "NWS",
+        riskColor: p.riskColor || "",
+        damageThreat: p.damageThreat || "",
         headline: p.headline || p.event || "Weather Alert",
       });
     }

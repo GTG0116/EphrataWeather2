@@ -3423,7 +3423,7 @@ body.modal-open {
 }
 
 .product-guide-item {
-  padding: 13px 14px;
+  padding: 15px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--panel-soft);
@@ -3433,24 +3433,70 @@ body.modal-open {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 9px;
-  font-size: 0.88rem;
+  margin: 0 0 12px;
+  font-size: 0.92rem;
 }
 
-.product-guide-item p {
+.product-guide-explanations {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin: 5px 0 0;
-  color: var(--muted);
-  font-size: 0.76rem;
-  line-height: 1.45;
 }
 
-.product-guide-item p strong {
+.product-guide-explanation {
+  min-width: 0;
+  padding: 10px 11px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 11px;
+  background: rgba(148, 163, 184, 0.055);
+}
+
+.product-guide-definition {
+  border-left: 3px solid #60a5fa;
+  background: rgba(96, 165, 250, 0.065);
+}
+
+.product-guide-meaning {
+  border-left: 3px solid #34d399;
+  background: rgba(52, 211, 153, 0.065);
+}
+
+.product-guide-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.product-guide-label > span {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: #dbeafe;
+  background: rgba(96, 165, 250, 0.2);
+  font-size: 0.7rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.product-guide-meaning .product-guide-label > span {
+  color: #d1fae5;
+  background: rgba(52, 211, 153, 0.2);
+}
+
+.product-guide-explanation p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+
+.product-guide-label strong {
   color: var(--text);
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+  letter-spacing: 0.055em;
   text-transform: uppercase;
 }
 
@@ -3496,9 +3542,8 @@ body.modal-open {
 }
 
 @media (max-width: 520px) {
-  .product-guide-item p {
+  .product-guide-explanations {
     grid-template-columns: 1fr;
-    gap: 2px;
   }
 }
 

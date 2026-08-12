@@ -22,10 +22,15 @@ test('patchy fog leaves a clean gap between cloud and fog banks', () => {
   assert.match(svg, /y1="56"/);
 });
 
-test('thunderstorm uses a shaped gradient bolt instead of a text glyph', () => {
-  const svg = WeatherIcons.render('storm');
-  assert.match(svg, /linearGradient/);
-  assert.match(svg, /M36 40L27 50\.5h6L30 59/);
-  assert.doesNotMatch(svg, /⚡/);
+test('partly-cloudy sun keeps a complete ray ring while it rotates', () => {
+  const svg = WeatherIcons.render('partly', { animated: true });
+  assert.equal((svg.match(/<line x1=/g) || []).length, 8);
+  assert.match(svg, /animation:wxSpin/);
 });
 
+test('thunderstorm uses a centered monoline bolt consistent with the icon set', () => {
+  const svg = WeatherIcons.render('storm');
+  assert.match(svg, /M37\.5 39\.5L28\.5 49\.5h6L31\.5 58\.5/);
+  assert.doesNotMatch(svg, /linearGradient|#fbbf24|fill="url/);
+  assert.doesNotMatch(svg, /⚡/);
+});

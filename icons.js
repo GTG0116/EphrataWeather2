@@ -91,14 +91,12 @@ const WeatherIcons = {
                 ${silhouettes}
             </mask>`;
 
-        // `skip` drops individual rays by index. Masking hides a ray only where
-        // the cloud actually covers it, so a ray aimed at the cloud's shoulder
-        // gets trimmed to a stray tick hanging off the outline instead of
-        // disappearing. Those rays are simply not drawn.
-        const sun = (cx, cy, r, rays = 8, skip = []) => {
+        // Always draw a complete ray ring. Cloud masks hide whatever is behind
+        // them, while keeping the rotating sun evenly ray-covered at every
+        // angle; omitting fixed rays left a visibly blank half as it spun.
+        const sun = (cx, cy, r, rays = 8) => {
             let lines = "";
             for (let i = 0; i < rays; i++) {
-                if (skip.includes(i)) continue;
                 const a = (i * 2 * Math.PI) / rays + Math.PI / 8;
                 const x1 = cx + Math.cos(a) * (r + 4.5), y1 = cy + Math.sin(a) * (r + 4.5);
                 const x2 = cx + Math.cos(a) * (r + 9.5), y2 = cy + Math.sin(a) * (r + 9.5);
@@ -183,7 +181,7 @@ const WeatherIcons = {
             case "partly":
                 return wrap(
                     mask(uid, cloudSilhouette(-2, 5, 1, 6)) +
-                    `<g mask="url(#${uid})">${sun(45, 19, 8.5, 8, [1, 2, 3])}</g>` +
+                    `<g mask="url(#${uid})">${sun(45, 19, 8.5)}</g>` +
                     cloud(-2, 5, 1));
 
             case "overcast":
@@ -196,17 +194,12 @@ const WeatherIcons = {
                 return wrap(cloud(-2, -3, 1, 1, 8) + drops(4, 50));
 
             case "storm": {
-                const boltGradient = `${uid}BoltGradient`;
-                const boltPath = "M36 40L27 50.5h6L30 59l11-12.5h-6.5L39 40z";
+                const boltPath = "M37.5 39.5L28.5 49.5h6L31.5 58.5l11-12.5H36l4-6.5";
                 const bolt = `
-                    <defs><linearGradient id="${boltGradient}" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0" stop-color="#fff7c2"/><stop offset="1" stop-color="#fbbf24"/>
-                    </linearGradient></defs>
-                    <path d="${boltPath}" fill="url(#${boltGradient})" stroke="rgba(255,255,255,.78)" stroke-width="1.05" stroke-linejoin="round"
-                        style="${anim ? "transform-origin:34px 49px;animation:wxBolt 3.2s ease-in-out infinite;" : ""}"/>`;
-                // The bolt is a solid shape, so the rain streaks behind it are
-                // cut away where it overlaps rather than crossing through it.
-                const boltCut = `<path d="${boltPath}" fill="#000" stroke="#000" stroke-width="3.4" stroke-linejoin="round"/>`;
+                    <path d="${boltPath}" ${base}
+                        style="${anim ? "transform-origin:35.5px 49px;animation:wxBolt 3.2s ease-in-out infinite;" : ""}"/>`;
+                // Give the monoline bolt a clean gap from the rain behind it.
+                const boltCut = `<path d="${boltPath}" fill="none" stroke="#000" stroke-width="4.8" stroke-linejoin="round" stroke-linecap="round"/>`;
                 return wrap(
                     cloud(-2, -5, 1, 1, 8) +
                     mask(uid, boltCut) +
