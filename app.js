@@ -2792,7 +2792,7 @@ function canadianTimezone(lon) {
 }
 
 function alertAgencyLabel(location = selectedLocation) {
-  return isInCanada(location?.lat, location?.lon) ? "ECCC" : "NWS";
+  return isCanadianLocation(location) ? "ECCC" : "NWS";
 }
 
 function titleCaseAlertName(name = "") {
@@ -2894,10 +2894,15 @@ async function ecccAlertsPayload(lat, lon) {
 // parameters (maxWindGust, maxHailSize, tornadoDetection, damage threats…)
 // printed at the bottom of the raw product, so no IEM merge/enrichment pass
 // is needed. The IEM storm-based feed is now only used for map polygons.
-async function alertsPayload(lat, lon) {
+async function alertsPayload(lat, lon, location = selectedLocation) {
+  const canadian = isCanadianLocation(location);
   const [nwsResult, ecccResult] = await Promise.allSettled([
-    getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
-    ecccAlertsPayload(lat, lon),
+    canadian
+      ? Promise.resolve({ features: [] })
+      : getJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
+    canadian
+      ? ecccAlertsPayload(lat, lon)
+      : Promise.resolve([]),
   ]);
   const nwsAlerts = nwsResult.status === "fulfilled"
     ? (nwsResult.value.features || []).map(normalizeNwsAlert)
@@ -2908,8 +2913,8 @@ async function alertsPayload(lat, lon) {
     tags: alert.tags || tagsForAlert(alert),
   }));
   const sources = [
-    nwsResult.status === "fulfilled" && "NWS api.weather.gov alerts",
-    isInCanada(lat, lon) && ecccResult.status === "fulfilled" && "ECCC alerts",
+    !canadian && nwsResult.status === "fulfilled" && "NWS api.weather.gov alerts",
+    canadian && ecccResult.status === "fulfilled" && "ECCC alerts",
   ].filter(Boolean);
   return {
     alerts,
@@ -3729,7 +3734,7 @@ async function weatherPayload() {
     getJson(props.forecastHourly),
     getJson(props.forecastGridData),
     getJson(props.observationStations),
-    alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
+    alertsPayload(loc.lat, loc.lon, loc).catch(() => ({ alerts: [], source: "Unavailable" })),
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
     pollenPayload().catch(() => null),
     astronomyPayload().catch(() => null),
@@ -3859,7 +3864,7 @@ async function openMeteoWeatherPayload() {
   selectedLocation.timezone = data.timezone || loc.timezone || "America/New_York";
 
   const [alertsData, airQuality, pollen, astronomy] = await Promise.all([
-    alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
+    alertsPayload(loc.lat, loc.lon, loc).catch(() => ({ alerts: [], source: "Unavailable" })),
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
     pollenPayload().catch(() => null),
     astronomyPayload().catch(() => null),
@@ -3947,7 +3952,7 @@ async function canadaWeatherPayload() {
     ? loc.timezone : canadianTimezone(loc.lon);
 
   const [alertsData, airQuality, pollen, astronomy] = await Promise.all([
-    alertsPayload(loc.lat, loc.lon).catch(() => ({ alerts: [], source: "Unavailable" })),
+    alertsPayload(loc.lat, loc.lon, loc).catch(() => ({ alerts: [], source: "Unavailable" })),
     airQualityPayload().catch(error => ({ label: "Unavailable", detail: `Open-Meteo air quality ${error.message}` })),
     pollenPayload().catch(() => null),
     astronomyPayload().catch(() => null),
@@ -8767,7 +8772,15 @@ function setRadarFrame(index) {
   updateRadarLabel();
   return getOnDeviceWeather()
     .then(api => api.showRadarFrame(radarFrameIndex))
-    .then(result => { refreshInspectReadout(); return result; })
+    .then(result => {
+      // Showing a decoded frame re-mounts/moves its custom layer at the decoder's
+      // basemap anchor. Restore the shared weather order immediately so alert
+      // borders never spend a frame underneath radar.
+      restackWeatherLayers();
+      raiseBoundaryLayers();
+      refreshInspectReadout();
+      return result;
+    })
     .catch(error => {
       setFrameTimeLabel(`Radar decode failed: ${error.message}`);
       console.warn("On-device radar frame unavailable", error);
@@ -10018,6 +10031,12 @@ function setSatelliteFrame(index) {
     updateRadarLabel();
     return getOnDeviceWeather()
       .then(api => api.showSatelliteFrame(satFrameIndex))
+      .then(result => {
+        restackWeatherLayers();
+        raiseBoundaryLayers();
+        refreshInspectReadout();
+        return result;
+      })
       .catch(error => {
         setFrameTimeLabel(`Satellite decode failed: ${error.message}`);
         console.warn("On-device satellite frame unavailable", error);
@@ -10572,6 +10591,7 @@ async function ecccAlertMapFeatures(box) {
       type: "Feature",
       geometry: feature.geometry,
       properties: {
+        alertId: alert.id,
         event: alert.event,
         headline: alert.headline,
         severity: alert.severity,
@@ -10597,6 +10617,14 @@ async function ecccAlertMapFeatures(box) {
 // active alert in one bbox request, matching the official NWS alert map.
 const NWS_WWA_QUERY_URL = "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer/1/query";
 const WWA_SIG_SEVERITY = { W: "Severe", A: "Moderate", Y: "Minor", S: "Minor" };
+
+function normalizeMapAlertId(value) {
+  return String(value || "")
+    .replace(/^https?:\/\/api\.weather\.gov\/alerts\//i, "")
+    .replace(/\/actual$/i, "")
+    .trim()
+    .toLowerCase();
+}
 
 async function nwsRegionalAlertFeatures(box) {
   const params = new URLSearchParams({
@@ -10710,11 +10738,14 @@ async function nwsAlertFeatureCollection() {
   ]);
   const data = nwsResult.status === "fulfilled" ? nwsResult.value : { features: [] };
   const features = ecccResult.status === "fulfilled" ? [...ecccResult.value] : [];
-  const localAlertIds = new Set((data.features || []).map(feature => feature.properties?.id).filter(Boolean));
+  const localAlertIds = new Set((data.features || [])
+    .map(feature => normalizeMapAlertId(feature.properties?.id))
+    .filter(Boolean));
   if (wwaResult.status === "fulfilled") {
     // Skip regional copies of alerts the point query already supplies with
     // fuller properties (zone names, descriptions) for the selected location.
-    features.push(...wwaResult.value.filter(feature => !localAlertIds.has(feature.properties.capId)));
+    features.push(...wwaResult.value.filter(feature =>
+      !localAlertIds.has(normalizeMapAlertId(feature.properties.capId))));
   }
   for (const feature of data.features || []) {
     const p = feature.properties || {};
@@ -11964,6 +11995,35 @@ function buildOverlayItemHtml(feature) {
 
 // ─── Unified click handler ────────────────────────────────────────────────────
 
+// queryRenderedFeatures can return the same GeoJSON feature once per rendered
+// tile, and some NWS alerts are expanded into more than one zone polygon. Use
+// the provider's stable alert id so a clicked warning/watch is offered once,
+// while distinct overlapping hazards remain separate popup pages.
+function alertPopupFeatureKey(feature) {
+  const p = feature?.properties || {};
+  const stableId = p.alertId || p.capId || p.id || p.uri || p.feature_id;
+  if (stableId) return normalizeMapAlertId(stableId);
+  const provider = p.ecccAlert ? "eccc" : (p.phenomena != null ? "iem" : "nws");
+  return [
+    provider,
+    p.event || `${p.phenomena || ""}.${p.significance || ""}`,
+    p.expires || p.expire || "",
+    p.issue || "",
+    p.headline || "",
+    p.areaDesc || p.zoneName || "",
+  ].map(value => String(value).trim().toLowerCase()).join("|");
+}
+
+function dedupeAlertPopupFeatures(features = []) {
+  const seen = new Set();
+  return features.filter(feature => {
+    const key = alertPopupFeatureKey(feature);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function collectPopupItems(point, preferredLsrFeature = null) {
   const items = [];
 
@@ -11993,7 +12053,7 @@ async function collectPopupItems(point, preferredLsrFeature = null) {
   // Collect alert features
   const alertLayerIds = ["alerts-fill", "nws-alerts-fill"].filter(l => radarMap.getLayer(l));
   if (alertLayerIds.length) {
-    radarMap.queryRenderedFeatures(point, { layers: alertLayerIds })
+    dedupeAlertPopupFeatures(radarMap.queryRenderedFeatures(point, { layers: alertLayerIds }))
       .forEach(f => items.push({ type: "alert", feature: f }));
   }
 

@@ -19,7 +19,7 @@ function extractFunction(name) {
 
 function loadHelpers() {
   const names = [
-    'isCanadianLocation', 'isUsLocation', 'forecastProviderFor', 'numericWind',
+    'isCanadianLocation', 'isUsLocation', 'forecastProviderFor', 'alertAgencyLabel', 'numericWind',
     'flightCategoryFor', 'forecastFlightCategory', 'droneOperatingAssessment', 'isoDurationMs', 'gridValueAt',
     'gridUnit', 'gridSpeedMph', 'gridDistanceMiles', 'gridHeightFeet',
     'forecastTextWeatherCode', 'preferredNwsStation',
@@ -34,11 +34,21 @@ function loadHelpers() {
 }
 
 test('forecast providers route by country instead of probing NWS globally', () => {
-  const { forecastProviderFor } = loadHelpers();
+  const { forecastProviderFor, alertAgencyLabel } = loadHelpers();
   assert.equal(forecastProviderFor({ name: 'Ephrata, PA', countryCode: 'US' }), 'NWS');
   assert.equal(forecastProviderFor({ name: 'Toronto, CA', countryCode: 'CA' }), 'ECCC');
   assert.equal(forecastProviderFor({ name: 'Berlin, Berlin, DE', countryCode: 'DE' }), 'Open-Meteo');
   assert.equal(forecastProviderFor({ name: 'Lancaster, Pennsylvania' }), 'NWS');
+  assert.equal(alertAgencyLabel({ name: 'Omaha, NE', countryCode: 'US', lat: 41.26, lon: -95.94 }), 'NWS');
+  assert.equal(alertAgencyLabel({ name: 'Toronto, CA', countryCode: 'CA', lat: 43.65, lon: -79.38 }), 'ECCC');
+});
+
+test('alert requests use the selected country instead of the overlapping Canada query box', () => {
+  const source = extractFunction('alertsPayload');
+  assert.match(source, /const canadian = isCanadianLocation\(location\)/);
+  assert.match(source, /canadian\s*\? Promise\.resolve\(\{ features: \[\] \}\)\s*:\s*getJson/);
+  assert.match(source, /canadian\s*\? ecccAlertsPayload\(lat, lon\)\s*:\s*Promise\.resolve\(\[\]\)/);
+  assert.doesNotMatch(source, /isInCanada\(lat, lon\)/);
 });
 
 test('the US weather pipeline consumes all official NWS point forecast links', () => {
