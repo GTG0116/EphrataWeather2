@@ -329,28 +329,17 @@ async function nwsActiveAlerts(location, env) {
     "User-Agent": env.NWS_USER_AGENT || "WeatherPortal/1.0 weather-alert-worker",
   };
 
-  // Use stored NWS zone codes (forecast zone + county zone) when available.
-  // ?zone= is more reliable than ?point= and captures county-level warnings directly.
-  const zones = (location.nwsZones || []).filter(z => /^[A-Z]{2}[CFZ]\d{3}$/i.test(z));
-  if (zones.length) {
-    const zoneResp = await fetch(
-      `https://api.weather.gov/alerts/active?zone=${zones.join(",")}`,
-      { headers: nwsHeaders }
-    );
-    if (zoneResp.ok) {
-      const data = await zoneResp.json();
-      return parseAlertFeatures(data.features || []);
-    }
-    // Zone-based call failed — fall through to point-based fallback below.
-  }
-
+  // Query the saved coordinates, never the containing county/forecast zone.
+  // A zone lookup can include a storm polygon elsewhere in the same county.
   const pointResp = await fetch(
     `https://api.weather.gov/alerts/active?point=${location.lat},${location.lon}`,
     { headers: nwsHeaders }
   );
   if (!pointResp.ok) throw new Error(`NWS alerts failed: ${pointResp.status}`);
   const data = await pointResp.json();
-  return parseAlertFeatures(data.features || []);
+  return parseAlertFeatures((data.features || [])
+    .filter(feature => !feature.geometry ||
+      pointInGeometry(location.lon, location.lat, feature.geometry)));
 }
 
 function parseAlertFeatures(features) {

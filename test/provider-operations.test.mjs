@@ -48,6 +48,7 @@ test('alert requests use the selected country instead of the overlapping Canada 
   assert.match(source, /const canadian = isCanadianLocation\(location\)/);
   assert.match(source, /canadian\s*\? Promise\.resolve\(\{ features: \[\] \}\)\s*:\s*getJson/);
   assert.match(source, /canadian\s*\? ecccAlertsPayload\(lat, lon\)\s*:\s*Promise\.resolve\(\[\]\)/);
+  assert.match(source, /filter\(feature => !feature\.geometry \|\| pointInGeometry\(lon, lat, feature\.geometry\)\)/);
   assert.doesNotMatch(source, /isInCanada\(lat, lon\)/);
 });
 

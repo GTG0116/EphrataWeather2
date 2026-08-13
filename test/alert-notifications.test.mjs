@@ -121,6 +121,49 @@ test('the deployed polling path migrates an existing raw id without sending an u
   assert.ok(writes[0].seenAlertIds.some(id => id.startsWith('nws-vtec:')));
 });
 
+test('background alerts use the selected point and reject a warning polygon elsewhere in its county', async () => {
+  const calls = [];
+  const context = {
+    URL,
+    Response,
+    TextEncoder,
+    console,
+    fetch: async url => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({
+        features: [
+          {
+            id: 'outside-warning',
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[[-76.8, 40.5], [-76.7, 40.5], [-76.7, 40.6], [-76.8, 40.6], [-76.8, 40.5]]],
+            },
+            properties: { event: 'Severe Thunderstorm Warning' },
+          },
+          {
+            id: 'inside-warning',
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[[-76.3, 40.0], [-76.1, 40.0], [-76.1, 40.2], [-76.3, 40.2], [-76.3, 40.0]]],
+            },
+            properties: { event: 'Severe Thunderstorm Warning' },
+          },
+        ],
+      }), { headers: { 'Content-Type': 'application/json' } });
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(workerSource.replace('export default', 'globalThis.workerDefault ='), context);
+
+  const alerts = await context.nwsActiveAlerts(
+    { lat: 40.1, lon: -76.2, nwsZones: ['PAC071'] },
+    { NWS_USER_AGENT: 'WeatherPortal notification test' },
+  );
+
+  assert.deepEqual(calls, ['https://api.weather.gov/alerts/active?point=40.1,-76.2']);
+  assert.deepEqual(Array.from(alerts, alert => alert.id), ['inside-warning']);
+});
+
 test('a flood-style one-link CAP update chain remains suppressed after learning the prior update id', () => {
   const firstUpdateAliases = worker.alertIdentityAliases({
     id: firstUpdateId,

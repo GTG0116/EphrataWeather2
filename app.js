@@ -2905,7 +2905,9 @@ async function alertsPayload(lat, lon, location = selectedLocation) {
       : Promise.resolve([]),
   ]);
   const nwsAlerts = nwsResult.status === "fulfilled"
-    ? (nwsResult.value.features || []).map(normalizeNwsAlert)
+    ? (nwsResult.value.features || [])
+      .filter(feature => !feature.geometry || pointInGeometry(lon, lat, feature.geometry))
+      .map(normalizeNwsAlert)
     : [];
   const ecccAlerts = ecccResult.status === "fulfilled" ? ecccResult.value : [];
   const alerts = mergeAlerts(nwsAlerts, ecccAlerts).map(alert => ({
@@ -6038,17 +6040,6 @@ async function registerPushSubscription() {
     });
   }
 
-  // Fetch NWS forecast zone + county zone codes so the worker can use the
-  // more reliable ?zone= endpoint instead of ?point= for county-level alerts.
-  let nwsZones = [];
-  try {
-    const gp = await getJson(`https://api.weather.gov/points/${selectedLocation.lat},${selectedLocation.lon}`);
-    nwsZones = [gp.properties?.forecastZone, gp.properties?.county, gp.properties?.fireWeatherZone]
-      .filter(Boolean)
-      .map(url => url.split("/").pop())
-      .filter(Boolean);
-  } catch {}
-
   // Skip the round-trip when this device already registered the identical
   // subscription + location recently — every stored subscribe costs the
   // worker a Workers KV write (only 1,000/day on the free plan), and the app
@@ -6057,7 +6048,6 @@ async function registerPushSubscription() {
     endpoint: subscription.endpoint,
     lat: selectedLocation.lat,
     lon: selectedLocation.lon,
-    zones: nwsZones,
   });
   try {
     const last = JSON.parse(localStorage.getItem("pushSubscribeState") || "null");
@@ -6069,7 +6059,7 @@ async function registerPushSubscription() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       subscription,
-      location: { ...selectedLocation, nwsZones },
+      location: selectedLocation,
     }),
   });
   if (!response.ok) throw new Error(`Push subscribe failed: ${response.status}`);
