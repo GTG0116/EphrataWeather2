@@ -45,7 +45,10 @@ export default {
         await env.SUBSCRIPTIONS.put(key, JSON.stringify({
           subscription,
           location,
-          seenAlertIds: alerts.map(alert => alert.id),
+          // Keep all identity aliases already active. NWS assigns a fresh CAP
+          // identifier to an update, while its VTEC event number and CAP
+          // references still tie it to the warning present at subscription.
+          seenAlertIds: uniqueAlertIdentities(alerts.flatMap(alertIdentityAliases)),
           updatedAt: new Date().toISOString(),
         }));
 
@@ -152,39 +155,70 @@ async function checkSubscriptions(env) {
         stats.errors.push(`alerts ${roundCoord(location.lat)},${roundCoord(location.lon)}: ${e.message}`);
         continue;
       }
-      const currentIds = alerts.map(alert => alert.id);
+      const currentIdentitySet = new Set(
+        alerts.flatMap(alertIdentityAliases).map(normalizeAlertIdentity).filter(Boolean)
+      );
 
       for (const { key, record } of subscribers) {
         try {
           const seen = new Set(record.seenAlertIds || []);
-          const unseenAlerts = alerts.filter(alert => !seen.has(alert.id));
+          const seenNormalized = new Set([...seen].map(normalizeAlertIdentity).filter(Boolean));
+          const unseenAlerts = [];
+          const learnedIds = [];
+
+          for (const alert of alerts) {
+            const aliases = alertIdentityAliases(alert);
+            const alreadySeen = anyAlertIdentitySeen(aliases, seenNormalized);
+            if (!alreadySeen) {
+              unseenAlerts.push(alert);
+              continue;
+            }
+
+            // An NWS update has a fresh CAP id. When it matched through a CAP
+            // reference or stable VTEC key, learn its aliases once. Flood
+            // products may reference only the immediately previous message,
+            // so advancing that chain is necessary to suppress later updates.
+            const currentMessageId = normalizeAlertIdentity(alert.id);
+            if (currentMessageId && !seenNormalized.has(currentMessageId)) {
+              for (const alias of aliases) {
+                const normalized = normalizeAlertIdentity(alias);
+                if (!normalized || seenNormalized.has(normalized)) continue;
+                seenNormalized.add(normalized);
+                learnedIds.push(alias);
+              }
+            }
+          }
+
           const deliveredIds = [];
+          let subscriptionGone = false;
 
           for (const alert of unseenAlerts) {
             const result = await sendPush(record.subscription, alert, record.location, env);
             if (result === "gone") {
               await env.SUBSCRIPTIONS.delete(key);
-              deliveredIds.length = 0;
+              subscriptionGone = true;
               break;
             }
-            deliveredIds.push(alert.id);
+            deliveredIds.push(...alertIdentityAliases(alert));
             stats.sent += 1;
           }
 
-          // Mark delivered alert IDs as seen so each new alert generates one
-          // notification. Workers KV allows just 1,000 writes/day on the free
-          // plan, so write only after a delivery — never for pruning alone.
+          if (subscriptionGone) continue;
+
+          // Mark delivered alert families as seen so each genuinely new alert
+          // generates one notification. A recognized update also gets one KV
+          // write to advance its identity chain, but pruning alone never does.
+          // Workers KV allows just 1,000 writes/day on the free plan.
           // (Prune-only writes on every alert expiry burned through the quota
           // during active weather, which then made every put() throw and broke
-          // /subscribe for the rest of the UTC day.) Stale IDs left in the set
-          // are harmless — CAP/ECCC IDs are never reused — and get pruned the
-          // next time a delivery forces a write anyway.
-          const currentIdSet = new Set(currentIds);
-          const updatedSeen = [...new Set([
-            ...[...seen].filter(id => currentIdSet.has(id)),
+          // /subscribe for the rest of the UTC day.) Stale IDs get pruned the
+          // next time a delivery or a recognized update forces a write.
+          const updatedSeen = uniqueAlertIdentities([
+            ...[...seen].filter(id => currentIdentitySet.has(normalizeAlertIdentity(id))),
+            ...learnedIds,
             ...deliveredIds,
-          ])];
-          const changed = deliveredIds.length > 0;
+          ]);
+          const changed = learnedIds.length > 0 || deliveredIds.length > 0;
           if (changed) {
             await env.SUBSCRIPTIONS.put(key, JSON.stringify({
               ...record,
@@ -320,40 +354,191 @@ async function nwsActiveAlerts(location, env) {
 }
 
 function parseAlertFeatures(features) {
-  return features.map(feature => ({
-    id: feature.id || feature.properties?.id || `${feature.properties?.event}-${feature.properties?.sent}`,
-    event: feature.properties?.event || "Weather Alert",
-    headline: feature.properties?.headline || null,
-    expires: feature.properties?.expires || null,
-    parameters: feature.properties?.parameters || {},
-  })).filter(alert => alert.id);
+  return features.map(feature => {
+    const properties = feature.properties || {};
+    return {
+      id: feature.id || properties.id || `${properties.event}-${properties.sent}`,
+      event: properties.event || "Weather Alert",
+      headline: properties.headline || null,
+      description: properties.description || "",
+      expires: properties.expires || null,
+      references: Array.isArray(properties.references) ? properties.references : [],
+      parameters: properties.parameters || {},
+    };
+  }).filter(alert => alert.id);
+}
+
+function normalizeAlertIdentity(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^https?:\/\/api\.weather\.gov\/alerts\//i, "")
+    .replace(/\/actual$/i, "")
+    .toLowerCase();
+}
+
+function uniqueAlertIdentities(values) {
+  const seen = new Set();
+  return values.filter(value => {
+    const normalized = normalizeAlertIdentity(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+// VTEC action codes (NEW, CON, EXT, EXA, EXB, COR, CAN, EXP, UPG) change as
+// a product is updated, but office + phenomenon + significance + event number
+// identify the warning series. Keeping the year avoids merging a reused event
+// number across seasons. CAP references are retained as aliases for alerts
+// without VTEC and for backward compatibility with already-stored raw IDs.
+function alertVtecIdentity(alert) {
+  const vtecValues = [
+    ...parameterValues(alert.parameters, "VTEC"),
+    ...parameterValues(alert.parameters, "vtec"),
+  ];
+  const text = [...vtecValues, alert.description || "", alert.headline || ""].join("\n");
+  const match = text.match(/\/[OTEX]\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\.(\d{6})T\d{4}Z-(\d{6})T\d{4}Z/i);
+  if (!match) return "";
+  const yearStamp = match[5] === "000000" ? match[6] : match[5];
+  return `nws-vtec:${match[1].toUpperCase()}.${match[2].toUpperCase()}.${match[3].toUpperCase()}.${match[4]}.${yearStamp.slice(0, 2)}`;
+}
+
+function referenceIdentifiers(references) {
+  const items = Array.isArray(references) ? references : [references];
+  return items.flatMap(reference => {
+    if (!reference) return [];
+    if (typeof reference === "object") {
+      return [reference.identifier || reference.id || reference["@id"]].filter(Boolean);
+    }
+    // The API normally supplies an array of full alert URLs. Also accept CAP's
+    // space-delimited sender,identifier,sent triples for defensive parsing.
+    return String(reference).trim().split(/\s+/).map(value => {
+      const fields = value.split(",");
+      return fields.length >= 3 ? fields[1] : value;
+    }).filter(Boolean);
+  });
+}
+
+function alertIdentityAliases(alert) {
+  return uniqueAlertIdentities([
+    alertVtecIdentity(alert),
+    alert.id,
+    ...referenceIdentifiers(alert.references),
+  ]);
+}
+
+function anyAlertIdentitySeen(aliases, seenNormalized) {
+  return aliases.some(alias => seenNormalized.has(normalizeAlertIdentity(alias)));
+}
+
+function parameterValues(parameters, name) {
+  const value = parameters?.[name];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return value == null || value === "" ? [] : [value];
 }
 
 function alertDisplayEvent(alert) {
   const event = alert.event || "Weather Alert";
-  const params = alert.parameters || {};
-  const floodThreat = String(params.flashFloodDamageThreat?.[0] || "").toLowerCase();
+  const floodThreat = String(parameterValues(alert.parameters, "flashFloodDamageThreat")[0] || "").toLowerCase();
   if (event.toLowerCase() === "flash flood warning" && floodThreat === "catastrophic") {
     return "Flash Flood Emergency";
   }
   return event;
 }
 
+function titleCaseTag(value) {
+  const text = String(value || "").replace(/_/g, " ").trim().toLowerCase();
+  if (!text) return "";
+  if (text === "pds") return "PDS";
+  return text.replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function warningNotificationTags(alert) {
+  const event = String(alert.event || "").toLowerCase();
+  const targetedWarning = event === "severe thunderstorm warning" ||
+    event === "tornado warning" || event === "flash flood warning";
+  if (!targetedWarning) return [];
+
+  const params = alert.parameters || {};
+  const damageParameter = event === "severe thunderstorm warning"
+    ? "thunderstormDamageThreat"
+    : event === "tornado warning"
+      ? "tornadoDamageThreat"
+      : "flashFloodDamageThreat";
+  const detectionParameter = event === "tornado warning"
+    ? "tornadoDetection"
+    : event === "flash flood warning"
+      ? "flashFloodDetection"
+      : "";
+  const text = `${alert.headline || ""} ${alert.description || ""}`;
+  const rawTags = [
+    parameterValues(params, damageParameter)[0],
+    detectionParameter && parameterValues(params, detectionParameter)[0],
+    /particularly dangerous situation/i.test(text) && "PDS",
+    /\b(tornado|flash flood) emergency\b/i.test(text) && "Emergency",
+  ];
+
+  if (event === "severe thunderstorm warning") {
+    const detection = [
+      ...parameterValues(params, "windThreat"),
+      ...parameterValues(params, "hailThreat"),
+    ].find(value => /observed|radar indicated/i.test(String(value)));
+    if (detection) rawTags.push(detection);
+  }
+
+  const seen = new Set();
+  return rawTags.map(titleCaseTag).filter(tag => {
+    const key = tag.toLowerCase();
+    if (!tag || key === "base" || key === "none" || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function formatNotificationMeasurement(value, unit) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const number = text.match(/\d*\.?\d+/)?.[0];
+  return number ? `${parseFloat(number)} ${unit}` : text;
+}
+
+function severeThunderstormImpacts(alert) {
+  if (String(alert.event || "").toLowerCase() !== "severe thunderstorm warning") return [];
+  const wind = parameterValues(alert.parameters, "maxWindGust")[0];
+  const hail = parameterValues(alert.parameters, "maxHailSize")[0];
+  return [
+    wind && `Max wind: ${formatNotificationMeasurement(wind, "mph")}`,
+    hail && `Max hail: ${formatNotificationMeasurement(hail, "in")}`,
+  ].filter(Boolean);
+}
+
+function alertNotificationContent(alert, location) {
+  const eventName = alertDisplayEvent(alert);
+  const tags = warningNotificationTags(alert);
+  const title = tags[0] ? `${eventName} — ${tags[0]}` : eventName;
+  const expiresText = formatExpiration(alert.expires, location);
+  const details = [...tags, ...severeThunderstormImpacts(alert)];
+  if (expiresText) details.push(`Expires ${expiresText}`);
+  const body = details.length
+    ? details.join(" • ")
+    : alert.headline || `${eventName} issued for your area.`;
+  return { title, body, tags };
+}
+
 async function sendPush(subscription, alert, location, env) {
   const jwt = await vapidJwt(subscription.endpoint, env);
 
-  const eventName = alertDisplayEvent(alert);
-  const expiresText = formatExpiration(alert.expires, location);
-  const body = expiresText
-    ? `${eventName} expires ${expiresText}`
-    : alert.headline || `${eventName} issued for your area.`;
+  const notification = alertNotificationContent(alert, location);
+  const identityAliases = alertIdentityAliases(alert);
+  const notificationKey = alertVtecIdentity(alert) || alert.id;
 
   const payload = {
-    title: eventName,
-    body,
-    tag: alert.id,
+    title: notification.title,
+    body: notification.body,
+    tag: notificationKey,
     id: alert.id,
-    event: eventName,
+    aliases: identityAliases,
+    event: alertDisplayEvent(alert),
     expires: alert.expires || null,
   };
   const encryptedBody = await encryptPushPayload(subscription, payload);

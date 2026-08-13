@@ -1,7 +1,7 @@
 // Bump on every release. The name is the cache's identity, so changing it is
 // what makes activate() drop the previous release's copies of the app shell —
 // otherwise a visitor who goes offline is served the old code indefinitely.
-const CACHE_NAME = "weather-portal-v27";
+const CACHE_NAME = "weather-portal-v28";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -24,6 +24,7 @@ const APP_SHELL = [
   "./js/hdf5.js",
   "./js/mirs.js",
   "./js/goes.js",
+  "./js/glm.js",
   "./js/satProducts.js",
   "./js/satellite.worker.js",
   "./js/satClient.js",
@@ -89,6 +90,11 @@ self.addEventListener("push", event => {
   }
 
   const alertId = payload.tag || payload.id;
+  const alertIds = [...new Set([
+    alertId,
+    payload.id,
+    ...(Array.isArray(payload.aliases) ? payload.aliases : []),
+  ].filter(Boolean))];
   const title = payload.title || "Weather Alert";
   const scope = self.registration.scope;
   const options = {
@@ -103,19 +109,19 @@ self.addEventListener("push", event => {
   // failures in caching or client broadcast don't prevent the notification on iOS.
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
-    if (alertId) {
-      await markAlertShown(alertId).catch(() => {});
-      await broadcastToClients({ type: "push-alert-shown", id: alertId }).catch(() => {});
+    if (alertIds.length) {
+      await markAlertsShown(alertIds).catch(() => {});
+      await broadcastToClients({ type: "push-alert-shown", ids: alertIds, id: alertId }).catch(() => {});
     }
   })());
 });
 
-async function markAlertShown(id) {
+async function markAlertsShown(ids) {
   const cache = await caches.open("push-shown-alerts-v1");
   const existing = await cache.match("ids").then(r => r?.json()).catch(() => null) || [];
-  if (!existing.includes(id)) {
-    existing.push(id);
-    await cache.put("ids", new Response(JSON.stringify(existing), { headers: { "Content-Type": "application/json" } }));
+  const updated = [...new Set([...existing, ...ids])];
+  if (updated.length !== existing.length) {
+    await cache.put("ids", new Response(JSON.stringify(updated), { headers: { "Content-Type": "application/json" } }));
   }
 }
 

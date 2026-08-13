@@ -845,6 +845,12 @@ let droughtLayerData = null;
 let fireWeatherDataCache = {};  // keyed by day (1|2)
 let wpcRainDataCache = {};      // keyed by day (1-5)
 let lsrData = null;
+let glmLayerData = null;
+let glmFetchedAt = 0;
+let glmLoadSequence = 0;
+let glmRefreshTimer = null;
+let glmAbortController = null;
+let glmLoaderPromise = null;
 let lsrMarkers = [];
 let activeLsrTypes = (() => {
   try {
@@ -871,7 +877,17 @@ let droughtPopupWired = false;
 let radarAnimationTimer;
 let radarFrameIndex = 0;
 let radarFrames = [];
-let radarOpacity = 0.78;
+const WEATHER_LAYER_OPACITY_KEY = "weatherLayerOpacity";
+
+function loadWeatherLayerOpacity() {
+  try {
+    const saved = Number(localStorage.getItem(WEATHER_LAYER_OPACITY_KEY));
+    if (Number.isFinite(saved) && saved >= 10 && saved <= 100) return saved / 100;
+  } catch {}
+  return 0.78;
+}
+
+let radarOpacity = loadWeatherLayerOpacity();
 let locationSuggestionTimer;
 let serviceWorkerRegistration = null;
 let suppressNextAlertNotifications = true;
@@ -2601,6 +2617,7 @@ function normalizeNwsAlert(feature) {
     expires: p.expires,
     description: p.description || "",
     instruction: p.instruction || "",
+    references: Array.isArray(p.references) ? p.references : [],
     parameters: p.parameters || {},
     areaDesc: p.areaDesc || "",
     source: "NWS",
@@ -5797,8 +5814,135 @@ function renderAlerts() {
   `;
 }
 
+function normalizeAlertNotificationId(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^https?:\/\/api\.weather\.gov\/alerts\//i, "")
+    .replace(/\/actual$/i, "")
+    .toLowerCase();
+}
+
+function notificationParameterValues(parameters, name) {
+  const value = parameters?.[name];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return value == null || value === "" ? [] : [value];
+}
+
+function alertNotificationVtecId(alert) {
+  const p = alert.parameters || {};
+  const vtec = [
+    ...notificationParameterValues(p, "VTEC"),
+    ...notificationParameterValues(p, "vtec"),
+  ];
+  const text = [...vtec, alert.description || "", alert.headline || ""].join("\n");
+  const match = text.match(/\/[OTEX]\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\.(\d{6})T\d{4}Z-(\d{6})T\d{4}Z/i);
+  if (!match) return "";
+  const yearStamp = match[5] === "000000" ? match[6] : match[5];
+  return `nws-vtec:${match[1].toUpperCase()}.${match[2].toUpperCase()}.${match[3].toUpperCase()}.${match[4]}.${yearStamp.slice(0, 2)}`;
+}
+
+function alertReferenceIds(references) {
+  const items = Array.isArray(references) ? references : [references];
+  return items.flatMap(reference => {
+    if (!reference) return [];
+    if (typeof reference === "object") {
+      return [reference.identifier || reference.id || reference["@id"]].filter(Boolean);
+    }
+    return String(reference).trim().split(/\s+/).map(value => {
+      const fields = value.split(",");
+      return fields.length >= 3 ? fields[1] : value;
+    }).filter(Boolean);
+  });
+}
+
+function alertNotificationIds(alert) {
+  const values = [
+    alertNotificationVtecId(alert),
+    alert.id || [alert.event, alert.effective, alert.expires, alert.headline].filter(Boolean).join("|"),
+    ...alertReferenceIds(alert.references),
+  ];
+  const seen = new Set();
+  return values.filter(value => {
+    const normalized = normalizeAlertNotificationId(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
 function alertNotificationId(alert) {
-  return String(alert.id || [alert.event, alert.effective, alert.expires, alert.headline].filter(Boolean).join("|"));
+  return alertNotificationVtecId(alert) || alertNotificationIds(alert)[0] || "weather-alert";
+}
+
+function alertMatchesNotificationIds(alert, ids) {
+  const normalizedIds = new Set(Array.from(ids || []).map(normalizeAlertNotificationId));
+  return alertNotificationIds(alert).some(id => normalizedIds.has(normalizeAlertNotificationId(id)));
+}
+
+function notificationTagLabel(value) {
+  const text = String(value || "").replace(/_/g, " ").trim().toLowerCase();
+  if (!text) return "";
+  if (text === "pds") return "PDS";
+  return text.replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function warningNotificationTags(alert) {
+  const event = String(alert.event || "").toLowerCase();
+  const targetedWarning = event === "severe thunderstorm warning" ||
+    event === "tornado warning" || event === "flash flood warning";
+  if (!targetedWarning) return [];
+  const p = alert.parameters || {};
+  const parameter = event === "severe thunderstorm warning"
+    ? "thunderstormDamageThreat"
+    : event === "tornado warning" ? "tornadoDamageThreat" : "flashFloodDamageThreat";
+  const text = `${alert.headline || ""} ${alert.description || ""}`;
+  const raw = [
+    notificationParameterValues(p, parameter)[0],
+    event === "tornado warning" && notificationParameterValues(p, "tornadoDetection")[0],
+    event === "flash flood warning" && notificationParameterValues(p, "flashFloodDetection")[0],
+    /particularly dangerous situation/i.test(text) && "PDS",
+    /\b(tornado|flash flood) emergency\b/i.test(text) && "Emergency",
+  ];
+  if (event === "severe thunderstorm warning") {
+    raw.push([
+      ...notificationParameterValues(p, "windThreat"),
+      ...notificationParameterValues(p, "hailThreat"),
+    ]
+      .find(value => /observed|radar indicated/i.test(String(value))));
+  }
+  const seen = new Set();
+  return raw.map(notificationTagLabel).filter(tag => {
+    const key = tag.toLowerCase();
+    if (!tag || key === "base" || key === "none" || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function notificationMeasurement(value, unit) {
+  const text = String(value || "").trim();
+  const number = text.match(/\d*\.?\d+/)?.[0];
+  return number ? `${parseFloat(number)} ${unit}` : text;
+}
+
+function alertNotificationContent(alert) {
+  const displayEvent = alertDisplayEvent(alert);
+  const tags = warningNotificationTags(alert);
+  const details = [...tags];
+  if (/^severe thunderstorm warning$/i.test(alert.event || "")) {
+    const wind = notificationParameterValues(alert.parameters, "maxWindGust")[0];
+    const hail = notificationParameterValues(alert.parameters, "maxHailSize")[0];
+    if (wind) details.push(`Max wind: ${notificationMeasurement(wind, "mph")}`);
+    if (hail) details.push(`Max hail: ${notificationMeasurement(hail, "in")}`);
+  }
+  const expiry = alertExpiryLabel(alert);
+  if (expiry) details.push(expiry.charAt(0).toUpperCase() + expiry.slice(1));
+  return {
+    title: tags[0] ? `${displayEvent} — ${tags[0]}` : displayEvent,
+    body: details.length
+      ? details.join(" • ")
+      : alert.headline || alert.description || `New alert for ${selectedLocation.name}`,
+  };
 }
 
 function notificationSupported() {
@@ -5929,18 +6073,17 @@ async function registerPushSubscription() {
 }
 
 function rememberCurrentAlerts() {
-  const ids = (weatherState.alerts || []).map(alertNotificationId).filter(Boolean);
+  const ids = [...new Set((weatherState.alerts || []).flatMap(alertNotificationIds).filter(Boolean))];
   localStorage.setItem("weatherSeenAlertIds", JSON.stringify(ids));
 }
 
 async function showAlertNotification(alert) {
   if (!notificationsEnabled()) return;
-  const title = alertDisplayEvent(alert);
-  const body = alert.headline || alert.description || `New alert for ${selectedLocation.name}`;
+  const { title, body } = alertNotificationContent(alert);
   const options = {
     body,
     tag: alertNotificationId(alert),
-    renotify: true,
+    renotify: false,
     badge: "./icon-192.png",
     icon: "./icon-192.png",
     data: { url: location.href },
@@ -5967,14 +6110,14 @@ function notifyNewWeatherAlerts() {
   if (!notificationsEnabled()) return;
   const alerts = weatherState.alerts || [];
   const storedIds = localStorage.getItem("weatherSeenAlertIds");
-  const currentIds = alerts.map(alertNotificationId).filter(Boolean);
+  const currentIds = [...new Set(alerts.flatMap(alertNotificationIds).filter(Boolean))];
   if (suppressNextAlertNotifications || storedIds == null) {
     localStorage.setItem("weatherSeenAlertIds", JSON.stringify(currentIds));
     suppressNextAlertNotifications = false;
     return;
   }
   const oldIds = new Set(JSON.parse(storedIds || "[]"));
-  const newAlerts = alerts.filter(alert => !oldIds.has(alertNotificationId(alert)));
+  const newAlerts = alerts.filter(alert => !alertMatchesNotificationIds(alert, oldIds));
   localStorage.setItem("weatherSeenAlertIds", JSON.stringify(currentIds));
   newAlerts.slice(0, 3).forEach(showAlertNotification);
 }
@@ -6130,7 +6273,8 @@ async function registerAppWorker() {
     navigator.serviceWorker.addEventListener("message", event => {
       if (event.data?.type === "push-alert-shown") {
         const existing = new Set(JSON.parse(localStorage.getItem("weatherSeenAlertIds") || "[]"));
-        existing.add(event.data.id);
+        const ids = Array.isArray(event.data.ids) ? event.data.ids : [event.data.id];
+        ids.filter(Boolean).forEach(id => existing.add(id));
         localStorage.setItem("weatherSeenAlertIds", JSON.stringify([...existing]));
       }
       if (event.data?.type === "notification-click") {
@@ -8630,15 +8774,21 @@ function setRadarFrame(index) {
     });
 }
 
-function setRainfallOpacity(pct) {
-  radarOpacity = pct / 100;
+function setRainfallOpacity(pct, { persist = true } = {}) {
+  const normalizedPct = Math.max(10, Math.min(100, Math.round(Number(pct) || 78)));
+  radarOpacity = normalizedPct / 100;
+  if (persist) {
+    try { localStorage.setItem(WEATHER_LAYER_OPACITY_KEY, String(normalizedPct)); } catch {}
+  }
   if (onDeviceWeatherApi) onDeviceWeatherApi.setOpacity(radarOpacity);
   if (radarMap && mapLoaded) {
     if (radarMap.getLayer("satellite-layer"))
       radarMap.setPaintProperty("satellite-layer", "raster-opacity", radarOpacity);
   }
+  const slider = document.querySelector("#radarOpacitySlider");
+  if (slider) slider.value = String(normalizedPct);
   const label = document.querySelector("#radarOpacityLabel");
-  if (label) label.textContent = `${pct}%`;
+  if (label) label.textContent = `${normalizedPct}%`;
 }
 
 function removeMapLayer(id) {
@@ -8652,6 +8802,12 @@ function removeMapSource(id) {
 function clearWeatherLayers() {
   // Any alert requests still resolving belong to the layer set being removed.
   alertLoadSequence++;
+  // A GLM request belongs to the style/layer stack that started it. Abort it on
+  // every redraw so a slow NOAA response cannot mount into a replacement style.
+  glmLoadSequence++;
+  glmAbortController?.abort();
+  glmAbortController = null;
+  clearTimeout(glmRefreshTimer);
   stopRadarAnimation();
   clearTimeout(radarFrameTransitionTimer);
   ["radar-layer-a", "radar-layer-b",
@@ -8661,6 +8817,7 @@ function clearWeatherLayers() {
    "nws-alerts-fill", "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
    "fire-fill", "fire-line",
    "wpc-rain-fill", "wpc-rain-line",
+   "glm-halo", "glm-flashes",
    "lsr-hit",
    "surface-layer",
    "satellite-layer",
@@ -8673,6 +8830,7 @@ function clearWeatherLayers() {
    "alerts-source", "nws-alerts-source",
    "fire-source",
    "wpc-rain-source",
+   "glm-source",
    "lsr-source",
    "surface-source",
    "satellite-source",
@@ -9020,6 +9178,93 @@ async function addWpcRainfallLayer() {
   }
 }
 
+function getGlmLoader() {
+  if (!glmLoaderPromise) glmLoaderPromise = import("./js/glm.js");
+  return glmLoaderPromise;
+}
+
+function scheduleGlmRefresh() {
+  clearTimeout(glmRefreshTimer);
+  if (!activeOverlays.has("GOES GLM")) return;
+  glmRefreshTimer = setTimeout(() => {
+    addGlmLayer({ force: true }).catch(error => {
+      if (error?.name !== "AbortError") console.warn("GOES GLM refresh failed", error);
+    });
+  }, 60_000);
+}
+
+async function addGlmLayer({ force = false } = {}) {
+  if (!radarMap || !mapLoaded || !activeOverlays.has("GOES GLM")) return;
+  const sequence = ++glmLoadSequence;
+  const cacheIsFresh = glmLayerData && Date.now() - glmFetchedAt < 45_000;
+
+  if (force || !cacheIsFresh) {
+    glmAbortController?.abort();
+    const controller = new AbortController();
+    glmAbortController = controller;
+    try {
+      const { loadRecentGlmGeoJson } = await getGlmLoader();
+      const data = await loadRecentGlmGeoJson({ signal: controller.signal });
+      if (sequence !== glmLoadSequence || controller.signal.aborted) return;
+      glmLayerData = data;
+      glmFetchedAt = Date.now();
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      // If NOAA has a brief listing/file outage, leave the last successful five
+      // minutes visible and try again on the normal refresh cadence.
+      if (!glmLayerData || Date.now() - glmFetchedAt > 180_000) {
+        radarMap?.getSource("glm-source")?.setData({ type: "FeatureCollection", features: [] });
+        scheduleGlmRefresh();
+        throw error;
+      }
+      console.warn("Using cached GOES GLM flashes after refresh failed", error);
+    } finally {
+      if (glmAbortController === controller) glmAbortController = null;
+    }
+  }
+
+  if (sequence !== glmLoadSequence || !glmLayerData ||
+      !activeOverlays.has("GOES GLM") || !radarMap?.getStyle()) return;
+
+  const source = radarMap.getSource("glm-source");
+  if (source) {
+    source.setData(glmLayerData);
+  } else {
+    radarMap.addSource("glm-source", {
+      type: "geojson",
+      data: glmLayerData,
+      attribution: "NOAA/NESDIS GOES-19 GLM",
+    });
+    addWeatherLayer({
+      id: "glm-halo",
+      type: "circle",
+      source: "glm-source",
+      paint: {
+        "circle-color": "#111827",
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 3.4, 6, 6, 10, 10],
+        "circle-opacity": ["interpolate", ["linear"], ["get", "ageMinutes"], 0, 0.66, 5, 0.12],
+        "circle-blur": 0.25,
+      },
+    });
+    addWeatherLayer({
+      id: "glm-flashes",
+      type: "circle",
+      source: "glm-source",
+      paint: {
+        "circle-color": ["interpolate", ["linear"], ["get", "ageMinutes"],
+          0, "#ffffff", 0.75, "#fef08a", 2.5, "#facc15", 5, "#f97316"],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 1.4, 6, 2.8, 10, 5.2],
+        "circle-opacity": ["interpolate", ["linear"], ["get", "ageMinutes"], 0, 0.98, 5, 0.34],
+        "circle-stroke-color": "rgba(15, 23, 42, 0.82)",
+        "circle-stroke-width": 0.45,
+      },
+    });
+  }
+  restackWeatherLayers();
+  raiseBoundaryLayers();
+  scheduleGlmRefresh();
+}
+
 async function addSurfaceAnalysisLayer() {
   if (!radarMap || !mapLoaded) return;
   // Route through worker proxy — NOAA nowCOAST ArcGIS WMS lacks CORS headers.
@@ -9191,15 +9436,20 @@ async function detectSatFrameCount(view = captureRenderedSatelliteView()) {
 // delineated. The whole stack is inserted beneath the basemap's boundary and
 // label layers (see basemapLabelAnchorId), keeping borders and town names
 // legible above all weather data.
+// Outlook fills are deliberately below radar; their line layers and GLM are
+// deliberately above both selectable base layers. This invariant is re-applied
+// after asynchronous decoders finish and after every Mapbox style replacement.
 const WEATHER_LAYER_ORDER = [
   "satellite-layer", "on-device-satellite",
-  "drought-fill", "drought-line",
-  "fire-fill", "fire-line",
-  "wpc-rain-fill", "wpc-rain-line",
-  "spc-fill", "spc-line", "spc-cig-fill", "spc-cig-line",
+  "drought-fill",
+  "fire-fill",
+  "wpc-rain-fill",
+  "spc-fill", "spc-cig-fill",
   "surface-layer",
   "alerts-fill", "nws-alerts-fill",
   "radar-layer-a", "radar-layer-b", "on-device-radar", "on-device-mrms",
+  "glm-halo", "glm-flashes",
+  "drought-line", "fire-line", "wpc-rain-line", "spc-line", "spc-cig-line",
   "nws-alerts-halo", "nws-alerts-casing", "nws-alerts-line",
   "alerts-halo", "alerts-casing", "alerts-line",
   "lsr-hit",
@@ -10904,6 +11154,7 @@ function drawRadar(relocate = false) {
   if (activeOverlays.has("Alerts"))       addAlertsLayer().catch(e => console.warn("Alerts unavailable", e));
   if (activeOverlays.has("Fire Wx"))      addFireWeatherLayer().catch(e => console.warn("Fire Wx unavailable", e));
   if (activeOverlays.has("WPC Rain"))     addWpcRainfallLayer().catch(e => console.warn("WPC Rain unavailable", e));
+  if (activeOverlays.has("GOES GLM"))     addGlmLayer().catch(e => console.warn("GOES GLM unavailable", e));
   if (activeOverlays.has("LSR"))          addLsrLayer().catch(e => console.warn("LSR unavailable", e));
   if (activeOverlays.has("Cyclones"))     addCyclonesLayer().catch(e => console.warn("Cyclones unavailable", e));
   if (satelliteActive)                    addSatelliteLayer().catch(e => console.warn("Satellite unavailable", e));
@@ -10950,6 +11201,7 @@ function animateRadarLayer() {
 const MAP_LAYER_INFO = {
   Radar: "MRMS radar combines many radar sites into one nationwide view. The default Precipitation Type product separates rain, snow, and ice.",
   Satellite: "GOES satellite imagery shows clouds, moisture, and storm structure from space.",
+  "GOES GLM": "GOES-19 Geostationary Lightning Mapper flashes observed during the latest five minutes. New flashes are white; older flashes fade through yellow and orange.",
   SPC: "Storm Prediction Center outlooks show where severe thunderstorms are possible and how the risk changes over the next several days.",
   Alerts: "Active official warnings, watches, and advisories from the National Weather Service or Environment Canada.",
   "Fire Wx": "Storm Prediction Center fire-weather outlooks highlight areas where wind and dry fuels may support dangerous fire spread.",
@@ -10984,7 +11236,7 @@ function renderLayers() {
     { id: "Radar",     isActive: () => radarActive },
     { id: "Satellite", isActive: () => satelliteActive },
   ];
-  const OVERLAY_LAYERS = ["SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
+  const OVERLAY_LAYERS = ["GOES GLM", "SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
 
   baseEl.innerHTML = BASE_LAYERS.map(l =>
     `<button type="button" role="radio" aria-checked="${l.isActive()}" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}" title="${safeText(MAP_LAYER_INFO[l.id])}">${l.id}</button>`
@@ -12170,6 +12422,7 @@ window.addEventListener("resize", () => {
   coastalResizeTimer = setTimeout(() => { if (coastalState?.isCoastal) renderCoastal(); }, 180);
 });
 
+setRainfallOpacity(radarOpacity * 100, { persist: false });
 renderLayers();
 renderCoastal();   // placeholder until the first refresh resolves the marine sources
 syncAviationView();

@@ -81,3 +81,144 @@ Findings from debugging "iOS Home Screen app never receives pushes":
    `aes128gcm` payload encryption, `TTL`/`Urgency` headers, `userVisibleOnly`
    subscription, and the `push` handler calling `showNotification()` inside
    `event.waitUntil()` before any secondary work (an iOS requirement).
+
+## Updating the deployed Cloudflare Worker
+
+This repository already has the live Worker configuration in `wrangler.toml`:
+
+- Worker: `weather-alert-worker`
+- public URL: `https://weather-alert-worker.gtg0116scratch.workers.dev`
+- code entry point: `cloudflare-alert-worker.js`
+- KV binding: `SUBSCRIPTIONS` (the existing namespace stores every device)
+- schedule: every two minutes
+- encrypted secret required at runtime: `VAPID_PRIVATE_KEY`
+
+For an ordinary code update, **do not** create a new Worker, KV namespace, or
+VAPID key. The existing subscriptions and KV data remain in place when the
+Worker code is deployed.
+
+### Normal update from Windows PowerShell
+
+1. Open PowerShell in the repository and confirm Node/npm are available:
+
+   ```powershell
+   Set-Location D:\EphrataWeather2
+   node --version
+   npm.cmd --version
+   npx.cmd wrangler@latest --version
+   ```
+
+   The first `npx.cmd` run may ask permission to download Wrangler. Cloudflare
+   recommends a current Wrangler release; using `@latest` here does not require
+   adding it permanently to this older project.
+
+2. Sign in, then verify which Cloudflare account Wrangler will use:
+
+   ```powershell
+   npx.cmd wrangler@latest login
+   npx.cmd wrangler@latest whoami
+   ```
+
+   The login command opens a browser. If more than one Cloudflare account is
+   offered, choose the account that owns the `gtg0116scratch.workers.dev`
+   subdomain and the existing `weather-alert-worker` Worker.
+
+3. Confirm the live Worker and its private-key secret already exist:
+
+   ```powershell
+   npx.cmd wrangler@latest deployments list
+   npx.cmd wrangler@latest secret list
+   ```
+
+   The first command should show existing deployments. The second should list
+   `VAPID_PRIVATE_KEY` (it shows the name, never the secret value). If no
+   existing Worker/deployments appear, stop: Wrangler is almost certainly using
+   the wrong Cloudflare account. If the secret name is missing, see **Missing
+   private key** below before deploying.
+
+4. Run the repository tests and a non-live Worker build:
+
+   ```powershell
+   npm.cmd test
+   npx.cmd wrangler@latest deploy --dry-run
+   ```
+
+5. Deploy the Worker:
+
+   ```powershell
+   npx.cmd wrangler@latest deploy
+   ```
+
+   Wrangler reads `wrangler.toml`, uploads `cloudflare-alert-worker.js`, keeps
+   the encrypted secret, reuses the configured KV namespace, and applies the
+   two-minute Cron Trigger. Confirm that the printed target is exactly:
+
+   ```text
+   https://weather-alert-worker.gtg0116scratch.workers.dev
+   ```
+
+6. Verify the deployment without sending a notification:
+
+   ```powershell
+   Invoke-RestMethod "https://weather-alert-worker.gtg0116scratch.workers.dev/health"
+   npx.cmd wrangler@latest deployments list
+   ```
+
+   The health response should contain `ok: true` and
+   `service: weather-alert-worker`.
+
+7. To watch the next scheduled run, leave this open for at least two minutes:
+
+   ```powershell
+   npx.cmd wrangler@latest tail
+   ```
+
+   Press Ctrl+C when finished. The following optional endpoint runs the alert
+   check immediately, but it is **not** a read-only health check: it can send
+   real pushes to every stored subscriber and update their seen-alert state.
+   Use it only when an immediate production notification test is intentional:
+
+   ```powershell
+   Invoke-RestMethod "https://weather-alert-worker.gtg0116scratch.workers.dev/check-now"
+   ```
+
+### Missing private key
+
+A normal deployment preserves `VAPID_PRIVATE_KEY`; it does not need to be
+entered again. If `secret list` does not show it and the original private key
+is available, restore it without putting it in any repository file:
+
+```powershell
+npx.cmd wrangler@latest secret put VAPID_PRIVATE_KEY
+```
+
+Paste the original value only into Wrangler's prompt. If that value has been
+lost, stop rather than generating a replacement casually: the public/private
+VAPID pair must match, and rotating it also requires updating the public key in
+both `wrangler.toml` and `app.js` so installed devices can resubscribe.
+
+### Roll back a bad Worker deployment
+
+List the deployments, copy the last known-good version ID, and roll back to it:
+
+```powershell
+npx.cmd wrangler@latest deployments list
+npx.cmd wrangler@latest rollback <VERSION_ID>
+```
+
+Rollback changes the live Worker immediately. It does not alter the local
+files, so fix or revert the local code separately before the next deployment.
+
+### Worker deployment versus website deployment
+
+`npx.cmd wrangler deploy` updates only the Cloudflare notification/proxy Worker.
+Changes to `app.js`, `sw.js`, `index.html`, or other website files still reach
+GitHub Pages through the repository's normal Git push/deployment. When a change
+touches both sides, deploy the Worker first, verify `/health`, and then publish
+the website so the server side is ready before browsers receive the new client.
+
+Current Cloudflare references: [install/update Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/),
+[deploy command](https://developers.cloudflare.com/workers/wrangler/commands/workers/),
+[Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/),
+[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/),
+and [real-time logs](https://developers.cloudflare.com/workers/observability/logs/real-time-logs/).
