@@ -2003,7 +2003,9 @@ body.map-mode .shell {
 
 .ops-row {
   display: grid;
-  grid-template-columns: 58px 76px minmax(0, 1fr);
+  /* "Favorable" is the widest status label. Give the badge its full
+     text + padding width so the letters do not crowd the pill border. */
+  grid-template-columns: 58px 82px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -2931,7 +2933,7 @@ body.modal-open {
 
 @media (max-width: 720px) {
   .ops-row {
-    grid-template-columns: 48px 68px minmax(0, 1fr);
+    grid-template-columns: 48px 82px minmax(0, 1fr);
     gap: 7px;
     padding: 9px 8px;
   }
