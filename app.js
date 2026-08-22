@@ -7639,16 +7639,19 @@ function renderRipAndSea() {
 
   const surfHeight = surfRowValue(today, SURF_HEIGHT_RE);
   const waterTemp = coastalState.tides?.waterTempF ?? marine.sstF;
+  // Keep each measurement in one place. A modeled significant wave height is
+  // not a second surf-height product, and a modeled sea-surface temperature is
+  // not a separate water-temperature observation.
   const seaRows = [
-    ["Surf height", surfHeight ? safeText(surfHeight) : fmtHeight(marine.waveFt)],
+    surfHeight ? ["Surf height", safeText(surfHeight)] : null,
     ["Significant wave height", fmtHeight(marine.waveFt)],
     ["Dominant period", marine.periodS == null ? "--" : `${marine.periodS.toFixed(1)} s`],
     ["Swell", `${fmtHeight(marine.swellFt)} from ${compassLabel(marine.swellDir)}`],
     ["Wind waves", fmtHeight(marine.windWaveFt)],
-    ["Water temperature", waterTemp == null ? "--" : fmtTemp(waterTemp)],
+    coastalState.tides?.waterTempF != null ? ["Water temperature", fmtTemp(waterTemp)] : null,
     ["Sea surface (model)", marine.sstF == null ? "--" : fmtTemp(marine.sstF)],
     ["Wave direction", compassLabel(marine.waveDir)],
-  ];
+  ].filter(Boolean);
 
   return `
     <div class="coastal-hero">
@@ -7670,17 +7673,16 @@ function renderCoastalMetrics() {
   const marine = coastalState.marine?.current || {};
   const tides = coastalState.tides;
   const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
-  const waterTemp = tides?.waterTempF ?? marine.sstF;
-
+  // Wave height, swell, and water temperature already appear in Sea State
+  // Now. This grid is reserved for distinct tide/current products so the
+  // overview never presents the same product twice.
   const metrics = [
-    ["wave", "Wave Height", fmtHeight(marine.waveFt), marine.periodS == null ? "Significant height" : `Dominant period ${marine.periodS.toFixed(1)} s`],
-    ["swell", "Swell", fmtHeight(marine.swellFt), marine.swellDir == null ? "Long-period energy" : `From ${compassLabel(marine.swellDir)}`],
-    ["seaTemp", "Water Temp", waterTemp == null ? "--" : fmtTemp(waterTemp), tides?.waterTempF != null ? `Gauge at ${safeText(tides.gauge.name)}` : "Modelled sea surface"],
     tides?.hasTides ? ["tide", nextTide ? `Next ${nextTide.type} Tide` : "Next Tide", nextTide ? nextTide.label : "--", nextTide ? `${fmtHeight(nextTide.heightFt, 1)} above ${tides.datum} at ${safeText(tides.station.name)}` : `${safeText(tides.station.name)}`] : null,
     tides?.observed ? ["tide", "Water Level", fmtHeight(tides.observed.heightFt, 1), `${safeText(tides.gauge.name)} gauge, ${tides.observed.label}`] : null,
     marine.currentKt == null ? null : ["seaCurrent", "Ocean Current", `${marine.currentKt.toFixed(1)} kt`, `Setting toward ${compassLabel(marine.currentDir)}`],
   ].filter(Boolean);
 
+  if (!metrics.length) return "";
   return `<div class="metric-grid">${metrics.map(([icon, name, value, detail]) => `
     <article class="tile metric">
       <div class="metric-head">${uiIcon(icon)}<p class="eyebrow">${name}</p></div>
