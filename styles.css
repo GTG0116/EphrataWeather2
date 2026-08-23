@@ -5816,6 +5816,33 @@ body.modal-open {
   font-size: 1.02rem;
 }
 
+.sea-rows-priority {
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 30%, var(--border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent-2) 8%, rgba(255, 255, 255, 0.03));
+}
+
+.sea-rows-priority dd {
+  font-size: 1.12rem;
+  font-weight: 800;
+}
+
+.sea-details {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.sea-details > .eyebrow {
+  margin: 0;
+  color: var(--muted);
+}
+
+.sea-details .sea-rows {
+  margin-top: 12px;
+}
+
 .coastal-panel .section-head {
   margin-bottom: 14px;
   gap: 12px;
