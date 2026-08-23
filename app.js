@@ -7639,17 +7639,24 @@ function renderRipAndSea() {
 
   const surfHeight = surfRowValue(today, SURF_HEIGHT_RE);
   const waterTemp = coastalState.tides?.waterTempF ?? marine.sstF;
+  const tides = coastalState.tides;
+  const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
   // Keep each measurement in one place. A modeled significant wave height is
   // not a second surf-height product, and a modeled sea-surface temperature is
   // not a separate water-temperature observation.
-  const seaRows = [
+  // Beach-planning essentials lead the card; technical sea-state details are
+  // deliberately separated below them so they do not bury temperature/tides.
+  const essentialRows = [
+    coastalState.tides?.waterTempF != null ? ["Water temperature", fmtTemp(waterTemp)] : null,
+    coastalState.tides?.waterTempF == null && marine.sstF != null ? ["Sea temperature (model)", fmtTemp(waterTemp)] : null,
+    tides?.hasTides ? [nextTide ? `Next ${nextTide.type.toLowerCase()} tide` : "Next tide", nextTide ? `${nextTide.label} · ${fmtHeight(nextTide.heightFt, 1)}` : "--"] : null,
     surfHeight ? ["Surf height", safeText(surfHeight)] : null,
     ["Significant wave height", fmtHeight(marine.waveFt)],
+  ].filter(Boolean);
+  const detailRows = [
     ["Dominant period", marine.periodS == null ? "--" : `${marine.periodS.toFixed(1)} s`],
     ["Swell", `${fmtHeight(marine.swellFt)} from ${compassLabel(marine.swellDir)}`],
     ["Wind waves", fmtHeight(marine.windWaveFt)],
-    coastalState.tides?.waterTempF != null ? ["Water temperature", fmtTemp(waterTemp)] : null,
-    ["Sea surface (model)", marine.sstF == null ? "--" : fmtTemp(marine.sstF)],
     ["Wave direction", compassLabel(marine.waveDir)],
   ].filter(Boolean);
 
@@ -7658,12 +7665,18 @@ function renderRipAndSea() {
       ${ripCard}
       <article class="tile sea-tile">
         <div class="tile-heading">
-          <p class="eyebrow">Sea State Now</p>
+          <p class="eyebrow">Beach Essentials</p>
           <strong>${safeText(townName())}</strong>
         </div>
-        <dl class="sea-rows">
-          ${seaRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
+        <dl class="sea-rows sea-rows-priority">
+          ${essentialRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
         </dl>
+        ${detailRows.length ? `<div class="sea-details">
+          <p class="eyebrow">More sea-state details</p>
+          <dl class="sea-rows">
+            ${detailRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
+          </dl>
+        </div>` : ""}
       </article>
     </div>
   `;
@@ -7672,12 +7685,10 @@ function renderRipAndSea() {
 function renderCoastalMetrics() {
   const marine = coastalState.marine?.current || {};
   const tides = coastalState.tides;
-  const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
-  // Wave height, swell, and water temperature already appear in Sea State
-  // Now. This grid is reserved for distinct tide/current products so the
-  // overview never presents the same product twice.
+  // The next tide already appears with the beach-planning essentials above.
+  // This grid is reserved for additional live water-level/current products so
+  // the overview never presents the same product twice.
   const metrics = [
-    tides?.hasTides ? ["tide", nextTide ? `Next ${nextTide.type} Tide` : "Next Tide", nextTide ? nextTide.label : "--", nextTide ? `${fmtHeight(nextTide.heightFt, 1)} above ${tides.datum} at ${safeText(tides.station.name)}` : `${safeText(tides.station.name)}`] : null,
     tides?.observed ? ["tide", "Water Level", fmtHeight(tides.observed.heightFt, 1), `${safeText(tides.gauge.name)} gauge, ${tides.observed.label}`] : null,
     marine.currentKt == null ? null : ["seaCurrent", "Ocean Current", `${marine.currentKt.toFixed(1)} kt`, `Setting toward ${compassLabel(marine.currentDir)}`],
   ].filter(Boolean);

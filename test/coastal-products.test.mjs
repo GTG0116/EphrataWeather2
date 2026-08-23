@@ -30,3 +30,23 @@ test('coastal sea state does not relabel model values as duplicate observations'
   assert.match(seaState, /tides\?\.waterTempF != null \? \["Water temperature"/);
   assert.doesNotMatch(seaState, /surfHeight \? safeText\(surfHeight\) : fmtHeight/);
 });
+
+test('coastal overview puts beach-planning essentials before technical sea details', () => {
+  const seaState = functionSource('renderRipAndSea', 'renderCoastalMetrics');
+
+  const waterTemp = seaState.indexOf('["Water temperature"');
+  const nextTide = seaState.indexOf('`Next ${nextTide.type.toLowerCase()} tide`');
+  const dominantPeriod = seaState.indexOf('["Dominant period"');
+  assert.ok(waterTemp >= 0 && nextTide > waterTemp, 'water temperature should lead the essentials');
+  assert.ok(dominantPeriod > nextTide, 'technical wave details should follow the next tide');
+  assert.match(seaState, /Beach Essentials/);
+  assert.match(seaState, /More sea-state details/);
+});
+
+test('coastal overview does not repeat the next tide in secondary metrics', () => {
+  const highlights = functionSource('renderCoastalMetrics', 'renderTidePanel');
+
+  assert.doesNotMatch(highlights, /Next Tide/);
+  assert.match(highlights, /Water Level/);
+  assert.match(highlights, /Ocean Current/);
+});
