@@ -8897,6 +8897,36 @@ function renderBasemapButtons() {
 
 // The scale bar follows whichever distance unit the user picked in Settings.
 let mapScaleControl = null;
+const WEATHER_OVERLAY_REFRESH_MS = 90 * 1000;
+let weatherOverlayRefreshTimer = null;
+let weatherOverlayRefreshRunning = false;
+
+// NOAA publishes the underlying products at different cadences. Polling the
+// lightweight listings every 90 seconds catches rapid radar/mesoscale updates
+// without repeatedly downloading a frame when its object key has not changed.
+async function refreshActiveWeatherOverlays() {
+  if (weatherOverlayRefreshRunning || document.hidden || !radarMap || !mapLoaded) return;
+  if (!radarActive && !satelliteActive) return;
+  weatherOverlayRefreshRunning = true;
+  try {
+    if (satelliteActive && !activeSatelliteSector) await addSatelliteLayer(true);
+    if (radarActive) await addRadarLayer(false, true);
+  } catch (error) {
+    // A missed poll is non-fatal; the next interval retries and the current
+    // imagery remains visible in the meantime.
+    console.warn("Weather overlay refresh failed", error);
+  } finally {
+    weatherOverlayRefreshRunning = false;
+  }
+}
+
+function startWeatherOverlayRefresh() {
+  if (weatherOverlayRefreshTimer) return;
+  weatherOverlayRefreshTimer = setInterval(refreshActiveWeatherOverlays, WEATHER_OVERLAY_REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshActiveWeatherOverlays();
+  });
+}
 function scaleControlUnit() {
   return unitChoice("distance") === "km" ? "metric" : "imperial";
 }
@@ -8927,6 +8957,7 @@ function initMap() {
   mapScaleControl = new mapboxgl.ScaleControl({ unit: scaleControlUnit() });
   radarMap.addControl(mapScaleControl, "bottom-left");
   radarMap.addControl(new mapboxgl.AttributionControl({ compact: true }), "bottom-right");
+  startWeatherOverlayRefresh();
   // "style.load" is the right signal for "the style is parsed, layers can be
   // added"; "load" additionally waits for the first screenful of tiles, so on a
   // slow or partially failing tile fetch the weather stack was never mounted at
@@ -8961,12 +8992,12 @@ function initMap() {
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
 }
 
-async function addRadarLayer(relocate = false) {
+async function addRadarLayer(relocate = false, forceRefresh = false) {
   const requestedMode = activeRadarMode;
   const requestedProduct = activeMrmsProduct;
   const requestedSite = requestedMode === "single" ? selectedRadarSite : null;
   const requestKey = `${requestedMode}:${requestedProduct}`;
-  const resetToLatest = radarLatestResetKey === requestKey;
+  const resetToLatest = forceRefresh || radarLatestResetKey === requestKey;
   const requestIsCurrent = () => Boolean(
     radarActive &&
     activeRadarMode === requestedMode &&
@@ -9921,7 +9952,7 @@ function restackWeatherLayers() {
   });
 }
 
-async function addSatelliteLayer() {
+async function addSatelliteLayer(forceRefresh = false) {
   const renderedSequence = ++renderedSatelliteSequence;
   // The legacy frame publisher still owns its storm-specific cropped products.
   // Full-disk/CONUS imagery below is raw and decoded locally; selecting an
@@ -9958,6 +9989,7 @@ async function addSatelliteLayer() {
       onFrame: event => {
         if (requestIsCurrent()) handleOnDeviceFrame(event);
       },
+      resetToLatest: forceRefresh,
     });
     if (!requestIsCurrent()) return;
     restackWeatherLayers();
