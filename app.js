@@ -536,7 +536,6 @@ const fallbackWeather = {
     dewPoint: 52,
     wind: 8,
     gust: 12,
-    uv: 4,
     pollen: null,
     pollenDetail: null,
     airQuality: "Unavailable",
@@ -1526,14 +1525,6 @@ function windDirLabel(deg) {
   return dirs[Math.round(deg / 22.5) % 16];
 }
 
-function uvRiskLabel(uv) {
-  if (uv == null) return "--";
-  if (uv <= 2) return "Low";
-  if (uv <= 5) return "Moderate";
-  if (uv <= 7) return "High";
-  if (uv <= 10) return "Very High";
-  return "Extreme";
-}
 
 function cloudCoverLabel(pct) {
   if (pct == null) return "--";
@@ -1763,7 +1754,6 @@ function showProductGuide(key) {
 const CURRENT_METRIC_DEFINITIONS = {
   air: "Air quality summarizes common outdoor pollutants using the reported air-quality index and, when available, pollutant concentrations from Open-Meteo.",
   pollen: "Pollen is the predicted airborne concentration of major plant allergens near the selected location, supplied by Google Pollen.",
-  uv: "The UV Index is a 0-and-up scale for the strength of sunburn-producing ultraviolet radiation at the surface.",
   dew: "Dew point is the temperature at which the air would become saturated. It is a direct measure of how much moisture is in the air.",
   humidity: "Relative humidity is how full the air is with water vapor compared with the maximum it could hold at the current temperature.",
   wind: "Wind is the sustained surface speed; gusts are brief increases above that sustained value. Local terrain and buildings can make either vary nearby.",
@@ -2454,7 +2444,11 @@ function nwsAlertColor(event = "", severity = "") {
 // Single color lookup shared by US and Canadian alerts, the alert list, the
 // detail modal and every map layer, so an event is the same color everywhere.
 function alertEventColor(event = "", severity = "") {
-  return nwsAlertColor(event, severity);
+  const base = ecccBaseEvent(event);
+  const key = alertColorKey(base);
+  const equivalent = NWS_GOV_ALERT_FILLS[key] || PRIORITY_ALERT_FILLS[key]
+    ? base : ECCC_TO_NWS_EVENT.find(([pattern]) => pattern.test(base))?.[1] || base;
+  return nwsAlertColor(equivalent, severity);
 }
 
 // Coarse alert class used by the map overlay filter. ECCC supplies an explicit
@@ -2800,10 +2794,8 @@ function titleCaseAlertName(name = "") {
 }
 
 function ecccSeverity(p) {
-  const colour = String(p.risk_colour_en || "").toLowerCase();
-  if (colour === "red") return "Extreme";
-  if (colour === "orange") return "Severe";
-  if (colour === "yellow") return "Moderate";
+  const event = ecccBaseEvent(p.alert_name_en || "");
+  if (/tornado warning/i.test(event)) return "Extreme";
   const type = String(p.alert_type || "").toLowerCase();
   if (type === "warning") return "Severe";
   if (type === "watch") return "Moderate";
@@ -2825,10 +2817,8 @@ function isColorTieredEcccWarning(event = "") {
   return /\b(tornado|severe thunderstorm) warning\b/i.test(event);
 }
 
-function ecccWarningTags(event = "", riskColor = "") {
-  const color = ecccRiskColor(riskColor);
-  if (!color || !isColorTieredEcccWarning(event)) return [];
-  return [titleCaseAlertName(color), `${ECCC_WARNING_DAMAGE_LEVELS[color]} damage`];
+function ecccWarningTags() {
+  return [];
 }
 
 // The feed's id field embeds the publication batch, so the same alert gets a
@@ -2840,12 +2830,10 @@ function ecccStableAlertId(p = {}) {
     p.feature_name_en || "", p.validity_datetime || p.publication_datetime || ""].join("|");
 }
 
-// ECCC tornado and severe-thunderstorm warnings use color tiers in place of
-// the NWS damage-threat wording. Preserve that tier so cards, notifications,
-// map popups, and the details modal can all describe the same alert level.
+// Keep official ECCC text and risk metadata, without inferring US damage tiers.
 function normalizeEcccAlert(feature) {
   const p = feature.properties || {};
-  const event = titleCaseAlertName(p.alert_name_en || "Weather Alert");
+  const event = ecccBaseEvent(p.alert_name_en || "Weather Alert");
   const riskColor = ecccRiskColor(p.risk_colour_en);
   const alert = {
     id: ecccStableAlertId(p),
@@ -2861,7 +2849,6 @@ function normalizeEcccAlert(feature) {
     areaDesc: [p.feature_name_en, p.province].filter(Boolean).join(", "),
     source: "ECCC",
     riskColor,
-    damageThreat: isColorTieredEcccWarning(event) ? ECCC_WARNING_DAMAGE_LEVELS[riskColor] || "" : "",
     affectedZones: [],
   };
   const displayEvent = alertDisplayEvent(alert);
@@ -3340,13 +3327,13 @@ const OPEN_METEO_DAILY_VARS = [
   "apparent_temperature_max", "apparent_temperature_min",
   "precipitation_probability_max", "precipitation_sum", "snowfall_sum",
   "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant",
-  "uv_index_max", "relative_humidity_2m_mean", "cloud_cover_mean",
+  "relative_humidity_2m_mean", "cloud_cover_mean",
 ];
 
 function openMeteoForecastUrl(loc, timezone) {
   return `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&current=temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,weather_code,` +
-    `pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,cloud_cover,is_day` +
+    `pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,is_day` +
     `&hourly=${OPEN_METEO_HOURLY_VARS.join(",")}` +
     `&daily=${OPEN_METEO_DAILY_VARS.join(",")}` +
     `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch` +
@@ -3552,7 +3539,6 @@ function buildForecastSeries(data, tzHint) {
     dailyExtras: {
       apparent_temperature_max: di.apparent_temperature_max || [],
       apparent_temperature_min: di.apparent_temperature_min || [],
-      uv_index_max: di.uv_index_max || [],
       relative_humidity_2m_mean: di.relative_humidity_2m_mean || [],
       wind_gusts_10m_max: di.wind_gusts_10m_max || [],
       cloud_cover_mean: di.cloud_cover_mean || [],
@@ -3566,7 +3552,7 @@ function buildForecastSeries(data, tzHint) {
 // api.weather.gov exposes the official 12-hour, hourly, and raw grid forecasts
 // as three linked products. The period feeds provide the readable forecast;
 // raw grid fields fill in aviation/operations details that the period objects
-// do not carry (gusts, sky cover, visibility, ceiling, and UV).
+// do not carry (gusts, sky cover, visibility, and ceiling).
 function isoDurationMs(duration = "") {
   const match = String(duration).match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/);
   if (!match) return 0;
@@ -3667,7 +3653,6 @@ function buildNwsForecastSeries(forecastData, hourlyData, gridData) {
       apparentTemperature: normalizedNwsTemperature(
         gridValueAt(grid.apparentTemperature, start), grid.apparentTemperature?.uom,
       ),
-      uvIndex: gridValueAt(grid.maxUVIndex, start),
       precipAmount: gridValueAt(grid.quantitativePrecipitation, start),
       snowAmount: gridValueAt(grid.snowfallAmount, start),
     };
@@ -3696,8 +3681,6 @@ function buildNwsForecastSeries(forecastData, hourlyData, gridData) {
         const nextNight = daily[daily.indexOf(period) + 1];
         return nextNight ? minimumFinite(valuesFor(nextNight, hour => hour.apparentTemperature)) : null;
       }),
-      uv_index_max: daytime.map(period => maximum(valuesFor(period, hour =>
-        hour.uvIndex == null ? null : Number(hour.uvIndex)))),
       relative_humidity_2m_mean: daytime.map(period => average(valuesFor(period, hour => {
         const humidity = nwsValue(hour, "relativeHumidity");
         return humidity == null ? null : Number(humidity);
@@ -3730,7 +3713,7 @@ async function weatherPayload() {
   const props = gridPoint.properties;
   selectedLocation.timezone = props.timeZone || loc.timezone || "America/New_York";
   // Use all three official NWS point products: readable daily/hourly periods
-  // plus the raw grid fields needed for gust, ceiling, visibility, cloud and UV.
+  // plus the raw grid fields needed for gust, ceiling, visibility and cloud.
   const [forecast, hourlyForecast, gridForecast, stations, alertsData, airQuality, pollen, astronomy, tempest, shore] = await Promise.all([
     getJson(props.forecast),
     getJson(props.forecastHourly),
@@ -3764,9 +3747,6 @@ async function weatherPayload() {
   // The station reports its own cloud layers; the model run is only the
   // fallback for stations that publish no sky condition.
   let cloudCover = observedCloudCover(observation) ?? firstHour.cloudCover ?? null;
-  // No surface station measures UV, so this one genuinely has to come from the
-  // model (a Tempest station overrides it further down).
-  let uv = firstHour.uvIndex ?? series.dailyExtras.uv_index_max?.[0] ?? null;
   let updated = p.timestamp || firstHour.startTime || new Date().toISOString();
   let currentSource = "NWS";
 
@@ -3810,7 +3790,6 @@ async function weatherPayload() {
     if (Number.isFinite(tempest.wind_gust)) gust = Math.round(tempest.wind_gust);
     const tempestPressure = tempest.sea_level_pressure ?? tempest.station_pressure;
     if (Number.isFinite(tempestPressure)) pressure = tempestPressure;
-    if (Number.isFinite(tempest.uv)) uv = tempest.uv;
     if (tempest.conditions) condition = tempest.conditions;
     if (Number.isFinite(tempest.time)) updated = new Date(tempest.time * 1000).toISOString();
     currentSource = "Tempest station";
@@ -3826,7 +3805,6 @@ async function weatherPayload() {
       dewPoint,
       wind,
       gust,
-      uv,
       cloudCover,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
@@ -3892,7 +3870,6 @@ async function openMeteoWeatherPayload() {
       dewPoint: cur.dew_point_2m != null ? Math.round(cur.dew_point_2m) : null,
       wind: cur.wind_speed_10m != null ? Math.round(cur.wind_speed_10m) : null,
       gust: cur.wind_gusts_10m != null ? Math.round(cur.wind_gusts_10m) : null,
-      uv: cur.uv_index ?? null,
       cloudCover: cur.cloud_cover ?? null,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
@@ -3999,12 +3976,6 @@ async function canadaWeatherPayload() {
   const condition = gcEn(cc.condition) || daily[0]?.shortForecast || "Live weather";
   const firstDay = daily[0] || {};
   const pressureKpa = gcVal(cc.pressure);
-  // Current conditions carry no UV; borrow it from the nearest forecast hour,
-  // then today's daily forecast (where the index is a plain text node).
-  const hourlyUv = gcVal(props.hourlyForecastGroup?.hourlyForecasts?.[0]?.uv?.index);
-  const dailyUvRaw = gcEn(props.forecastGroup?.forecasts?.[0]?.uv?.index);
-  const dailyUv = dailyUvRaw != null && Number.isFinite(Number(dailyUvRaw)) ? Number(dailyUvRaw) : null;
-  const uv = hourlyUv ?? dailyUv;
 
   return {
     current: {
@@ -4016,7 +3987,6 @@ async function canadaWeatherPayload() {
       dewPoint: fahrenheit(gcVal(cc.dewpoint)),
       wind: mph(gcVal(cc.wind?.speed)),
       gust: mph(gcVal(cc.wind?.gust)),
-      uv,
       cloudCover: null,
       pollen: Array.isArray(pollen) ? pollen[0]?.label || null : pollen?.label || null,
       pollenDetail: Array.isArray(pollen) ? pollen[0]?.detail || null : pollen?.detail || null,
@@ -4527,6 +4497,9 @@ async function marinePayload(lat, lon) {
 
   return {
     hasWaves: Number.isFinite(c.wave_height),
+    gridDistanceMi: Number.isFinite(data.latitude) && Number.isFinite(data.longitude)
+      && Math.abs(data.latitude) <= 90 && Math.abs(data.longitude) <= 180
+      ? milesBetween(lat, lon, data.latitude, data.longitude) : null,
     updated: c.time || null,
     current: {
       waveFt: ft(c.wave_height),
@@ -4707,10 +4680,17 @@ function estimateRipRisk(marineCurrent = {}, windMph = null) {
   return { ...level, estimated: true, basis: `${fmtHeight(waveFt)} seas at ${Math.round(periodS)} s` };
 }
 
+// A regional gauge or a distant sea-model cell is not evidence of a local coast.
+const COASTAL_GRID_MAX_MI = 10;
+function hasLocalCoastalData(marine) {
+  return marine?.hasWaves === true && Number.isFinite(marine.gridDistanceMi)
+    && marine.gridDistanceMi >= 0 && marine.gridDistanceMi <= COASTAL_GRID_MAX_MI;
+}
+
 async function coastalPayload() {
   const loc = point();
-  // The wave model and the ~31 KB gauge list are the cheap pair that decides
-  // whether this location is coastal at all; everything heavier waits on them.
+  // Validate local wave coverage before loading coastal products. Gauges can
+  // sit far up tidal rivers and cannot establish coastal eligibility alone.
   const [marineResult, gaugeResult] = await Promise.allSettled([
     marinePayload(loc.lat, loc.lon),
     nearestCoopsStation("gauges", loc.lat, loc.lon, TIDE_GAUGE_MAX_MI),
@@ -4718,7 +4698,7 @@ async function coastalPayload() {
   const marine = marineResult.status === "fulfilled" ? marineResult.value : null;
   const gauge = gaugeResult.status === "fulfilled" ? gaugeResult.value : null;
 
-  if (!marine?.hasWaves && !gauge) {
+  if (!hasLocalCoastalData(marine)) {
     return { isCoastal: false, marine: null, tides: null, observations: null, surf: null, waters: null };
   }
 
@@ -4767,7 +4747,7 @@ async function climatePayload(date) {
     "precipitation_sum","rain_sum","snowfall_sum",
     "wind_speed_10m_max","wind_gusts_10m_max","wind_direction_10m_dominant",
     "cloud_cover_mean","pressure_msl_mean",
-    "sunshine_duration","uv_index_max",
+    "sunshine_duration",
     "sunrise","sunset",
   ].join(",");
   const hourly = [
@@ -5228,14 +5208,6 @@ function fwiNote(score) {
 // Plain-English, threshold-based one-liners for the Today metric cards —
 // generated from the live value rather than a canned string per condition,
 // so they stay accurate no matter what the real reading is.
-function uvNote(uv) {
-  if (uv == null || Number.isNaN(uv)) return "Estimated daylight exposure.";
-  if (uv < 3) return "Low. Minimal protection is generally needed.";
-  if (uv < 6) return "Moderate. Use sunscreen and seek shade around midday.";
-  if (uv < 8) return "High. Reduce midday exposure and use sun protection.";
-  if (uv < 11) return "Very high. Minimize midday exposure and cover up.";
-  return "Extreme. Avoid midday sun when possible and use full protection.";
-}
 
 function humidityNote(rh) {
   if (rh == null || Number.isNaN(rh)) return "Relative humidity.";
@@ -5295,8 +5267,7 @@ function comfortIndex(weather) {
   const gust = weather.gust ?? wind;
   let windPenalty = Math.max(0, wind - 18) * 0.9;
   if (gust > wind + 12) windPenalty += Math.min(5, (gust - wind - 12) * 0.35);
-  const uvPenalty = Math.max(0, (weather.uv ?? 0) - 5) * 3.2;
-  return Math.max(0, Math.round(100 - tempPenalty - humidityPenalty - windPenalty - uvPenalty));
+  return Math.max(0, Math.round(100 - tempPenalty - humidityPenalty - windPenalty));
 }
 
 function comfortLabel(score) {
@@ -5363,7 +5334,6 @@ function uiIcon(name) {
   const icons = {
     air:      `<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/>`,
     pollen:   `<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3m-2.6-7.4-2.1 2.1M9.7 14.3l-2.1 2.1m9.8 0-2.1-2.1M9.7 9.7 7.6 7.6"/>`,
-    uv:       `<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2m-3.5-6.5-1.5 1.5M5 5l1.5 1.5M19 19l-1.5-1.5M5 19l1.5-1.5"/>`,
     dew:      `<path d="M12 2.69 17.66 8.35a8 8 0 1 1-11.32 0z"/>`,
     humidity: `<path d="M12 2.69 17.66 8.35a8 8 0 1 1-11.32 0z"/><path d="M8 16c1.5 2 4 2.5 6 1"/>`,
     wind:     `<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/>`,
@@ -5480,7 +5450,6 @@ function renderCurrent() {
   const metrics = [
     ["air", "Air Quality", current.airQuality || "Not reported", current.airQualityDetail || airQualityNote(current.airQuality)],
     current.pollen ? ["pollen", "Pollen", current.pollen, current.pollenDetail || "Google Pollen API"] : null,
-    ["uv", "UV Index", f(current.uv), uvNote(current.uv)],
     ["dew", "Dew Point", `${uTempNum(current.dewPoint)}°`, dewPointNote(current.dewPoint)],
     ["humidity", "Relative Humidity", `${f(current.humidity)}%`, humidityNote(current.humidity)],
     ["wind", "Wind", fmtWind(current.wind), windNote(current.wind, current.gust)],
@@ -5729,9 +5698,6 @@ function alertPriority(alert) {
   const event = (alert.event || "").toLowerCase();
   const severity = (alert.severity || "").toLowerCase();
   const tags = (alert.tags || []).join(" ").toLowerCase();
-  const ecccColor = alert.source === "ECCC" ? ecccRiskColor(alert.riskColor) : "";
-  if (event.includes("tornado warning") && ecccColor === "red") return 1000;
-  if (event.includes("tornado warning") && ecccColor === "orange") return 900;
   if (event.includes("tornado warning") && tags.includes("emergency")) return 1000;
   if (event.includes("tornado warning") && (tags.includes("pds") || tags.includes("observed"))) return 900;
   if (event.includes("tornado warning")) return 800;
@@ -6619,7 +6585,6 @@ function renderDaily() {
     const dayHumidity = dailyHumidity(extras, index);
     const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, dayHumidity, numericWind(day.windSpeed));
     const feelsLow  = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, dayHumidity, numericWind(night.windSpeed)) : null);
-    const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
 
     // Derive the month from the period name or fall back to current month
     const periodDate = day.startTime ? new Date(day.startTime) : new Date();
@@ -6667,7 +6632,6 @@ function renderDaily() {
         <span class="chip-precip">${uiIcon("precip")}${f(precip)}%</span>
         <span>${uiIcon("temp")}Feels ${uTempNum(feelsHigh)}°/${uTempNum(feelsLow)}°</span>
         ${windSpeed != null ? `<span>${uiIcon("wind")}${safeText(`${day.windDirection || ""} ${fmtWind(windSpeed)}`.trim())}</span>` : ""}
-        <span class="chip-uv">${uiIcon("uv")}UV ${f(uv, 1)}</span>
         ${pollenForecast[index] ? `<span class="pollen-chip" title="${safeText(pollenForecast[index].detail || '')}">${uiIcon("pollen")}${safeText(pollenForecast[index].label)}</span>` : ""}
       </div>
     </button>
@@ -6769,7 +6733,6 @@ function showDailyDetails(index) {
   const dayGust = dailyGust(extras, index);
   const feelsHigh = extras.apparent_temperature_max?.[index] ?? apparentTemperature(day.temperature, dayHumidity, numericWind(day.windSpeed));
   const feelsLow = extras.apparent_temperature_min?.[index] ?? (night ? apparentTemperature(night.temperature, dayHumidity, numericWind(night.windSpeed)) : null);
-  const uv = extras.uv_index_max?.[index] ?? weatherState.current?.uv;
   const windDay = numericWind(day.windSpeed);
   const windNight = night ? numericWind(night.windSpeed) : null;
   const dayCloud = forecastCloudCover(extras, index);
@@ -6858,7 +6821,6 @@ function showDailyDetails(index) {
     </div>
     <div class="day-modal-stats">
       ${statChip("temp", "Feels like", `${uTempNum(feelsHigh)}° / ${feelsLow != null ? `${uTempNum(feelsLow)}°` : "--"}`)}
-      ${statChip("uv", "UV index", f(uv, 1))}
       ${statChip("sunrise", "Sunrise", safeText(weatherState.astronomy?.sunrise || "--"))}
       ${statChip("sunset", "Sunset", safeText(weatherState.astronomy?.sunset || "--"))}
     </div>
@@ -6917,10 +6879,7 @@ function parseAlertSections(text = "") {
 function alertDisplayEvent(alert) {
   const event = alert.event || "Weather Alert";
   const tags = (alert.tags || []).map(t => t.toLowerCase());
-  const ecccColor = alert.source === "ECCC" ? ecccRiskColor(alert.riskColor) : "";
-  if (ecccColor && isColorTieredEcccWarning(event)) {
-    return `${titleCaseAlertName(ecccColor)} ${event}`;
-  }
+  if (alert.source === "ECCC") return ecccBaseEvent(event);
   if (event.toLowerCase() === "flash flood warning" &&
       (tags.some(t => t.includes("emergency")) || tags.some(t => t.includes("catastrophic")))) {
     return "Flash Flood Emergency";
@@ -6973,21 +6932,6 @@ const ALERT_LEVEL_CATEGORIES = {
   ],
 };
 
-// Canadian color tiers represent the same escalation as the corresponding
-// NWS warning ladders, but keep ECCC's color and impact terminology. The
-// descriptions intentionally mirror the existing US guidance at each level.
-const ECCC_ALERT_LEVEL_CATEGORIES = {
-  "Tornado Warning": [
-    { label: "YELLOW · MODERATE", riskColor: "yellow", color: "#eab308", desc: "A tornado is imminent or occurring. Take shelter immediately in a lowest-floor interior room away from windows." },
-    { label: "ORANGE · HIGH", riskColor: "orange", color: "#f97316", desc: "An especially dangerous tornado threat is underway, and a strong tornado is likely. Take shelter immediately in a lowest-floor interior room away from windows." },
-    { label: "RED · EXTREME", riskColor: "red", color: "#dc2626", desc: "A confirmed, exceptionally dangerous tornado is producing devastating damage. This is the highest-level tornado warning — act immediately." },
-  ],
-  "Severe Thunderstorm Warning": [
-    { label: "YELLOW · MODERATE", riskColor: "yellow", color: "#eab308", desc: "Damaging winds and/or large hail from severe thunderstorms. Move indoors and away from windows." },
-    { label: "ORANGE · HIGH", riskColor: "orange", color: "#f97316", desc: "Particularly dangerous storm with winds 70–80+ mph or hail 1.75\"+ diameter. Seek sturdy shelter immediately." },
-    { label: "RED · EXTREME", riskColor: "red", color: "#dc2626", desc: "Extremely dangerous storm with wind damage threat 80+ mph and/or hail 2.75\"+ diameter. Catastrophic damage likely." },
-  ],
-};
 
 function activeNwsAlertLevel(event = "", tags = []) {
   const currentTagsLower = tags.map(tag => String(tag).toLowerCase());
@@ -7147,13 +7091,8 @@ function showAlertDetails(indexOrAlert) {
   // WATCH"); when no PDS tag is found the regular WATCH row highlights —
   // previously the fallback returned "WARNING", which matches no watch row,
   // so watches never highlighted a level at all.
-  const ecccCategories = alert.source === "ECCC" ? ECCC_ALERT_LEVEL_CATEGORIES[event] : null;
-  const categories = ecccCategories || ALERT_LEVEL_CATEGORIES[event] || null;
-  const activeLevel = categories
-    ? (ecccCategories
-      ? categories.find(category => category.riskColor === ecccRiskColor(alert.riskColor))?.label || null
-      : activeNwsAlertLevel(event, tags))
-    : null;
+  const categories = alert.source === "ECCC" ? null : ALERT_LEVEL_CATEGORIES[event] || null;
+  const activeLevel = categories ? activeNwsAlertLevel(event, tags) : null;
   const categoriesHtml = categories ? `<div class="alert-level-table">
     <div class="alert-level-title">${safeText(displayEvent.toUpperCase())} LEVELS</div>
     ${categories.map(cat => `<div class="alert-level-row${cat.label === activeLevel ? " active-level" : ""}">
@@ -8111,12 +8050,9 @@ async function selectTideStation(stationId) {
   renderCoastal();
 }
 
-// The Coast tab is only meaningful where there is a coastline. It starts
-// visible and is taken away once the marine check comes back negative — rather
-// than being hidden on every refresh and re-shown a second later, which made
-// the whole tab bar jump. A failed check leaves the tab in place so the error
-// is reachable instead of silently swallowing a genuinely coastal location.
-let coastalTabVisible = true;
+// Show Coast only after the current location passes the marine proximity check.
+let coastalTabVisible = false;
+let coastalRequestId = 0;
 function updateCoastalTabVisibility() {
   const tab = document.querySelector('.tab[data-tab="coastal"]');
   if (!tab) return;
@@ -8128,6 +8064,9 @@ function updateCoastalTabVisibility() {
 }
 
 function refreshCoastal() {
+  const requestId = ++coastalRequestId;
+  coastalTabVisible = false;
+  updateCoastalTabVisibility();
   coastalState = null;
   coastalError = null;
   coastalSegmentIndex = 0;
@@ -8135,6 +8074,7 @@ function refreshCoastal() {
   coastalTideStationId = null;
   renderCoastal();
   return coastalPayload().then(data => {
+    if (requestId !== coastalRequestId) return;
     coastalState = data;
     const segments = data.surf?.segments || [];
     const matched = segments.findIndex(segment => segment.zones.includes(data.zoneId));
@@ -8143,8 +8083,9 @@ function refreshCoastal() {
     updateCoastalTabVisibility();
     renderCoastal();
   }).catch(error => {
+    if (requestId !== coastalRequestId) return;
     coastalError = error.message;
-    coastalTabVisible = true;
+    coastalTabVisible = false;
     updateCoastalTabVisibility();
     renderCoastal();
   });
@@ -8176,7 +8117,6 @@ async function renderClimate(date) {
     const cloud = d.cloud_cover_mean?.[i];
     const pressure = d.pressure_msl_mean?.[i];
     const sunshine = d.sunshine_duration?.[i];
-    const uv = d.uv_index_max?.[i];
     const sunriseStr = d.sunrise?.[i];
     const sunsetStr = d.sunset?.[i];
     const condition = wmoDescription(d.weather_code?.[i]);
@@ -10530,10 +10470,13 @@ const ECCC_TO_NWS_EVENT = [
   [/severe thunderstorm watch/i, "Severe Thunderstorm Watch"],
   [/snow squall/i, "Snow Squall Warning"],
   [/waterspout/i, "Special Marine Warning"],
+  [/(coastal flood|storm surge) watch/i, "Coastal Flood Watch"],
+  [/(coastal flood|storm surge)/i, "Coastal Flood Warning"],
   [/(rainfall|flood) warning/i, "Flood Warning"],
   [/(rainfall|flood) watch/i, "Flood Watch"],
-  [/(coastal flood|storm surge)/i, "Coastal Flood Warning"],
-  [/(blizzard|winter storm|ice storm|freezing rain) warning/i, "Winter Storm Warning"],
+  [/blizzard warning/i, "Blizzard Warning"],
+  [/(ice storm|freezing rain) warning/i, "Ice Storm Warning"],
+  [/(winter storm|snowfall) warning/i, "Winter Storm Warning"],
   [/winter storm watch/i, "Winter Storm Watch"],
   [/(snowfall|blowing snow|winter weather|freezing drizzle|freezing fog)/i, "Winter Weather Advisory"],
   [/(extreme cold|arctic outflow|flash freeze)/i, "Extreme Cold Warning"],
@@ -10546,12 +10489,12 @@ const ECCC_TO_NWS_EVENT = [
   [/red flag|fire/i, "Red Flag Warning"],
 ];
 
+function ecccBaseEvent(event = "") {
+  return titleCaseAlertName(String(event).replace(/^(?:yellow|orange|red)(?=\s|[-–:])(?!\s+flag\b)\s*(?:[-–:]\s*)?/i, "").trim());
+}
+
 function ecccAlertMapColor(p = {}) {
-  const name = String(p.alert_name_en || "");
-  const equivalent = ECCC_TO_NWS_EVENT.find(([pattern]) => pattern.test(name))?.[1] || name;
-  // ecccSeverity maps warnings/watches/statements onto the same severity rungs
-  // the US fallback colors use, so untranslated events also match US styling.
-  return alertEventColor(equivalent, ecccSeverity(p));
+  return alertEventColor(ecccBaseEvent(p.alert_name_en || ""), ecccSeverity(p));
 }
 
 // ECCC alert polygons for the map, shaped like the NWS zone alert features so

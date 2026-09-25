@@ -15,11 +15,15 @@ test('rain streaks stay centered beneath the cloud', () => {
 });
 
 test('patchy fog leaves a clean gap between cloud and fog banks', () => {
-  const svg = WeatherIcons.render('fog');
-  assert.match(svg, /translate\(-1 -15\) scale\(0\.86\)/);
-  assert.match(svg, /y1="40"/);
-  assert.match(svg, /y1="48"/);
-  assert.match(svg, /y1="56"/);
+  for (const animated of [false, true]) {
+    const svg = WeatherIcons.render('fog', { animated });
+    // Positioning belongs to a non-animated parent: CSS keyframes on the path
+    // must not replace its upward translation and move it into the fog banks.
+    assert.match(svg, /<g transform="translate\(-1 -15\) scale\(0\.86\)">\s*<path[\s\S]*?<\/g>/);
+    assert.match(svg, /y1="40"/);
+    assert.match(svg, /y1="48"/);
+    assert.match(svg, /y1="56"/);
+  }
 });
 
 test('partly-cloudy sun keeps a complete ray ring while it rotates', () => {

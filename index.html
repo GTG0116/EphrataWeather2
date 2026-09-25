@@ -2,6 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-5LNT98YZ4Z"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-5LNT98YZ4Z');
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#075985">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -24,7 +32,7 @@
          that exist but are unstyled and do nothing. A changed URL cannot be
          answered from a cache entry for the old one. Bump all three together on
          every release. -->
-    <link rel="stylesheet" href="styles.css?v=20260812d">
+    <link rel="stylesheet" href="styles.css?v=20260921b">
   </head>
   <body data-theme="sunny">
     <canvas id="atmosphereCanvas" aria-hidden="true"></canvas>
@@ -74,7 +82,7 @@
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><rect x="3.4" y="4.8" width="17.2" height="15.8" rx="3.2"/><path d="M3.4 9.6h17.2M8.2 2.9v3.4M15.8 2.9v3.4"/></svg>
           7 Days
         </button>
-        <button class="tab" type="button" data-tab="coastal">
+        <button class="tab" type="button" data-tab="coastal" hidden>
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 7.4c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 13c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 18.6c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/></svg>
           Coast
         </button>
@@ -492,7 +500,7 @@
     </div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.js"></script>
-    <script src="icons.js?v=20260812d"></script>
-    <script src="app.js?v=20260812d"></script>
+    <script src="icons.js?v=20260921b"></script>
+    <script src="app.js?v=20260921b"></script>
   </body>
 </html>

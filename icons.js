@@ -220,7 +220,9 @@ const WeatherIcons = {
                 // Keep a deliberate gap between the obscuring cloud and the
                 // first fog bank; when the two touched, patchy-fog icons read
                 // like three lines drawn through the cloud outline.
-                return wrap(cloud(-1, -15, 0.86, 0.85, 8) + lines);
+                // CSS animation replaces an element's SVG transform. Keep the
+                // placement on a parent so drifting cannot erase this gap.
+                return wrap(`<g transform="translate(-1 -15) scale(0.86)">${cloud(0, 0, 1, 0.85, 8)}</g>` + lines);
             }
 
             case "sunset": {
