@@ -7578,28 +7578,44 @@ function renderRipAndSea() {
 
   const surfHeight = surfRowValue(today, SURF_HEIGHT_RE);
   const waterTemp = coastalState.tides?.waterTempF ?? marine.sstF;
-  const seaRows = [
-    ["Surf height", surfHeight ? safeText(surfHeight) : fmtHeight(marine.waveFt)],
+  const tides = coastalState.tides;
+  const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
+  // Keep each measurement in one place. A modeled significant wave height is
+  // not a second surf-height product, and a modeled sea-surface temperature is
+  // not a separate water-temperature observation.
+  // Beach-planning essentials lead the card; technical sea-state details are
+  // deliberately separated below them so they do not bury temperature/tides.
+  const essentialRows = [
+    coastalState.tides?.waterTempF != null ? ["Water temperature", fmtTemp(waterTemp)] : null,
+    coastalState.tides?.waterTempF == null && marine.sstF != null ? ["Sea temperature (model)", fmtTemp(waterTemp)] : null,
+    tides?.hasTides ? [nextTide ? `Next ${nextTide.type.toLowerCase()} tide` : "Next tide", nextTide ? `${nextTide.label} · ${fmtHeight(nextTide.heightFt, 1)}` : "--"] : null,
+    surfHeight ? ["Surf height", safeText(surfHeight)] : null,
     ["Significant wave height", fmtHeight(marine.waveFt)],
+  ].filter(Boolean);
+  const detailRows = [
     ["Dominant period", marine.periodS == null ? "--" : `${marine.periodS.toFixed(1)} s`],
     ["Swell", `${fmtHeight(marine.swellFt)} from ${compassLabel(marine.swellDir)}`],
     ["Wind waves", fmtHeight(marine.windWaveFt)],
-    ["Water temperature", waterTemp == null ? "--" : fmtTemp(waterTemp)],
-    ["Sea surface (model)", marine.sstF == null ? "--" : fmtTemp(marine.sstF)],
     ["Wave direction", compassLabel(marine.waveDir)],
-  ];
+  ].filter(Boolean);
 
   return `
     <div class="coastal-hero">
       ${ripCard}
       <article class="tile sea-tile">
         <div class="tile-heading">
-          <p class="eyebrow">Sea State Now</p>
+          <p class="eyebrow">Beach Essentials</p>
           <strong>${safeText(townName())}</strong>
         </div>
-        <dl class="sea-rows">
-          ${seaRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
+        <dl class="sea-rows sea-rows-priority">
+          ${essentialRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
         </dl>
+        ${detailRows.length ? `<div class="sea-details">
+          <p class="eyebrow">More sea-state details</p>
+          <dl class="sea-rows">
+            ${detailRows.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("")}
+          </dl>
+        </div>` : ""}
       </article>
     </div>
   `;
@@ -7608,18 +7624,15 @@ function renderRipAndSea() {
 function renderCoastalMetrics() {
   const marine = coastalState.marine?.current || {};
   const tides = coastalState.tides;
-  const nextTide = tides?.events?.find(event => tideKey(event) >= tideNowKey());
-  const waterTemp = tides?.waterTempF ?? marine.sstF;
-
+  // The next tide already appears with the beach-planning essentials above.
+  // This grid is reserved for additional live water-level/current products so
+  // the overview never presents the same product twice.
   const metrics = [
-    ["wave", "Wave Height", fmtHeight(marine.waveFt), marine.periodS == null ? "Significant height" : `Dominant period ${marine.periodS.toFixed(1)} s`],
-    ["swell", "Swell", fmtHeight(marine.swellFt), marine.swellDir == null ? "Long-period energy" : `From ${compassLabel(marine.swellDir)}`],
-    ["seaTemp", "Water Temp", waterTemp == null ? "--" : fmtTemp(waterTemp), tides?.waterTempF != null ? `Gauge at ${safeText(tides.gauge.name)}` : "Modelled sea surface"],
-    tides?.hasTides ? ["tide", nextTide ? `Next ${nextTide.type} Tide` : "Next Tide", nextTide ? nextTide.label : "--", nextTide ? `${fmtHeight(nextTide.heightFt, 1)} above ${tides.datum} at ${safeText(tides.station.name)}` : `${safeText(tides.station.name)}`] : null,
     tides?.observed ? ["tide", "Water Level", fmtHeight(tides.observed.heightFt, 1), `${safeText(tides.gauge.name)} gauge, ${tides.observed.label}`] : null,
     marine.currentKt == null ? null : ["seaCurrent", "Ocean Current", `${marine.currentKt.toFixed(1)} kt`, `Setting toward ${compassLabel(marine.currentDir)}`],
   ].filter(Boolean);
 
+  if (!metrics.length) return "";
   return `<div class="metric-grid">${metrics.map(([icon, name, value, detail]) => `
     <article class="tile metric">
       <div class="metric-head">${uiIcon(icon)}<p class="eyebrow">${name}</p></div>
@@ -8824,6 +8837,36 @@ function renderBasemapButtons() {
 
 // The scale bar follows whichever distance unit the user picked in Settings.
 let mapScaleControl = null;
+const WEATHER_OVERLAY_REFRESH_MS = 90 * 1000;
+let weatherOverlayRefreshTimer = null;
+let weatherOverlayRefreshRunning = false;
+
+// NOAA publishes the underlying products at different cadences. Polling the
+// lightweight listings every 90 seconds catches rapid radar/mesoscale updates
+// without repeatedly downloading a frame when its object key has not changed.
+async function refreshActiveWeatherOverlays() {
+  if (weatherOverlayRefreshRunning || document.hidden || !radarMap || !mapLoaded) return;
+  if (!radarActive && !satelliteActive) return;
+  weatherOverlayRefreshRunning = true;
+  try {
+    if (satelliteActive && !activeSatelliteSector) await addSatelliteLayer(true);
+    if (radarActive) await addRadarLayer(false, true);
+  } catch (error) {
+    // A missed poll is non-fatal; the next interval retries and the current
+    // imagery remains visible in the meantime.
+    console.warn("Weather overlay refresh failed", error);
+  } finally {
+    weatherOverlayRefreshRunning = false;
+  }
+}
+
+function startWeatherOverlayRefresh() {
+  if (weatherOverlayRefreshTimer) return;
+  weatherOverlayRefreshTimer = setInterval(refreshActiveWeatherOverlays, WEATHER_OVERLAY_REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshActiveWeatherOverlays();
+  });
+}
 function scaleControlUnit() {
   return unitChoice("distance") === "km" ? "metric" : "imperial";
 }
@@ -8854,6 +8897,7 @@ function initMap() {
   mapScaleControl = new mapboxgl.ScaleControl({ unit: scaleControlUnit() });
   radarMap.addControl(mapScaleControl, "bottom-left");
   radarMap.addControl(new mapboxgl.AttributionControl({ compact: true }), "bottom-right");
+  startWeatherOverlayRefresh();
   // "style.load" is the right signal for "the style is parsed, layers can be
   // added"; "load" additionally waits for the first screenful of tiles, so on a
   // slow or partially failing tile fetch the weather stack was never mounted at
@@ -8888,12 +8932,12 @@ function initMap() {
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
 }
 
-async function addRadarLayer(relocate = false) {
+async function addRadarLayer(relocate = false, forceRefresh = false) {
   const requestedMode = activeRadarMode;
   const requestedProduct = activeMrmsProduct;
   const requestedSite = requestedMode === "single" ? selectedRadarSite : null;
   const requestKey = `${requestedMode}:${requestedProduct}`;
-  const resetToLatest = radarLatestResetKey === requestKey;
+  const resetToLatest = forceRefresh || radarLatestResetKey === requestKey;
   const requestIsCurrent = () => Boolean(
     radarActive &&
     activeRadarMode === requestedMode &&
@@ -9848,7 +9892,7 @@ function restackWeatherLayers() {
   });
 }
 
-async function addSatelliteLayer() {
+async function addSatelliteLayer(forceRefresh = false) {
   const renderedSequence = ++renderedSatelliteSequence;
   // The legacy frame publisher still owns its storm-specific cropped products.
   // Full-disk/CONUS imagery below is raw and decoded locally; selecting an
@@ -9885,6 +9929,7 @@ async function addSatelliteLayer() {
       onFrame: event => {
         if (requestIsCurrent()) handleOnDeviceFrame(event);
       },
+      resetToLatest: forceRefresh,
     });
     if (!requestIsCurrent()) return;
     restackWeatherLayers();

@@ -1450,7 +1450,10 @@ body.map-mode .shell {
      scale bar, the frame scrubber, the legends — is stacked from these, so a
      change to any one row pushes the others up instead of landing on top of
      them. The credit row is the floor. */
-  --map-credit-h: 22px;
+  --map-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --map-safe-left: env(safe-area-inset-left, 0px);
+  --map-safe-right: env(safe-area-inset-right, 0px);
+  --map-credit-h: calc(22px + var(--map-safe-bottom));
   --map-scrubber-h: 40px;
   --map-bottom-gap: 8px;
   /* Where the scrubber sits, and where a legend sits when there is no scrubber. */
@@ -1703,6 +1706,19 @@ body.map-mode .shell {
   align-items: flex-end;
   height: var(--map-credit-h, 22px);
   pointer-events: none;
+  box-sizing: border-box;
+  padding-bottom: var(--map-safe-bottom, 0px);
+}
+
+/* Keep the distance scale and information control inside rounded phone
+   corners/notches in both portrait and landscape. Mapbox's corner containers
+   otherwise sit at the rectangular CSS viewport edge. */
+#radarMap .mapboxgl-ctrl-bottom-left {
+  padding-left: max(4px, var(--map-safe-left, 0px));
+}
+
+#radarMap .mapboxgl-ctrl-bottom-right {
+  padding-right: max(4px, var(--map-safe-right, 0px));
 }
 
 #radarMap .mapboxgl-ctrl-bottom-left .mapboxgl-ctrl,
@@ -4421,7 +4437,7 @@ body.modal-open {
   /* A phone gets a shorter bar, and the attribution disc needs a little more
      room than the desktop credit line, so both constants move together. */
   .map-stage {
-    --map-credit-h: 24px;
+    --map-credit-h: calc(24px + var(--map-safe-bottom));
     --map-scrubber-h: 34px;
     --map-bottom-gap: 6px;
   }
@@ -5814,6 +5830,33 @@ body.modal-open {
 
 .sea-rows dd {
   font-size: 1.02rem;
+}
+
+.sea-rows-priority {
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 30%, var(--border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent-2) 8%, rgba(255, 255, 255, 0.03));
+}
+
+.sea-rows-priority dd {
+  font-size: 1.12rem;
+  font-weight: 800;
+}
+
+.sea-details {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.sea-details > .eyebrow {
+  margin: 0;
+  color: var(--muted);
+}
+
+.sea-details .sea-rows {
+  margin-top: 12px;
 }
 
 .coastal-panel .section-head {

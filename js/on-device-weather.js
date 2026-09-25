@@ -1765,6 +1765,7 @@ export async function loadSatellite({
   location = null,
   onStatus,
   onFrame,
+  resetToLatest = false,
 } = {}) {
   satelliteHooks = { onStatus, onFrame };
   activeMap = map || activeMap;
@@ -1786,7 +1787,7 @@ export async function loadSatellite({
     satelliteFrameMeta = null;
     satelliteHooks.onFrame?.({ kind: 'satellite', ...satelliteResult() });
   }
-  if (sourceChanged || productChanged || !satelliteFrames.length) {
+  if (sourceChanged || productChanged || resetToLatest || !satelliteFrames.length) {
     emitStatus('satellite', 'listing', `Finding recent ${source.label} scenes`, null);
     let frames = await listScenes(source.satKey, source.sectorKey, new Date());
     if (!frames.length)
@@ -1796,7 +1797,7 @@ export async function loadSatellite({
     satelliteFrameIndex = satelliteFrames.length - 1;
   }
   if (!satelliteFrames.length) throw new Error(`No recent ${source.label} scenes were found`);
-  const targetIndex = sourceChanged || productChanged || satelliteFrameIndex < 0
+  const targetIndex = sourceChanged || productChanged || resetToLatest || satelliteFrameIndex < 0
     ? satelliteFrames.length - 1
     : Math.min(satelliteFrameIndex, satelliteFrames.length - 1);
   return queueSatelliteFrame(targetIndex, sequence);
