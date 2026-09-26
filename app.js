@@ -4444,12 +4444,24 @@ async function coastalFloodPayload(gauge, lat, lon) {
 // request already in flight is shared), so a refresh or a second tab reuses
 // them instead of tripping the limit — which would otherwise quietly drop the
 // official coastal forecast back to the CO-OPS estimate.
+//
+// NWPS only attaches CORS headers to successful responses. When its gateway
+// answers with an error or throttles a visitor, the browser reports that as a
+// CORS block and the direct fetch fails outright, so a failed request is
+// retried once through the worker proxy, which adds the headers itself.
 const NWPS_CACHE_MS = 5 * 60 * 1000;
 const nwpsCache = new Map();
+async function nwpsFetch(url) {
+  try {
+    return await getJson(url);
+  } catch {
+    return getJson(`${WORKER_PROXY}${encodeURIComponent(url)}`);
+  }
+}
 function nwpsJson(url) {
   const hit = nwpsCache.get(url);
   if (hit && Date.now() - hit.at < NWPS_CACHE_MS) return hit.promise;
-  const promise = getJson(url);
+  const promise = nwpsFetch(url);
   nwpsCache.set(url, { at: Date.now(), promise });
   promise.catch(() => { if (nwpsCache.get(url)?.promise === promise) nwpsCache.delete(url); });
   return promise;

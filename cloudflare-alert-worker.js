@@ -85,7 +85,7 @@ export default {
       try { targetUrl = new URL(target); } catch {
         return json({ ok: false, error: "Invalid url" }, 400);
       }
-      const allowed = ["nowcoast.noaa.gov", "www.wpc.ncep.noaa.gov", "www.wpc.ncep.noaa.gov"];
+      const allowed = ["nowcoast.noaa.gov", "www.wpc.ncep.noaa.gov", "api.water.noaa.gov"];
       if (!allowed.some(host => targetUrl.hostname === host)) {
         return json({ ok: false, error: "Domain not allowed" }, 403);
       }
