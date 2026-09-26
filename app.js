@@ -160,10 +160,7 @@ const DROUGHT_URLS = [
 // its name, the unit its readout prints, and how many decimals.
 const MRMS_PRODUCTS = {
   rate:      { label: "Precip Type",     unit: "in/hr", dec: 2 },
-  // Reflectivity's timeline runs past now: the on-device decoder appends
-  // extrapolated frames after the observed ones, so the future radar lives
-  // inside this product instead of being a separate thing to switch to.
-  refl:      { label: "Reflectivity",    unit: "dBZ",   dec: 0, nowcast: true },
+  refl:      { label: "Reflectivity",    unit: "dBZ",   dec: 0 },
   mesh:      { label: "Hail (MESH)",     unit: "in",    dec: 2 },
   qpe6h:     { label: "6-Hr Precip",     unit: "in",    dec: 2 },
   qpe24h:    { label: "24-Hr Precip",    unit: "in",    dec: 2 },
@@ -727,17 +724,40 @@ function buildSkyScene(rawBucket) {
   skyScene = { drops, flakes, stars, clouds, fogBanks, flash: { next: skyT + skyRnd(1.5, 5), on: 0, x: 0.5, bolt: [] } };
 }
 buildSkyScene(skyBucket);
-let radarActive = true;
+// The map reopens on whichever base layer and overlays were last in use. Alerts
+// and lightning are on out of the box; once the user has toggled anything, their
+// saved set (even an empty one) wins over those defaults.
+const MAP_BASE_LAYER_KEY = "mapBaseLayer";
+const MAP_OVERLAYS_KEY = "mapOverlays";
+const MAP_OVERLAY_LAYERS = ["GOES GLM", "SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
+const DEFAULT_MAP_OVERLAYS = ["Alerts", "GOES GLM"];
+const savedMapBaseLayer = (() => {
+  try { return localStorage.getItem(MAP_BASE_LAYER_KEY) === "Satellite" ? "Satellite" : "Radar"; } catch { return "Radar"; }
+})();
+function loadMapOverlays() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MAP_OVERLAYS_KEY) || "null");
+    if (Array.isArray(saved)) return new Set(saved.filter(layer => MAP_OVERLAY_LAYERS.includes(layer)));
+  } catch { /* corrupt or blocked storage — fall back to the defaults */ }
+  return new Set(DEFAULT_MAP_OVERLAYS);
+}
+function saveMapLayers() {
+  try {
+    localStorage.setItem(MAP_BASE_LAYER_KEY, satelliteActive ? "Satellite" : "Radar");
+    localStorage.setItem(MAP_OVERLAYS_KEY, JSON.stringify([...activeOverlays]));
+    localStorage.setItem("satelliteType", activeSatelliteType);
+  } catch { /* private mode or quota — the session still keeps its layers */ }
+}
+let radarActive = savedMapBaseLayer === "Radar";
 let radarLatestResetKey = null;
 // MRMS is the only radar source exposed by the app. Keeping this explicit also
 // migrates browsers that previously saved the removed single-site mode.
 let activeRadarMode = "mrms";
 let selectedRadarSite = (localStorage.getItem("radarSite") || "").toUpperCase();
 let radarSiteMarkers = [];
-let activeOverlays = new Set();
+let activeOverlays = loadMapOverlays();
 let radarSlot = 0; // 0="a" or 1="b" for double-buffer animation
 let radarFrameTransitionTimer = null;
-let futureRadarPanTimer = null;
 let activeSpcType = "cat";   // cat | torn | wind | hail | prob
 let activeSpcDay  = 1;       // 1-8
 let activeWpcDay  = 1;       // 1-5
@@ -809,12 +829,14 @@ function radarFrameDelay() {
 function mapMotionMs(duration) {
   return mapSettings.reduceAnimations ? 0 : duration;
 }
-let activeSatelliteType = "geocolor";
+let activeSatelliteType = (() => {
+  try { return localStorage.getItem("satelliteType") || "geocolor"; } catch { return "geocolor"; }
+})();
 let activeSatelliteSource = (() => {
   const saved = localStorage.getItem("satelliteSource");
   return SATELLITE_SOURCES.some(s => s.id === saved) ? saved : "goes19conus";
 })();
-let satelliteActive = false;
+let satelliteActive = savedMapBaseLayer === "Satellite";
 let satFrames = [];               // e.g. [9,8,…,1,0]; value = file index, 0 = newest
 let satFrameIndex = 0;            // pointer into satFrames; latest = last element
 const satFrameCountCache = {};    // cacheKey → detected frame count
@@ -945,11 +967,6 @@ function isPrecipTypeProduct(product = activeMrmsProduct) {
   return activeRadarMode === "mrms" && product === "rate";
 }
 
-// Which MRMS product extends its own timeline into the future.
-function mrmsProductHasNowcast(product = activeMrmsProduct) {
-  return activeRadarMode === "mrms" && Boolean(MRMS_PRODUCTS[product]?.nowcast);
-}
-
 function getOnDeviceWeather() {
   if (!onDeviceWeatherPromise) {
     onDeviceWeatherPromise = import("./js/on-device-weather.js")
@@ -969,9 +986,6 @@ function decodedFrameLabel(frame, site = "") {
   const time = date && Number.isFinite(date.getTime())
     ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : frame?.label || "Latest";
-  // Storm motion and confidence live in the legend, so the scrubber label stays
-  // short enough to read at a glance: how far ahead, and when that is.
-  if (frame?.forecast) return `+${Number(frame.leadMinutes) || 0} min · ${time}`;
   return site ? `${site} · ${time}` : time;
 }
 
@@ -1044,9 +1058,6 @@ function handleOnDeviceFrame(event) {
   updateRadarLabel();
   // A different frame means a different number under the sight.
   refreshInspectReadout();
-  // The radar legend reports the extrapolation's state (building, movement,
-  // confidence), which changes as frames are appended and as the user scrubs
-  // between observed and forecast frames.
   if (event.kind === "radar" && !satelliteActive) renderMrmsLegend();
 }
 
@@ -1294,6 +1305,8 @@ function rerenderUnits() {
     renderMetar(weatherState.aviation || null);
   }
   if (coastalState) renderCoastal();
+  if (riverState) renderRivers();
+  renderFloodStatus();
   if (histSelectedDate) renderClimate(histSelectedDate);
 }
 
@@ -1656,6 +1669,7 @@ const PRODUCT_GUIDES = {
       ["Rip Current Risk", "An NWS surf-zone product that assesses the chance of dangerous currents pulling swimmers away from shore; where unavailable, the app displays a clearly labeled model estimate.", "Low does not mean no risk. Moderate or High means swimmers should use guarded beaches and follow local beach guidance."],
       ["Sea State", "A snapshot combining current or near-current wave height, period, swell, water temperature, and modeled ocean current near the selected point.", "It describes how rough and energetic the water is now; higher waves or longer-period swell can make surf more powerful."],
       ["Tides", "NOAA CO-OPS astronomical tide predictions plus a live water-level gauge when one is available.", "Predictions show expected high and low tides. Actual water can run above or below them because of wind, pressure, and storm surge."],
+      ["Flooding", "NWS coastal flood and storm surge alerts plus the official NWS water-level forecast for the nearest coastal forecast point, measured against its minor, moderate and major flood stages.", "Where the NWS runs no forecast point, the nearest NOAA gauge is shown instead, with today's surge (water above the astronomical tide) carried onto upcoming high tides as a clearly labeled estimate."],
       ["Wave Forecast", "Open-Meteo marine-model guidance for significant wave height, swell, direction, and period.", "It shows the expected sea trend, but it is model guidance rather than a direct buoy observation."],
       ["NWS Outlooks", "Official NWS surf-zone and coastal-waters text forecasts from the local forecast office.", "These provide local hazards and context that a single wave number cannot capture."],
     ],
@@ -4395,6 +4409,202 @@ async function tidePayload(lat, lon, gauge, preferredStationId = null) {
   };
 }
 
+/* Coastal flooding comes from two places, strongest first:
+     • NWS official coastal flood forecasts — the tide-gauge forecast points the
+       local office publishes through the National Water Prediction Service
+       (the same hydrographs as water.noaa.gov), with that office's own minor,
+       moderate and major stages. This is what drives advisories and warnings.
+     • NOAA CO-OPS — where no NWS forecast point is running, the nearest water
+       level gauge against its flood thresholds, with today's measured surge
+       (observed minus astronomical) carried onto the next high tides as a
+       labelled persistence estimate.
+   CO-OPS thresholds come back in station datum (STND) and are shifted onto
+   MLLW with the station's own datum table. */
+const COOPS_META = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations";
+const NWPS_API = "https://api.water.noaa.gov/nwps/v1/gauges";
+const FLOOD_NEAR_FT = 0.5;        // how close to minor flood stage counts as "near"
+const NWPS_SEARCH_DEG = 0.6;      // half-width of the box searched for forecast points
+const NWPS_OBSERVED_HOURS = 36;   // observed history kept for the hydrograph
+const NWPS_MAX_MI = 40;           // beyond this a forecast point describes someone else's water
+
+async function coastalFloodPayload(gauge, lat, lon) {
+  const [coopsResult, pointsResult] = await Promise.allSettled([
+    coopsFloodPayload(gauge),
+    nwsCoastalForecastPoints(lat, lon),
+  ]);
+  const coops = coopsResult.status === "fulfilled" ? coopsResult.value : null;
+  const nwsPoints = pointsResult.status === "fulfilled" ? pointsResult.value : [];
+  const nws = nwsPoints.length ? await nwsCoastalForecastPayload(nwsPoints[0]).catch(() => null) : null;
+  if (!coops && !nws) return null;
+  return { coops, nws, nwsPoints };
+}
+
+// NWPS allows each client 10 requests per five minutes, and the Coast and
+// Rivers tabs both draw on it. Responses are held for five minutes (and a
+// request already in flight is shared), so a refresh or a second tab reuses
+// them instead of tripping the limit — which would otherwise quietly drop the
+// official coastal forecast back to the CO-OPS estimate.
+const NWPS_CACHE_MS = 5 * 60 * 1000;
+const nwpsCache = new Map();
+function nwpsJson(url) {
+  const hit = nwpsCache.get(url);
+  if (hit && Date.now() - hit.at < NWPS_CACHE_MS) return hit.promise;
+  const promise = getJson(url);
+  nwpsCache.set(url, { at: Date.now(), promise });
+  promise.catch(() => { if (nwpsCache.get(url)?.promise === promise) nwpsCache.delete(url); });
+  return promise;
+}
+
+// Every NWPS gauge in one box around the location. The coastal and river
+// searches share this single request and each filter it by distance.
+function nwpsGaugesNear(lat, lon) {
+  const query = new URLSearchParams({
+    "bbox.xmin": lon - NWPS_SEARCH_DEG * 1.3,
+    "bbox.ymin": lat - NWPS_SEARCH_DEG,
+    "bbox.xmax": lon + NWPS_SEARCH_DEG * 1.3,
+    "bbox.ymax": lat + NWPS_SEARCH_DEG,
+    srid: "EPSG_4326",
+  });
+  return nwpsJson(`${NWPS_API}?${query}`);
+}
+
+// NWS forecast points near the location that are tide gauges (SHEF "HM…") and
+// carry a current forecast, nearest first. River gauges and tide gauges the
+// office is not forecasting right now are left out.
+async function nwsCoastalForecastPoints(lat, lon) {
+  const payload = await nwpsGaugesNear(lat, lon);
+  return (payload.gauges || [])
+    .filter(item => /^HM/.test(item.pedts?.observed || "") && /^HM/.test(item.pedts?.forecast || "")
+      && Number(item.status?.forecast?.primary) > -999)
+    .map(item => ({
+      lid: item.lid,
+      name: item.name || item.lid,
+      wfo: item.wfo?.abbreviation || "",
+      office: item.wfo?.name || "",
+      distance: milesBetween(lat, lon, item.latitude, item.longitude),
+    }))
+    .filter(item => item.distance <= NWPS_MAX_MI)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 8);
+}
+
+async function nwsCoastalForecastPayload(point) {
+  const [detail, series] = await Promise.all([
+    nwpsJson(`${NWPS_API}/${point.lid}`),
+    nwpsJson(`${NWPS_API}/${point.lid}/stageflow`),
+  ]);
+  const stage = key => {
+    const value = Number(detail.flood?.categories?.[key]?.stage);
+    return Number.isFinite(value) && value > -999 ? value : null;
+  };
+  const since = Date.now() - NWPS_OBSERVED_HOURS * 3600000;
+  const rows = (block, keep = () => true) => (block?.data || [])
+    .map(row => ({ at: Date.parse(row.validTime), heightFt: Number(row.primary) }))
+    .filter(row => Number.isFinite(row.at) && Number.isFinite(row.heightFt) && row.heightFt > -999 && keep(row))
+    .map(row => ({ ...instantStamp(row.at), heightFt: row.heightFt }));
+  const observed = rows(series.observed, row => row.at >= since);
+  const forecast = rows(series.forecast);
+  if (!forecast.length) return null;
+  return {
+    ...point,
+    name: detail.name || point.name,
+    // Tidal forecast points name their datum in the title, e.g. "(IN MLLW)".
+    datum: (detail.name || point.name).match(/\(IN ([A-Z0-9]+)\)/)?.[1] || null,
+    issued: series.forecast?.issuedTime || null,
+    thresholds: { minor: stage("minor"), moderate: stage("moderate"), major: stage("major") },
+    observed,
+    latest: observed[observed.length - 1] || null,
+    forecast,
+  };
+}
+
+// An absolute instant as the wall-clock stamp the tide code keys on, in the
+// selected location's zone.
+function instantStamp(ms, timezone = selectedLocation.timezone || "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date(ms)).reduce((acc, part) => { acc[part.type] = part.value; return acc; }, {});
+  const hh = String(Number(parts.hour) % 24).padStart(2, "0");
+  const day = `${parts.year}-${parts.month}-${parts.day}`;
+  return {
+    iso: `${day}T${hh}:${parts.minute}`,
+    day,
+    minutes: Number(hh) * 60 + Number(parts.minute),
+    label: new Date(`${day}T${hh}:${parts.minute}:00`).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+  };
+}
+
+async function coopsFloodPayload(gauge) {
+  if (!gauge) return null;
+  const now = new Date();
+  const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const [levelsResult, datumsResult, observedResult, predictedResult, highLowResult] = await Promise.allSettled([
+    getJson(`${COOPS_META}/${gauge.id}/floodlevels.json?units=english`),
+    getJson(`${COOPS_META}/${gauge.id}/datums.json?units=english`),
+    getJson(coopsUrl({ product: "water_level", datum: "MLLW", range: "24", station: gauge.id })),
+    getJson(coopsUrl({ product: "predictions", datum: "MLLW", interval: "6", begin_date: coopsDate(start), range: "96", station: gauge.id })),
+    getJson(coopsUrl({ product: "predictions", datum: "MLLW", interval: "hilo", begin_date: coopsDate(now), range: "72", station: gauge.id })),
+  ]);
+  const settled = result => (result.status === "fulfilled" ? result.value : null);
+  // Gauges leave missing readings as "" rather than dropping the row.
+  const rows = (payload, key) => (settled(payload)?.[key] || [])
+    .filter(row => row.v !== "" && row.v != null)
+    .map(row => ({ ...parseCoopsTime(row.t), heightFt: Number(row.v), type: row.type }))
+    .filter(row => row.iso && Number.isFinite(row.heightFt));
+
+  const observed = rows(observedResult, "data");
+  const predicted = rows(predictedResult, "predictions");
+  if (!observed.length && !predicted.length) return null;
+
+  const levels = settled(levelsResult) || {};
+  const mllw = (settled(datumsResult)?.datums || []).find(item => item.name === "MLLW")?.value;
+  const toMllw = value => (Number.isFinite(value) && Number.isFinite(mllw) ? Number((value - mllw).toFixed(2)) : null);
+  const pick = kind => toMllw(levels[`nws_${kind}`] ?? levels[`nos_${kind}`]);
+  const thresholds = { minor: pick("minor"), moderate: pick("moderate"), major: pick("major") };
+  const thresholdSource = levels.nws_minor != null ? "NWS" : levels.nos_minor != null ? "NOAA NOS" : null;
+
+  // Surge: mean departure of the last hour of observations from the prediction
+  // for the same six-minute stamp, which smooths out single-reading chop.
+  const predictedByKey = new Map(predicted.map(row => [tideKey(row), row.heightFt]));
+  const latest = observed[observed.length - 1] || null;
+  const recent = latest ? observed.filter(row => tideKey(row) >= tideKey(latest) - 60) : [];
+  const departures = recent
+    .map(row => row.heightFt - predictedByKey.get(tideKey(row)))
+    .filter(Number.isFinite);
+  const anomalyFt = departures.length ? departures.reduce((sum, v) => sum + v, 0) / departures.length : null;
+
+  const highs = rows(highLowResult, "predictions")
+    .filter(row => row.type === "H")
+    .map(row => ({ ...row, type: "High", adjustedFt: anomalyFt == null ? row.heightFt : row.heightFt + anomalyFt }));
+
+  return { gauge, thresholds, thresholdSource, observed, predicted, latest, anomalyFt, highs };
+}
+
+// "none" | "near" | "minor" | "moderate" | "major" for a water level.
+function floodCategory(heightFt, thresholds) {
+  if (!Number.isFinite(heightFt) || thresholds?.minor == null) return null;
+  if (thresholds.major != null && heightFt >= thresholds.major) return "major";
+  if (thresholds.moderate != null && heightFt >= thresholds.moderate) return "moderate";
+  if (heightFt >= thresholds.minor) return "minor";
+  if (heightFt >= thresholds.minor - FLOOD_NEAR_FT) return "near";
+  return "none";
+}
+
+// High-tide crests in an hourly forecast series: local maxima, with any two
+// within four hours of each other collapsed onto the higher one.
+function forecastCrests(rows) {
+  const keyed = rows.map(row => ({ ...row, key: tideKey(row) }));
+  const peaks = keyed.filter((row, i) =>
+    i > 0 && i < keyed.length - 1 && row.heightFt >= keyed[i - 1].heightFt && row.heightFt > keyed[i + 1].heightFt);
+  return peaks.reduce((out, peak) => {
+    const last = out[out.length - 1];
+    if (last && peak.key - last.key < 240) {
+      if (peak.heightFt > last.heightFt) out[out.length - 1] = peak;
+    } else out.push(peak);
+    return out;
+  }, []);
+}
+
 // Subordinate stations publish only high/low times and heights, so the curve is
 // reconstructed by easing between consecutive turns with a raised cosine — the
 // shape a tide actually traces. Checked against CO-OPS's own 30-minute
@@ -4699,15 +4909,17 @@ async function coastalPayload() {
   const gauge = gaugeResult.status === "fulfilled" ? gaugeResult.value : null;
 
   if (!hasLocalCoastalData(marine)) {
-    return { isCoastal: false, marine: null, tides: null, observations: null, surf: null, waters: null };
+    return { isCoastal: false, marine: null, tides: null, observations: null, flood: null, surf: null, waters: null };
   }
 
-  const [tideResult, obsResult] = await Promise.allSettled([
+  const [tideResult, obsResult, floodResult] = await Promise.allSettled([
     tidePayload(loc.lat, loc.lon, gauge, coastalTideStationId),
     coastalObservationPayload(loc.lat, loc.lon),
+    coastalFloodPayload(gauge, loc.lat, loc.lon),
   ]);
   const tides = tideResult.status === "fulfilled" ? tideResult.value : null;
   const observations = obsResult.status === "fulfilled" ? obsResult.value : null;
+  const flood = floodResult.status === "fulfilled" ? floodResult.value : null;
 
   // The surf and coastal-waters text products are published per WFO, so they
   // only exist for US locations inside a coastal forecast office.
@@ -4730,7 +4942,7 @@ async function coastalPayload() {
     } catch { /* no NWS coverage here — Open-Meteo and CO-OPS still stand */ }
   }
 
-  return { isCoastal: true, marine, tides, observations, surf, waters, zoneId };
+  return { isCoastal: true, marine, tides, observations, flood, surf, waters, zoneId };
 }
 
 async function climatePayload(date) {
@@ -6580,6 +6792,7 @@ function renderDaily() {
   if (sourceNote) sourceNote.textContent = nwsForecast
     ? "NWS point forecast · official SPC/WPC outlook tags"
     : `${source || "Weather forecast"} · outlook tags shown where available`;
+  const floodDays = floodingByDay();
   dailyGrid.innerHTML = days.map(({ day, night }, index) => {
     const precip  = day.probabilityOfPrecipitation?.value ?? night?.probabilityOfPrecipitation?.value;
     const dayHumidity = dailyHumidity(extras, index);
@@ -6624,7 +6837,7 @@ function renderDaily() {
         ${weatherIcon(iconForCondition(day.shortForecast), true)}
       </div>
       <div class="daily-badge-row">
-        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}
+        <span class="fwi-badge" style="background:${fwi.bg};color:${fwi.color};border:1px solid ${fwi.color}44">${fwi.label}</span>${spcBadge}${wpcBadge}${day.startTime ? floodDayBadges(instantStamp(Date.parse(day.startTime)).day, floodDays) : ""}
       </div>
       <div class="daily-range">${uTempNum(day.temperature)}°<span class="daily-range-low"> / ${night ? uTempNum(night.temperature) : "--"}°</span></div>
       <p class="daily-summary">${safeText(generateDailySummary(day, precip, night, { variant: index }))} <span style="color:${fwi.color};opacity:0.9">${safeText(fwi.sentence)}</span></p>
@@ -7468,13 +7681,15 @@ function renderCoastal() {
 
   if (status) status.textContent = coastalSourceLine();
   coastalChartSpecs = {};
-  const overview = [renderRipAndSea(), renderCoastalMetrics(), renderShoreObsPanel()].filter(Boolean).join("");
+  const overview = [renderFloodCallout(), renderRipAndSea(), renderCoastalMetrics(), renderShoreObsPanel()].filter(Boolean).join("");
   const tides = renderTidePanel();
+  const flooding = renderCoastalFloodPanel();
   const waves = renderWavePanel();
   const outlooks = [renderSurfForecastPanel(), renderCoastalWatersPanel()].filter(Boolean).join("");
   body.innerHTML = renderBeachPicker() +
     coastalViewPanel("overview", overview, "Current coastal conditions are unavailable for this point.") +
     coastalViewPanel("tides", tides, "No NOAA tide-prediction station covers this point.") +
+    coastalViewPanel("flooding", flooding, "No NOAA water-level gauge or NWS coastal flood product covers this point.") +
     coastalViewPanel("waves", waves, "No marine wave-model forecast covers this point.") +
     coastalViewPanel("outlooks", outlooks, "No NWS surf-zone or coastal-waters text forecast covers this point.");
   syncCoastalView();
@@ -7673,6 +7888,362 @@ function renderTidePanel() {
       <p class="coastal-footnote">Predictions from ${safeText(tides.station.name)}, ${tides.station.distance.toFixed(1)} mi away, above ${tides.datum}${tideStationNote(tides)}.${tides.observed ? ` Live level ${fmtHeight(tides.observed.heightFt, 1)} at the ${safeText(tides.gauge.name)} gauge, ${safeText(tides.observed.label)}${tides.waterTempF == null ? "" : `, water ${fmtTemp(tides.waterTempF)}`}.` : ""} Predictions are astronomical only — wind and surge shift the real water level.</p>
     </section>
   `;
+}
+
+/* ---------------------------------------------------------------------------
+   Coastal flooding
+
+   Any NWS coastal-flood or surge alert for the point comes first. Beneath it,
+   the official NWS forecast hydrograph for the nearest tide forecast point when
+   the office is running one; otherwise the nearest CO-OPS gauge with today's
+   surge carried forward, which is labelled as the estimate it is.
+   ------------------------------------------------------------------------- */
+
+const COASTAL_FLOOD_ALERT_RE = /coastal flood|lakeshore flood|storm surge|tidal flood/i;
+const FLOOD_LEVELS = {
+  none:     { label: "No Flooding Expected", short: "None",     color: "#4ade80" },
+  near:     { label: "Near Flood Stage",     short: "Near",     color: "#facc15" },
+  minor:    { label: "Minor Flooding",       short: "Minor",    color: "#fb923c" },
+  moderate: { label: "Moderate Flooding",    short: "Moderate", color: "#f87171" },
+  major:    { label: "Major Flooding",       short: "Major",    color: "#e879f9" },
+};
+const FLOOD_RANK = { none: 0, near: 1, minor: 2, moderate: 3, major: 4 };
+const FLOOD_FORECAST_COLOR = "#c084fc";
+
+function coastalFloodAlerts() {
+  return (weatherState?.alerts || [])
+    .map((alert, index) => ({ alert, index }))
+    .filter(({ alert }) => COASTAL_FLOOD_ALERT_RE.test(alert.event || ""));
+}
+
+function tideDayLabel(row) {
+  if (!row?.day) return "";
+  if (row.day === localDateISO()) return "Today";
+  return new Date(`${row.day}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+}
+
+function fmtDeparture(valueFt) {
+  if (!Number.isFinite(valueFt)) return "--";
+  const v = uHeight(Math.abs(valueFt));
+  return `${valueFt >= 0 ? "+" : "−"}${v.toFixed(1)} ${heightUnit()}`;
+}
+
+// One shape for both sources, so the panel, callout and chart need not care
+// which one they are drawing.
+function coastalFloodView(flood = coastalState?.flood) {
+  const nowKey = tideNowKey();
+  const nws = flood?.nws;
+  if (nws) {
+    const highs = forecastCrests(nws.forecast)
+      .filter(crest => crest.key >= nowKey - 30)
+      .map(crest => ({ ...crest, valueFt: crest.heightFt, category: floodCategory(crest.heightFt, nws.thresholds) }));
+    return {
+      official: true,
+      source: nws,
+      thresholds: nws.thresholds,
+      latest: nws.latest,
+      datum: nws.datum,
+      highs,
+      observed: nws.observed,
+      forecast: nws.forecast,
+      predicted: null,
+    };
+  }
+  const coops = flood?.coops;
+  if (!coops) return null;
+  return {
+    official: false,
+    source: coops,
+    thresholds: coops.thresholds,
+    latest: coops.latest,
+    datum: "MLLW",
+    highs: coops.highs
+      .filter(high => tideKey(high) >= nowKey)
+      .map(high => ({ ...high, valueFt: high.adjustedFt, category: floodCategory(high.adjustedFt, coops.thresholds) })),
+    observed: coops.observed,
+    forecast: null,
+    predicted: coops.predicted,
+  };
+}
+
+// The worst of what the gauge shows now and what the coming high tides reach.
+function coastalFloodOutlook(view) {
+  if (!view || view.thresholds.minor == null) return null;
+  const nowCategory = floodCategory(view.latest?.heightFt, view.thresholds);
+  const peak = view.highs.reduce((best, high) =>
+    (high.category && (!best || FLOOD_RANK[high.category] > FLOOD_RANK[best.category]) ? high : best), null);
+  const useNow = nowCategory && (!peak || FLOOD_RANK[nowCategory] > FLOOD_RANK[peak.category]);
+  return { category: useNow ? nowCategory : peak?.category || "none", when: useNow ? "now" : peak };
+}
+
+// Compact callout for the overview, only when there is something to act on.
+function renderFloodCallout() {
+  const alerts = coastalFloodAlerts();
+  const view = coastalFloodView();
+  const outlook = coastalFloodOutlook(view);
+  const worrying = outlook && FLOOD_RANK[outlook.category] >= FLOOD_RANK.near;
+  if (!alerts.length && !worrying) return "";
+  const level = FLOOD_LEVELS[outlook?.category];
+  const title = alerts.length ? alertDisplayEvent(alerts[0].alert) : level.label;
+  const forecastLine = !worrying ? ""
+    : outlook.when === "now" ? `${level.label} at the gauge right now.`
+    : `${view.official ? "NWS forecast" : "Estimate"}: ${level.label.toLowerCase()} at the ${tideDayLabel(outlook.when)} ${outlook.when.label} high tide.`;
+  const color = alerts.length ? alertEventColor(alerts[0].alert.event, alerts[0].alert.severity).fill : level.color;
+  return `
+    <button type="button" class="tile flood-callout" data-coastal-goto="flooding" style="--flood-color:${safeText(color)}">
+      <span class="flood-callout-text">
+        <span class="eyebrow">Coastal flooding</span>
+        <strong>${safeText(title)}</strong>
+        <small>${safeText(forecastLine || "An NWS coastal flood product is in effect.")}</small>
+      </span>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
+    </button>`;
+}
+
+function floodAlertList(alerts) {
+  if (!alerts.length) return `<p class="coastal-footnote flood-no-alerts">No NWS coastal flood watches, warnings or advisories are in effect here.</p>`;
+  return `
+    <div class="alert-list flood-alerts">
+      ${alerts.map(({ alert, index }) => {
+        const color = alertEventColor(alert.event || "", alert.severity || "");
+        const meta = [alertExpiryLabel(alert), alertAreaShort(alert.areaDesc)].filter(Boolean).join(" · ");
+        return `
+        <button class="alert-row severity-${safeText((alert.severity || "unknown").toLowerCase())}" type="button" data-coastal-alert="${index}" style="--alert-color:${safeText(color.fill)};--alert-edge:${safeText(color.line)}">
+          <span class="alert-row-text">
+            <span class="alert-row-event">${safeText(alertDisplayEvent(alert))}</span>
+            ${meta ? `<span class="alert-row-meta">${safeText(meta)}</span>` : ""}
+          </span>
+          <svg class="alert-row-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+function floodStagesText(t) {
+  return [t.moderate != null ? `Moderate ${fmtHeight(t.moderate, 1)}` : "", t.major != null ? `Major ${fmtHeight(t.major, 1)}` : ""]
+    .filter(Boolean).join(" · ");
+}
+
+function renderCoastalFloodPanel() {
+  const alerts = coastalFloodAlerts();
+  const flood = coastalState.flood;
+  const view = coastalFloodView(flood);
+  if (!alerts.length && !view) return "";
+
+  if (!view) {
+    return `
+      <section class="tile coastal-panel">
+        <div class="section-head"><div><p class="eyebrow">National Weather Service</p><h3>Coastal Flooding</h3></div></div>
+        ${floodAlertList(alerts)}
+        <p class="coastal-footnote">No NWS coastal flood forecast point or NOAA water-level gauge is close enough to show water levels here.</p>
+      </section>`;
+  }
+
+  const src = view.source;
+  const t = view.thresholds;
+  const outlook = coastalFloodOutlook(view);
+  const level = FLOOD_LEVELS[outlook?.category];
+  const whenText = !outlook ? ""
+    : outlook.when === "now" ? "At the gauge right now"
+    : outlook.when ? `Peaks at the ${tideDayLabel(outlook.when)} ${outlook.when.label} high tide`
+    : "No flood-stage tides in the forecast";
+  const hero = level ? `
+    <div class="flood-status" style="--flood-color:${level.color}">
+      <span class="eyebrow">${view.official ? "NWS forecast" : "Next 3 days · estimate"}</span>
+      <strong>${level.label}</strong>
+      <small>${safeText(whenText)}</small>
+    </div>` : `
+    <div class="flood-status" style="--flood-color:#94a3b8">
+      <span class="eyebrow">Flood stage</span>
+      <strong>Not rated</strong>
+      <small>No flood stages are published for this gauge.</small>
+    </div>`;
+
+  const datumNote = view.datum ? ` · above ${view.datum}` : "";
+  const crest = view.highs.reduce((best, high) => (!best || high.valueFt > best.valueFt ? high : best), null);
+  const metrics = [
+    ["Water level now", view.latest ? fmtHeight(view.latest.heightFt, 1) : "--", view.latest ? `${view.latest.label}${datumNote}` : "No recent reading"],
+    view.official
+      ? ["Forecast crest", crest ? fmtHeight(crest.valueFt, 1) : "--", crest ? `${tideDayLabel(crest)} ${crest.label}` : "No crest in the forecast"]
+      : ["Surge / departure", fmtDeparture(src.anomalyFt), src.anomalyFt == null ? "Observed vs predicted unavailable" : src.anomalyFt >= 0 ? "Above the astronomical tide" : "Below the astronomical tide"],
+    t.minor == null ? null : ["Minor flood stage", fmtHeight(t.minor, 1), floodStagesText(t) || `${src.thresholdSource || "NWS"} threshold`],
+  ].filter(Boolean);
+
+  const chips = view.highs.slice(0, 6).map(high => {
+    const cat = FLOOD_LEVELS[high.category];
+    const astro = !view.official && src.anomalyFt != null ? ` <span class="flood-chip-astro">(tide ${fmtHeight(high.heightFt, 1)})</span>` : "";
+    return `
+      <div class="tide-chip flood-chip" style="--flood-color:${cat?.color || "#7dd3fc"}">
+        <span class="tide-chip-type">${safeText(tideDayLabel(high))} high</span>
+        <strong>${safeText(high.label)}</strong>
+        <small>${fmtHeight(high.valueFt, 1)}${astro}</small>
+        ${cat ? `<span class="flood-chip-level">${cat.short}</span>` : ""}
+      </div>`;
+  }).join("");
+
+  const points = flood.nwsPoints || [];
+  const head = view.official ? `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NWS ${safeText(src.office || src.wfo)} coastal flood forecast</p>
+          <h3>Coastal Flooding</h3>
+        </div>
+        ${points.length > 1 ? `<select id="coastalFloodPointSelect" class="mrms-select" aria-label="NWS coastal forecast point">
+          ${points.map(item => `<option value="${safeText(item.lid)}"${item.lid === src.lid ? " selected" : ""}>${safeText(item.name)} — ${item.distance.toFixed(1)} mi</option>`).join("")}
+        </select>` : `<span>${safeText(src.name)}, ${src.distance.toFixed(1)} mi away</span>`}
+      </div>` : `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NOAA CO-OPS · ${safeText(src.gauge.name)}${src.gauge.state ? `, ${safeText(src.gauge.state)}` : ""}</p>
+          <h3>Coastal Flooding</h3>
+        </div>
+        <span>Gauge ${safeText(src.gauge.id)}, ${src.gauge.distance.toFixed(1)} mi away</span>
+      </div>`;
+
+  const issued = src.issued
+    ? new Date(src.issued).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+  const footnote = view.official
+    ? `Official NWS ${safeText(src.office || src.wfo)} forecast for ${safeText(src.name)}${issued ? `, issued ${safeText(issued)}` : ""}. ${view.datum ? `Heights above ${safeText(view.datum)}. ` : ""}Flood stages are the NWS categories for this forecast point. Water levels vary between gauges, so check the point nearest you.`
+    : `Levels at the ${safeText(src.gauge.name)} gauge, above MLLW.${t.minor != null ? ` Flood stages are ${safeText(src.thresholdSource)} thresholds for this gauge.` : ""} No NWS forecast point covers this spot, so high tides add today's observed departure to the astronomical prediction, assuming it persists — a rough estimate, not a surge forecast. Always follow NWS coastal flood advisories and warnings.`;
+
+  return `
+    <section class="tile coastal-panel">
+      ${head}
+      ${floodAlertList(alerts)}
+      <div class="flood-summary">
+        ${hero}
+        <div class="flood-metrics">
+          ${metrics.map(([name, value, detail]) => `
+            <div class="flood-metric"><span class="eyebrow">${name}</span><strong>${value}</strong><small>${safeText(detail)}</small></div>`).join("")}
+        </div>
+      </div>
+      ${floodChartSvg(view)}
+      ${chips ? `<h4 class="flood-subhead">${view.official ? "Forecast high tides" : `Upcoming high tides${src.anomalyFt != null ? " · with current surge" : ""}`}</h4><div class="tide-chips">${chips}</div>` : ""}
+      <p class="coastal-footnote">${footnote}</p>
+    </section>`;
+}
+
+// Observed water over the official forecast (or, without one, the astronomical
+// tide), 24 h back to 48 h ahead, with the flood stages ruled across.
+function floodChartSvg(view) {
+  const nowKey = tideNowKey();
+  const firstKey = nowKey - 1440;
+  const lastKey = nowKey + 2880;
+  const keyed = rows => (rows || [])
+    .map(row => ({ ...row, key: tideKey(row) }))
+    .filter(row => row.key >= firstKey && row.key <= lastKey);
+  const observed = keyed(view.observed).filter(row => row.key <= nowKey + 30);
+  const predicted = keyed(view.predicted).filter(row => row.minutes % 30 === 0);
+  const lastObservedKey = observed.length ? observed[observed.length - 1].key : -Infinity;
+  const forecast = keyed(view.forecast);
+  const future = forecast.filter(row => row.key > lastObservedKey);
+  if (predicted.length + forecast.length < 4) return "";
+
+  const narrow = window.innerWidth < 760;
+  const W = narrow ? 380 : 720, H = narrow ? 230 : 220;
+  const padL = 12, padR = 12, padT = 28, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const t = view.thresholds;
+  const values = [...predicted, ...observed, ...forecast].map(p => p.heightFt);
+  const minV = Math.min(...values);
+  const maxData = Math.max(...values);
+  // Keep minor stage in frame so the gap to it is always visible, and pull in
+  // the higher stages only once the water is heading that way.
+  const stages = [["minor", t.minor], ["moderate", t.moderate], ["major", t.major]]
+    .filter(([name, v]) => v != null && (name === "minor" || maxData >= v - 1));
+  const maxV = Math.max(maxData, ...stages.map(([, v]) => v + 0.3));
+  const range = maxV - minV || 1;
+  const xFor = key => padL + ((key - firstKey) / (lastKey - firstKey)) * plotW;
+  const yFor = v => padT + plotH - ((v - minV) / range) * plotH;
+  const path = rows => rows.map((p, i) => `${i ? "L" : "M"}${xFor(p.key).toFixed(1)},${yFor(p.heightFt).toFixed(1)}`).join(" ");
+
+  const stageLines = stages.map(([name, v]) => {
+    const y = yFor(v);
+    const color = FLOOD_LEVELS[name].color;
+    return `<line x1="${padL}" x2="${W - padR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${color}" stroke-width="1.3" stroke-dasharray="6,4" opacity="0.85"/>
+      ${chartLabel(W - padR - 2, y - 5, `${FLOOD_LEVELS[name].short} ${fmtHeight(v, 1)}`, color, { anchor: "end", size: 10 })}`;
+  }).join("");
+
+  // Day ticks at local midnight.
+  const dayTicks = [];
+  for (let key = Math.ceil(firstKey / 1440) * 1440; key <= lastKey; key += 1440) {
+    const x = xFor(key);
+    const stamp = tideKeyToStamp(key);
+    dayTicks.push(`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${padT}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+      ${chartLabel(x + 4, H - 8, safeText(new Date(`${stamp.day}T12:00:00`).toLocaleDateString([], { weekday: "short" })), "rgba(255,255,255,0.6)", { anchor: "start", size: 10, weight: 700 })}`);
+  }
+
+  // Scrub points: without a forecast, every half hour of the astronomical tide
+  // with the observation at that moment; with one, the observations every half
+  // hour and then the forecast hours that follow them.
+  const at = p => `${tideDayLabel(p)} ${p.label}`;
+  let points;
+  if (view.forecast) {
+    points = [
+      ...observed.filter(p => p.minutes % 30 === 0).map(p => ({ ...p, text: `Observed ${fmtHeight(p.heightFt, 1)} · ${at(p)}` })),
+      ...future.map(p => ({ ...p, text: `NWS forecast ${fmtHeight(p.heightFt, 1)} · ${at(p)}` })),
+    ].map(p => ({ x: xFor(p.key), y: yFor(p.heightFt), key: p.key, text: p.text }));
+  } else {
+    const observedByKey = new Map(observed.map(row => [row.key, row.heightFt]));
+    points = predicted.map(p => {
+      const obs = observedByKey.get(p.key);
+      return {
+        x: xFor(p.key),
+        y: yFor(obs ?? p.heightFt),
+        key: p.key,
+        text: obs != null
+          ? `Observed ${fmtHeight(obs, 1)} · tide ${fmtHeight(p.heightFt, 1)} · ${at(p)}`
+          : `Predicted tide ${fmtHeight(p.heightFt, 1)} · ${at(p)}`,
+      };
+    });
+  }
+  const nowX = xFor(nowKey);
+  const chartId = "floodChart";
+  coastalChartSpecs[chartId] = {
+    points,
+    nowKey,
+    format: point => point.text,
+    hint: view.datum ? `Heights above ${view.datum}` : "",
+  };
+
+  const legend = [
+    ["#38bdf8", "Observed", false],
+    view.forecast ? [FLOOD_FORECAST_COLOR, "NWS forecast", false] : null,
+    view.predicted ? ["#7dd3fc", "Predicted tide", true] : null,
+  ].filter(Boolean);
+
+  return `
+    <div class="coastal-chart" style="aspect-ratio:${W} / ${H}" data-chart="${chartId}">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" role="img" aria-label="Observed and forecast water level against flood stages">
+        ${dayTicks.join("")}
+        ${stageLines}
+        ${predicted.length > 1 ? `<path d="${path(predicted)}" fill="none" stroke="#7dd3fc" stroke-width="1.8" stroke-dasharray="5,4" stroke-linecap="round" opacity="0.8"/>` : ""}
+        ${forecast.length > 1 ? `<path d="${path(forecast)}" fill="none" stroke="${FLOOD_FORECAST_COLOR}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
+        ${observed.length > 1 ? `<path d="${path(observed)}" fill="none" stroke="#38bdf8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
+        <line x1="${nowX.toFixed(1)}" y1="${padT - 12}" x2="${nowX.toFixed(1)}" y2="${padT + plotH}" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="4,3"/>
+        ${chartLabel(nowX, padT - 16, "Now", "var(--accent)")}
+        <line class="chart-scrub" x1="0" y1="${padT - 8}" x2="0" y2="${padT + plotH}" stroke="rgba(255,255,255,0.55)" stroke-width="1.4" visibility="hidden"/>
+        <circle class="chart-scrub-dot" r="5.5" fill="#38bdf8" stroke="rgba(2,6,23,0.9)" stroke-width="2.2" visibility="hidden"/>
+        <rect class="chart-hit" x="${padL}" y="0" width="${plotW}" height="${H}" fill="transparent" style="cursor:col-resize"/>
+      </svg>
+    </div>
+    <p class="coastal-legend">${legend.map(([color, name, dashed]) => `<span class="swatch${dashed ? " dashed" : ""}" style="--c:${color}"></span>${name}`).join("")}</p>
+    <p class="chart-readout" data-readout="${chartId}"></p>
+  `;
+}
+
+// Re-pulls the forecast for a different NWS point the user picked.
+async function selectFloodPoint(lid) {
+  const point = (coastalState?.flood?.nwsPoints || []).find(item => item.lid === lid);
+  if (!point) return;
+  const select = document.querySelector("#coastalFloodPointSelect");
+  if (select) select.disabled = true;
+  try {
+    const nws = await nwsCoastalForecastPayload(point);
+    if (nws) coastalState.flood.nws = nws;
+  } catch { /* keep the point already on screen */ }
+  renderCoastal();
 }
 
 /* ---------------------------------------------------------------------------
@@ -8095,6 +8666,8 @@ function refreshCoastal() {
     coastalTabVisible = data.isCoastal === true;
     updateCoastalTabVisibility();
     renderCoastal();
+    renderFloodStatus();
+    if (weatherState) renderDaily();
   }).catch(error => {
     if (requestId !== coastalRequestId) return;
     coastalError = error.message;
@@ -8102,6 +8675,520 @@ function refreshCoastal() {
     updateCoastalTabVisibility();
     renderCoastal();
   });
+}
+
+/* -------------------------------------------------------------------------
+   RIVERS: NWS river forecast points
+   The National Water Prediction Service publishes every NWS river gauge with
+   its office's action, minor, moderate and major flood stages (the same
+   hydrographs as water.noaa.gov). The Rivers tab lists the nearby ones that are
+   in service and reporting right now — observed stage, the forecast crest where
+   the river forecast center is running one, and the category each falls in.
+   ------------------------------------------------------------------------- */
+
+// Kept tight on purpose: a river a town or two away floods that town, not this
+// one (the Schuylkill at Reading says nothing about Ephrata).
+const RIVER_MAX_MI = 5;
+const RIVER_MAX_GAUGES = 3;       // each costs two of the ten NWPS requests allowed per 5 min
+const RIVER_STALE_HOURS = 6;       // an older last reading means the gauge is not updating
+const RIVER_OBSERVED_HOURS = 48;   // observed history kept for the hydrograph
+// Statuses NWPS uses for gauges that cannot be rated right now.
+const RIVER_UNRATED = new Set(["not_defined", "out_of_service", "obs_not_current", "low_threshold"]);
+const RIVER_LEVELS = {
+  none:     { label: "Below Action Stage", short: "Normal",   color: "#4ade80" },
+  action:   { label: "Action Stage",       short: "Action",   color: "#facc15" },
+  minor:    FLOOD_LEVELS.minor,
+  moderate: FLOOD_LEVELS.moderate,
+  major:    FLOOD_LEVELS.major,
+};
+const RIVER_RANK = { none: 0, action: 1, minor: 2, moderate: 3, major: 4 };
+
+let riverState = null;             // null while loading; {gauges:[…]} once resolved
+let riverError = null;
+let riverRequestId = 0;
+
+// "none" | "action" | "minor" | "moderate" | "major" for a river stage.
+function riverCategory(stageFt, thresholds) {
+  if (!Number.isFinite(stageFt) || !thresholds) return null;
+  const { action, minor, moderate, major } = thresholds;
+  if (action == null && minor == null) return null;
+  if (major != null && stageFt >= major) return "major";
+  if (moderate != null && stageFt >= moderate) return "moderate";
+  if (minor != null && stageFt >= minor) return "minor";
+  if (action != null && stageFt >= action) return "action";
+  return "none";
+}
+
+// River stage gauges (SHEF "HG…") near the location that are in service, rated
+// against flood stages and have reported within the last few hours, nearest
+// first. Tide gauges belong to the Coast tab and reservoir pools are not rivers.
+function riverGaugeCandidates(gauges, lat, lon, now = Date.now()) {
+  return (gauges || [])
+    .filter(item => {
+      const obs = item.status?.observed;
+      const at = Date.parse(obs?.validTime || "");
+      return /^HG/.test(item.pedts?.observed || "")
+        && Number(obs?.primary) > -999
+        && Number.isFinite(at) && now - at <= RIVER_STALE_HOURS * 3600000
+        && !RIVER_UNRATED.has(obs?.floodCategory || "not_defined");
+    })
+    .map(item => ({
+      lid: item.lid,
+      name: item.name || item.lid,
+      wfo: item.wfo?.abbreviation || "",
+      office: item.wfo?.name || "",
+      hasForecast: Number(item.status?.forecast?.primary) > -999,
+      distance: milesBetween(lat, lon, item.latitude, item.longitude),
+    }))
+    .filter(item => item.distance <= RIVER_MAX_MI)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, RIVER_MAX_GAUGES);
+}
+
+async function riverGaugePayload(point) {
+  const [detail, series] = await Promise.all([
+    nwpsJson(`${NWPS_API}/${point.lid}`),
+    nwpsJson(`${NWPS_API}/${point.lid}/stageflow`),
+  ]);
+  const stage = key => {
+    const value = Number(detail.flood?.categories?.[key]?.stage);
+    return Number.isFinite(value) && value > -999 ? value : null;
+  };
+  const thresholds = { action: stage("action"), minor: stage("minor"), moderate: stage("moderate"), major: stage("major") };
+  if (thresholds.action == null && thresholds.minor == null) return null;
+  const since = Date.now() - RIVER_OBSERVED_HOURS * 3600000;
+  const rows = (block, keep = () => true) => (block?.data || [])
+    .map(row => ({ at: Date.parse(row.validTime), stageFt: Number(row.primary) }))
+    .filter(row => Number.isFinite(row.at) && Number.isFinite(row.stageFt) && row.stageFt > -999 && keep(row));
+  const observed = rows(series.observed, row => row.at >= since);
+  const latest = observed[observed.length - 1] || null;
+  if (!latest) return null;
+  // A forecast NWPS marks as not current is last week's crest, not this one's.
+  const forecast = point.hasForecast ? rows(series.forecast, row => row.at > latest.at) : [];
+  return {
+    ...point,
+    name: detail.name || point.name,
+    issued: forecast.length ? series.forecast?.issuedTime || null : null,
+    thresholds,
+    impacts: riverImpacts(detail.flood?.impacts),
+    observed,
+    latest,
+    forecast,
+  };
+}
+
+// The office's flood impact statements (what floods at each stage, as listed on
+// water.noaa.gov), lowest stage first.
+function riverImpacts(impacts) {
+  return (impacts || [])
+    .map(item => ({ stageFt: Number(item.stage), statement: String(item.statement || "").replace(/\s+/g, " ").trim() }))
+    .filter(item => Number.isFinite(item.stageFt) && item.stageFt > -999 && item.statement)
+    .sort((a, b) => a.stageFt - b.stageFt);
+}
+
+async function riverPayload() {
+  const loc = point();
+  const payload = await nwpsGaugesNear(loc.lat, loc.lon);
+  const candidates = riverGaugeCandidates(payload.gauges, loc.lat, loc.lon);
+  const results = await Promise.allSettled(candidates.map(riverGaugePayload));
+  const gauges = results
+    .filter(result => result.status === "fulfilled" && result.value)
+    .map(result => result.value);
+  return { gauges };
+}
+
+// Where each gauge stands: category now, the forecast crest and its category,
+// and the worse of the two.
+function riverGaugeOutlook(gauge) {
+  const nowCategory = riverCategory(gauge.latest?.stageFt, gauge.thresholds) || "none";
+  const crest = gauge.forecast.reduce((best, row) => (!best || row.stageFt > best.stageFt ? row : best), null);
+  const crestCategory = crest ? riverCategory(crest.stageFt, gauge.thresholds) || "none" : null;
+  const worst = crestCategory && RIVER_RANK[crestCategory] > RIVER_RANK[nowCategory] ? crestCategory : nowCategory;
+  return { nowCategory, crest, crestCategory, worst };
+}
+
+function riverTimeLabel(ms) {
+  const stamp = instantStamp(ms);
+  const day = stamp.day === localDateISO() ? "Today" : new Date(`${stamp.day}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+  return `${day} ${stamp.label}`;
+}
+
+function riverStagesText(t) {
+  return [["Action", t.action], ["Minor", t.minor], ["Moderate", t.moderate], ["Major", t.major]]
+    .filter(([, v]) => v != null)
+    .map(([name, v]) => `${name} ${fmtHeight(v, 1)}`)
+    .join(" · ");
+}
+
+/* ---- Flooding across rivers and the coast -------------------------------- */
+
+// "Minor Coastal Flooding Ongoing · Major Flooding Expected": what is happening
+// now leads, and a worse forecast category follows it. Either way the row takes
+// the color of the worst category.
+function floodingTitle(kind, levels, rank, nowCategory, forecastCategory) {
+  const ongoing = rank[nowCategory] >= rank.minor;
+  const worse = forecastCategory && rank[forecastCategory] > rank[nowCategory];
+  if (!ongoing) return `${levels[forecastCategory].short} ${kind} Flooding Expected`;
+  const title = `${levels[nowCategory].short} ${kind} Flooding Ongoing`;
+  return worse ? `${title} · ${levels[forecastCategory].short} Flooding Expected` : title;
+}
+
+// Flooding (minor or worse) at or ahead of each river gauge and the coastal
+// forecast point, one entry per source, for the Today panel.
+function floodingSummaries() {
+  const items = [];
+  for (const gauge of riverState?.gauges || []) {
+    const outlook = riverGaugeOutlook(gauge);
+    if (RIVER_RANK[outlook.worst] < RIVER_RANK.minor) continue;
+    const meta = [
+      `${gauge.name}`,
+      `now ${fmtHeight(gauge.latest.stageFt, 1)}`,
+      outlook.crest ? `crest ${fmtHeight(outlook.crest.stageFt, 1)} ${riverTimeLabel(outlook.crest.at)}` : "",
+    ].filter(Boolean).join(" · ");
+    items.push({
+      kind: "river",
+      id: gauge.lid,
+      category: outlook.worst,
+      rank: RIVER_RANK[outlook.worst],
+      title: floodingTitle("River", RIVER_LEVELS, RIVER_RANK, outlook.nowCategory, outlook.crestCategory),
+      meta,
+    });
+  }
+
+  const view = coastalState?.isCoastal ? coastalFloodView() : null;
+  if (view && view.thresholds.minor != null) {
+    const nowCategory = floodCategory(view.latest?.heightFt, view.thresholds) || "none";
+    const peak = view.highs.reduce((best, high) =>
+      (high.category && (!best || FLOOD_RANK[high.category] > FLOOD_RANK[best.category]) ? high : best), null);
+    const ongoing = FLOOD_RANK[nowCategory] >= FLOOD_RANK.minor;
+    const expected = peak && FLOOD_RANK[peak.category] >= FLOOD_RANK.minor;
+    if (ongoing || expected) {
+      const rank = Math.max(FLOOD_RANK[nowCategory], expected ? FLOOD_RANK[peak.category] : 0);
+      const place = view.official ? view.source.name : view.source.gauge?.name;
+      const meta = [
+        place,
+        ongoing ? `now ${fmtHeight(view.latest.heightFt, 1)}` : "",
+        expected ? `${view.official ? "" : "est. "}${FLOOD_LEVELS[peak.category].short.toLowerCase()} at ${tideDayLabel(peak)} ${peak.label} high tide` : "",
+      ].filter(Boolean).join(" · ");
+      items.push({
+        kind: "coastal",
+        id: "coastal",
+        category: Object.keys(FLOOD_RANK).find(key => FLOOD_RANK[key] === rank),
+        rank,
+        title: floodingTitle("Coastal", FLOOD_LEVELS, FLOOD_RANK, nowCategory, expected ? peak.category : null),
+        meta,
+      });
+    }
+  }
+  return items.sort((a, b) => b.rank - a.rank);
+}
+
+// Worst river and coastal category reached on each local calendar day, from
+// today's observations and the forecasts. Only minor flooding and worse count.
+function floodingByDay() {
+  const days = new Map();
+  const note = (day, kind, category, rank, observed) => {
+    if (!day || rank < 2) return;
+    const entry = days.get(day) || {};
+    const current = entry[kind];
+    if (!current || rank > current.rank) entry[kind] = { category, rank, observed };
+    else if (rank === current.rank && observed) current.observed = true;
+    days.set(day, entry);
+  };
+  const today = localDateISO();
+  for (const gauge of riverState?.gauges || []) {
+    for (const row of gauge.observed) {
+      const day = instantStamp(row.at).day;
+      if (day !== today) continue;
+      const category = riverCategory(row.stageFt, gauge.thresholds);
+      note(day, "river", category, RIVER_RANK[category] || 0, true);
+    }
+    for (const row of gauge.forecast) {
+      const category = riverCategory(row.stageFt, gauge.thresholds);
+      note(instantStamp(row.at).day, "river", category, RIVER_RANK[category] || 0, false);
+    }
+  }
+  const view = coastalState?.isCoastal ? coastalFloodView() : null;
+  if (view && view.thresholds.minor != null) {
+    for (const row of view.observed || []) {
+      if (row.day !== today) continue;
+      const category = floodCategory(row.heightFt, view.thresholds);
+      note(row.day, "coastal", category, FLOOD_RANK[category] || 0, true);
+    }
+    for (const high of view.highs) note(high.day, "coastal", high.category, FLOOD_RANK[high.category] || 0, false);
+  }
+  return days;
+}
+
+const RIVER_ICON = `<svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px" aria-hidden="true"><path d="M7 3c-2 3 2 5 0 8s2 5 0 10"/><path d="M17 3c-2 3 2 5 0 8s2 5 0 10"/></svg>`;
+const COASTAL_ICON = `<svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px" aria-hidden="true"><path d="M2 9c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 16c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/></svg>`;
+
+// Badges for a 7-day card: one for river flooding, one for coastal flooding.
+function floodDayBadges(dayKey, byDay) {
+  const entry = byDay.get(dayKey);
+  if (!entry) return "";
+  return [["river", "River flooding", RIVER_ICON, RIVER_LEVELS], ["coastal", "Coastal flooding", COASTAL_ICON, FLOOD_LEVELS]]
+    .map(([kind, name, icon, levels]) => {
+      const hit = entry[kind];
+      if (!hit) return "";
+      const level = levels[hit.category];
+      const when = hit.observed ? "observed" : "forecast";
+      return `<span class="spc-risk-badge flood-day-badge" aria-label="${name}: ${safeText(level.label)} ${when}" title="${name} · ${safeText(level.label)} ${when}" style="background:${level.color}22;color:${level.color};border:1px solid ${level.color}88">${icon} ${safeText(level.short.toUpperCase())}</span>`;
+    }).join("");
+}
+
+// The Today tab's flooding panel, styled like the alert list above it.
+function renderFloodStatus() {
+  const panel = document.querySelector("#floodStatusPanel");
+  if (!panel) return;
+  const items = floodingSummaries();
+  if (!items.length) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="alert-head">
+      <span class="alert-head-count">${items.length === 1 ? "Flooding" : `${items.length} flood points`}</span>
+      <span class="alert-head-source">NOAA / NWS water levels</span>
+    </div>
+    <div class="alert-list">
+      ${items.map(item => {
+        const color = (item.kind === "river" ? RIVER_LEVELS : FLOOD_LEVELS)[item.category].color;
+        return `
+        <button class="alert-row flood-status-row" type="button" data-flood-kind="${item.kind}" data-flood-id="${safeText(item.id)}" style="--alert-color:${color};--alert-edge:${color}">
+          <span class="flood-status-icon" aria-hidden="true">${(item.kind === "river" ? RIVER_ICON : COASTAL_ICON).replace(/width="9" height="9"/, 'width="18" height="18"')}</span>
+          <span class="alert-row-text">
+            <span class="alert-row-event">${safeText(item.title)}</span>
+            <span class="alert-row-meta">${safeText(item.meta)}</span>
+          </span>
+          <svg class="alert-row-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+function openFloodSource(kind, id) {
+  if (kind === "coastal") {
+    document.querySelector('.tab[data-tab="coastal"]')?.click();
+    activeCoastalView = "flooding";
+    syncCoastalView(true);
+    return;
+  }
+  document.querySelector('.tab[data-tab="rivers"]')?.click();
+  const card = [...document.querySelectorAll("#riverBody [data-river-lid]")].find(el => el.dataset.riverLid === id);
+  card?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---- Rivers screen -------------------------------------------------------- */
+
+function updateRiverTabVisibility() {
+  const tab = document.querySelector('.tab[data-tab="rivers"]');
+  if (!tab) return;
+  const visible = (riverState?.gauges || []).length > 0;
+  tab.hidden = !visible;
+  if (!visible && tab.classList.contains("active")) {
+    document.querySelector('.tab[data-tab="current"]')?.click();
+  }
+}
+
+function refreshRivers() {
+  const requestId = ++riverRequestId;
+  riverState = null;
+  riverError = null;
+  updateRiverTabVisibility();
+  renderRivers();
+  return riverPayload().then(data => {
+    if (requestId !== riverRequestId) return;
+    riverState = data;
+  }).catch(error => {
+    if (requestId !== riverRequestId) return;
+    riverError = error.message;
+    riverState = { gauges: [] };
+  }).finally(() => {
+    if (requestId !== riverRequestId) return;
+    updateRiverTabVisibility();
+    renderRivers();
+    renderFloodStatus();
+    if (weatherState) renderDaily();
+  });
+}
+
+function renderRivers() {
+  const body = document.querySelector("#riverBody");
+  const status = document.querySelector("#riverStatus");
+  if (!body) return;
+  if (!riverState) {
+    if (status) status.textContent = "Checking NWS river gauges…";
+    body.innerHTML = `<article class="tile coastal-empty"><h3>Loading river gauges…</h3><p>Looking for NWS river forecast points near ${safeText(selectedLocation.name)}.</p></article>`;
+    return;
+  }
+  const gauges = riverState.gauges || [];
+  if (!gauges.length) {
+    if (status) status.textContent = riverError ? "River data unavailable" : "No river gauges nearby";
+    body.innerHTML = `<article class="tile coastal-empty"><h3>No river gauges nearby</h3><p>No in-service NWS river gauge with flood stages is reporting within ${RIVER_MAX_MI} miles of ${safeText(selectedLocation.name)}.</p></article>`;
+    return;
+  }
+  if (status) status.textContent = `NOAA National Water Prediction Service · ${gauges.length} gauge${gauges.length > 1 ? "s" : ""} within ${RIVER_MAX_MI} mi`;
+  body.innerHTML = gauges.map(renderRiverGauge).join("");
+}
+
+function renderRiverGauge(gauge) {
+  const t = gauge.thresholds;
+  const outlook = riverGaugeOutlook(gauge);
+  const nowLevel = RIVER_LEVELS[outlook.nowCategory];
+  const crestLevel = outlook.crestCategory ? RIVER_LEVELS[outlook.crestCategory] : null;
+  const worstLevel = RIVER_LEVELS[outlook.worst];
+  const whenText = outlook.worst === outlook.nowCategory && RIVER_RANK[outlook.worst] > 0 ? "Observed at the gauge right now"
+    : outlook.worst !== outlook.nowCategory && RIVER_RANK[outlook.nowCategory] > 0
+      ? `${nowLevel.label} now · forecast to reach it ${riverTimeLabel(outlook.crest.at)}`
+    : outlook.worst !== outlook.nowCategory ? `Forecast to reach it ${riverTimeLabel(outlook.crest.at)}`
+    : gauge.forecast.length ? "Below action stage through the forecast" : "Below action stage now · no NWS forecast issued";
+  const issued = gauge.issued
+    ? new Date(gauge.issued).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+
+  const metrics = [
+    ["Observed stage", fmtHeight(gauge.latest.stageFt, 1), `${nowLevel.short} · ${riverTimeLabel(gauge.latest.at)}`, nowLevel.color],
+    outlook.crest
+      ? ["Forecast crest", fmtHeight(outlook.crest.stageFt, 1), `${crestLevel.short} · ${riverTimeLabel(outlook.crest.at)}`, crestLevel.color]
+      : ["Forecast crest", "--", "No current NWS forecast for this gauge", null],
+    t.minor != null ? ["Flood stage", fmtHeight(t.minor, 1), t.action != null ? `Action ${fmtHeight(t.action, 1)}` : "Minor flooding begins", null] : null,
+  ].filter(Boolean);
+
+  const stages = [["action", t.action], ["minor", t.minor], ["moderate", t.moderate], ["major", t.major]].filter(([, v]) => v != null);
+  return `
+    <section class="tile coastal-panel river-gauge" data-river-lid="${safeText(gauge.lid)}">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">NWS ${safeText(gauge.office || gauge.wfo)} · ${safeText(gauge.lid)}</p>
+          <h3>${safeText(gauge.name)}</h3>
+        </div>
+        <span>${gauge.distance.toFixed(1)} mi away</span>
+      </div>
+      <div class="flood-summary">
+        <div class="flood-status" style="--flood-color:${worstLevel.color}">
+          <span class="eyebrow">${outlook.worst === outlook.nowCategory ? "Observed" : "Forecast"}</span>
+          <strong>${safeText(worstLevel.label)}</strong>
+          <small>${safeText(whenText)}</small>
+        </div>
+        <div class="flood-metrics">
+          ${metrics.map(([name, value, detail, color]) => `
+            <div class="flood-metric"${color ? ` style="--flood-color:${color}"` : ""}><span class="eyebrow">${name}</span><strong${color ? ' class="river-metric-value"' : ""}>${value}</strong><small>${safeText(detail)}</small></div>`).join("")}
+        </div>
+      </div>
+      ${riverChartSvg(gauge)}
+      ${riverImpactsHtml(gauge, outlook)}
+      <div class="river-stage-scale">
+        ${stages.map(([key, v]) => `<span class="river-stage-chip${key === outlook.worst ? " active" : ""}" style="--flood-color:${RIVER_LEVELS[key].color}"><b>${RIVER_LEVELS[key].short}</b> ${fmtHeight(v, 1)}</span>`).join("")}
+      </div>
+      <p class="coastal-footnote">Stage from the NWS ${safeText(gauge.office || gauge.wfo)} river forecast point${gauge.issued ? `; forecast issued ${safeText(issued)}` : ""}. Categories are the NWS action and flood stages for this gauge. <a href="https://water.noaa.gov/gauges/${encodeURIComponent(gauge.lid.toLowerCase())}" target="_blank" rel="noopener noreferrer">Full hydrograph on water.noaa.gov</a>.</p>
+    </section>`;
+}
+
+// Observed stage (solid) and the NWS forecast (dashed), with each flood stage
+// ruled across once the river is within reach of it.
+function riverChartSvg(gauge) {
+  const observed = gauge.observed;
+  const forecast = gauge.forecast;
+  if (observed.length + forecast.length < 3) return "";
+  const narrow = window.innerWidth < 760;
+  const W = narrow ? 380 : 720, H = narrow ? 220 : 210;
+  const padL = 12, padR = 12, padT = 24, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const all = [...observed, ...forecast];
+  const t0 = all[0].at;
+  const t1 = all[all.length - 1].at;
+  if (!(t1 > t0)) return "";
+  const t = gauge.thresholds;
+  const values = all.map(row => row.stageFt);
+  const minData = Math.min(...values);
+  const maxData = Math.max(...values);
+  const reach = 2;   // ft: show a stage once the river is this close to it
+  const stages = [["action", t.action], ["minor", t.minor], ["moderate", t.moderate], ["major", t.major]]
+    .filter(([name, v]) => v != null && (name === "minor" || name === "action" || maxData >= v - reach));
+  const maxV = Math.max(maxData, ...stages.map(([, v]) => v)) + 0.5;
+  const minV = Math.max(0, minData - 0.8);
+  const span = Math.max(maxV - minV, 1);
+  const x = at => padL + ((at - t0) / (t1 - t0)) * plotW;
+  const y = v => padT + plotH - ((v - minV) / span) * plotH;
+  const path = rows => rows.map((row, i) => `${i ? "L" : "M"}${x(row.at).toFixed(1)},${y(row.stageFt).toFixed(1)}`).join("");
+  const lastObs = observed[observed.length - 1];
+  const forecastPath = forecast.length ? path([lastObs, ...forecast].filter(Boolean)) : "";
+  const now = Date.now();
+
+  const stageLines = stages.map(([name, v]) => {
+    const level = RIVER_LEVELS[name];
+    return `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="${level.color}" stroke-width="1" stroke-dasharray="4 4" opacity="0.8"/>
+      <text x="${W - padR - 2}" y="${(y(v) - 4).toFixed(1)}" text-anchor="end" fill="${level.color}" font-size="10" font-weight="700">${level.short} ${safeText(fmtHeight(v, 1))}</text>`;
+  }).join("");
+
+  // Midnight ticks in the location's zone.
+  const ticks = [];
+  const firstDay = instantStamp(t0);
+  let tick = t0 + (1440 - firstDay.minutes) * 60000;
+  while (tick < t1) {
+    const stamp = instantStamp(tick);
+    const label = new Date(`${stamp.day}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+    ticks.push(`<line x1="${x(tick).toFixed(1)}" x2="${x(tick).toFixed(1)}" y1="${padT}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.08)"/>
+      <text x="${(x(tick) + 4).toFixed(1)}" y="${H - 8}" fill="rgba(255,255,255,0.55)" font-size="10">${label}</text>`);
+    tick += 86400000;
+  }
+
+  const nowMarker = now > t0 && now < t1
+    ? `<line x1="${x(now).toFixed(1)}" x2="${x(now).toFixed(1)}" y1="${padT - 6}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.5)" stroke-dasharray="2 3"/>
+       <text x="${x(now).toFixed(1)}" y="${padT - 10}" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10" font-weight="700">Now</text>` : "";
+
+  return `
+    <div class="coastal-chart" style="aspect-ratio:${W}/${H}">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" role="img" aria-label="Observed and forecast river stage for ${safeText(gauge.name)}">
+        ${ticks.join("")}
+        ${stageLines}
+        <path d="${path(observed)}" fill="none" stroke="#38bdf8" stroke-width="2.4" stroke-linejoin="round"/>
+        ${forecastPath ? `<path d="${forecastPath}" fill="none" stroke="${FLOOD_FORECAST_COLOR}" stroke-width="2.4" stroke-dasharray="6 4" stroke-linejoin="round"/>` : ""}
+        ${nowMarker}
+      </svg>
+    </div>
+    <div class="coastal-legend">
+      <span class="swatch" style="--c:#38bdf8"></span>Observed
+      ${forecastPath ? `<span class="swatch" style="--c:${FLOOD_FORECAST_COLOR}"></span>NWS forecast` : ""}
+    </div>`;
+}
+
+// What each stage means on the ground. Impacts the river has reached are marked
+// "Now", those the forecast crest reaches "Forecast", and the list opens by
+// itself once either is true.
+function riverImpactsHtml(gauge, outlook) {
+  const impacts = gauge.impacts || [];
+  if (!impacts.length) return "";
+  const nowFt = gauge.latest.stageFt;
+  const crestFt = outlook.crest?.stageFt ?? -Infinity;
+  const reached = impacts.filter(item => item.stageFt <= Math.max(nowFt, crestFt));
+  const next = impacts.find(item => item.stageFt > Math.max(nowFt, crestFt));
+  const rows = impacts.map(item => {
+    const category = riverCategory(item.stageFt, gauge.thresholds) || "none";
+    const level = RIVER_LEVELS[category];
+    const tag = item.stageFt <= nowFt ? "Now" : item.stageFt <= crestFt ? "Forecast" : "";
+    return `
+      <li class="river-impact${tag ? " reached" : ""}" style="--flood-color:${level.color}">
+        <span class="river-impact-stage"><strong>${fmtHeight(item.stageFt, 1)}</strong><small>${safeText(level.short)}</small></span>
+        <p>${safeText(item.statement)}</p>
+        ${tag ? `<span class="river-impact-tag">${tag}</span>` : ""}
+      </li>`;
+  }).reverse().join("");
+  const lead = reached.length
+    ? `At ${fmtHeight(reached[reached.length - 1].stageFt, 1)}: ${reached[reached.length - 1].statement}`
+    : next ? `Next impact at ${fmtHeight(next.stageFt, 1)} (${fmtHeight(next.stageFt - nowFt, 1)} above the current stage): ${next.statement}` : "";
+  return `
+    <details class="river-impacts"${reached.length ? " open" : ""}>
+      <summary>
+        <span class="flood-subhead">Flood impacts · ${impacts.length}</span>
+        ${lead ? `<span class="river-impact-lead">${safeText(lead)}</span>` : ""}
+      </summary>
+      <ul>${rows}</ul>
+      <p class="coastal-footnote">Impact statements from the NWS ${safeText(gauge.office || gauge.wfo)} office for this gauge, as published on water.noaa.gov.</p>
+    </details>`;
 }
 
 async function renderClimate(date) {
@@ -8662,12 +9749,9 @@ function syncFrameSliders({ value, max, disabled } = {}) {
 
 // The valid time of the frame on screen shows in two places: the timeline row
 // in the Layers panel and the scrubber docked at the bottom of the map.
-function setFrameTimeLabel(text, { forecast = false } = {}) {
+function setFrameTimeLabel(text) {
   document.querySelectorAll("#radarTimeLabel, #mapFrameTimeLabel").forEach(el => {
     el.textContent = text;
-    // Frames past now read in the accent colour, so scrubbing into the forecast
-    // half of the timeline is unmistakable.
-    el.classList.toggle("forecast-frame", Boolean(forecast));
   });
 }
 
@@ -8706,7 +9790,6 @@ function updateRadarLabel() {
       frame,
       activeRadarMode === "single" ? onDeviceRadarSite?.id || "" : ""
     ),
-    { forecast: Boolean(frame?.forecast) },
   );
 }
 
@@ -8916,18 +9999,6 @@ function initMap() {
       }, () => {}, { timeout: 5000, maximumAge: 120000 });
     }
   });
-  // The extrapolation covers the whole radar domain, so panning never rebuilds
-  // it. Nudging it after a move only drops frames whose valid time has passed
-  // and picks up a newer scan if one landed while the map was moving.
-  radarMap.on("moveend", () => {
-    if (!radarActive || !mrmsProductHasNowcast()) return;
-    clearTimeout(futureRadarPanTimer);
-    futureRadarPanTimer = setTimeout(() => {
-      if (radarActive && mrmsProductHasNowcast()) {
-        onDeviceWeatherApi?.refreshNowcast?.();
-      }
-    }, 400);
-  });
   updateRadarLabel();
   document.querySelector("#mapLocateBtn")?.addEventListener("click", locateOnMap);
 }
@@ -8989,6 +10060,8 @@ async function addSpcLayer() {
   }
   const data = spcLayerData[cacheKey];
 
+  // A second redraw can land while the first is still fetching; it already drew.
+  if (!radarMap || radarMap.getSource("spc-source")) return;
   radarMap.addSource("spc-source", { type: "geojson", data });
   const isCat = type === "cat";
 
@@ -9107,6 +10180,8 @@ async function addFireWeatherLayer() {
       }),
     };
   }
+  // A second redraw can land while the first is still fetching; it already drew.
+  if (!radarMap || radarMap.getSource("fire-source")) return;
   radarMap.addSource("fire-source", { type: "geojson", data: fireWeatherDataCache[day] });
   addWeatherLayer({
     id: "fire-fill", type: "fill", source: "fire-source",
@@ -9139,6 +10214,8 @@ async function addWpcRainfallLayer() {
   if (!wpcRainDataCache[day]) {
     wpcRainDataCache[day] = normalizeWpcEroData(await fetchOutlookGeoJson(WPC_ERO_URLS[day - 1]));
   }
+  // A second redraw can land while the first is still fetching; it already drew.
+  if (!radarMap || radarMap.getSource("wpc-rain-source")) return;
   radarMap.addSource("wpc-rain-source", { type: "geojson", data: wpcRainDataCache[day] });
   addWeatherLayer({
     id: "wpc-rain-fill", type: "fill", source: "wpc-rain-source",
@@ -11073,6 +12150,8 @@ function applyAlertKindFilter() {
 async function addDroughtLayer() {
   droughtLayerData = droughtLayerData || normalizeDroughtData(await fetchDroughtGeoJson());
   if (!radarMap || !mapLoaded) return;
+  // A second redraw can land while the first is still fetching; it already drew.
+  if (!radarMap || radarMap.getSource("drought-source")) return;
   radarMap.addSource("drought-source", { type: "geojson", data: droughtLayerData });
   addWeatherLayer({
     id: "drought-fill",
@@ -11245,13 +12324,11 @@ function renderLayers() {
     { id: "Radar",     isActive: () => radarActive },
     { id: "Satellite", isActive: () => satelliteActive },
   ];
-  const OVERLAY_LAYERS = ["GOES GLM", "SPC", "Alerts", "Fire Wx", "WPC Rain", "LSR", "Drought", "Cyclones"];
-
   baseEl.innerHTML = BASE_LAYERS.map(l =>
     `<button type="button" role="radio" aria-checked="${l.isActive()}" data-layer="${l.id}" class="${l.isActive() ? "active" : ""}" title="${safeText(MAP_LAYER_INFO[l.id])}">${l.id}</button>`
   ).join("");
 
-  overlayEl.innerHTML = OVERLAY_LAYERS.map(l =>
+  overlayEl.innerHTML = MAP_OVERLAY_LAYERS.map(l =>
     `<span class="layer-option">
       <button type="button" data-layer="${l}" aria-pressed="${activeOverlays.has(l)}" class="${activeOverlays.has(l) ? "active" : ""}" title="${safeText(MAP_LAYER_INFO[l])}">${l}</button>
       <button type="button" class="layer-info-btn" data-layer-info="${l}" title="${safeText(MAP_LAYER_INFO[l])}" aria-label="What is ${l}?">i</button>
@@ -11264,6 +12341,7 @@ function renderLayers() {
       if (!layer || layer.isActive()) return;
       radarActive = layer.id === "Radar";
       satelliteActive = layer.id === "Satellite";
+      saveMapLayers();
       stopRadarAnimation();
       renderLayers();
       drawRadar(false);
@@ -11287,6 +12365,7 @@ function renderLayers() {
       const layer = btn.dataset.layer;
       if (activeOverlays.has(layer)) activeOverlays.delete(layer);
       else activeOverlays.add(layer);
+      saveMapLayers();
       renderLayers();
       drawRadar(false);
       // When cyclones are switched on, pan/zoom to wherever the storms are.
@@ -11580,6 +12659,7 @@ function renderSatelliteSubControls() {
       activeSatelliteSector = null; // storm crops are per-source
       activeSatelliteType = satBand().id; // drop bands the new source lacks
       localStorage.setItem("satelliteSource", activeSatelliteSource);
+      saveMapLayers();
       renderSatelliteSubControls();
       drawRadar(false);
       fitSatelliteExtent(satSource().extent); // frame the newly selected region
@@ -11595,6 +12675,7 @@ function renderSatelliteSubControls() {
     typeEl.querySelectorAll("button").forEach(btn => {
       btn.addEventListener("click", () => {
         activeSatelliteType = btn.dataset.satType;
+        saveMapLayers();
         renderSatelliteSubControls();
         drawRadar(false);
       });
@@ -11691,8 +12772,8 @@ function renderRadarSubControls() {
 }
 
 // The legend is a colour key and nothing else. It used to double as a status
-// line — how the data was decoded, which storm-motion vector the extrapolation
-// had fitted, how confident it was — none of which helps read the map, and all
+// line — how the data was decoded and which source it came from — none of
+// which helps read the map, and all
 // of which crowded the box on a phone. The scrubber already labels which frame
 // is on screen, so what is left here is the product name, the ramp, and its
 // values.
@@ -12145,6 +13226,7 @@ async function refreshLiveData() {
   // Coastal sources are slow and only matter on one tab, so they resolve on
   // their own rather than holding up the rest of the refresh.
   refreshCoastal();
+  refreshRivers();
 
   refreshButton.disabled = false;
   refreshButton.textContent = "Refresh";
@@ -12271,6 +13353,10 @@ hourlyStrip.addEventListener("click", event => {
 dailyGrid.addEventListener("click", event => {
   const card = event.target.closest("[data-day-index]");
   if (card) showDailyDetails(Number(card.dataset.dayIndex));
+});
+document.querySelector("#floodStatusPanel")?.addEventListener("click", event => {
+  const row = event.target.closest("[data-flood-kind]");
+  if (row) openFloodSource(row.dataset.floodKind, row.dataset.floodId);
 });
 alertsPanel.addEventListener("click", event => {
   if (event.target.closest("[data-alert-toggle]")) {
@@ -12420,6 +13506,17 @@ document.querySelector("#aviationViewSwitch")?.addEventListener("click", event =
   syncAviationView(true);
 });
 coastalBody?.addEventListener("click", event => {
+  const floodAlert = event.target.closest("[data-coastal-alert]");
+  if (floodAlert) {
+    showAlertDetails(Number(floodAlert.dataset.coastalAlert));
+    return;
+  }
+  const goto = event.target.closest("[data-coastal-goto]");
+  if (goto) {
+    activeCoastalView = goto.dataset.coastalGoto;
+    syncCoastalView(true);
+    return;
+  }
   const preset = event.target.closest("[data-coastal-preset]");
   if (preset) {
     chooseLocation(COASTAL_PRESETS[Number(preset.dataset.coastalPreset)]);
@@ -12440,6 +13537,8 @@ coastalBody?.addEventListener("change", event => {
     renderCoastal();
   } else if (event.target.id === "coastalTideSelect") {
     selectTideStation(event.target.value);
+  } else if (event.target.id === "coastalFloodPointSelect") {
+    selectFloodPoint(event.target.value);
   }
 });
 
@@ -12457,7 +13556,10 @@ window.addEventListener("resize", () => {
   drawRadar();
   // The coastal charts pick their viewBox from the viewport width.
   clearTimeout(coastalResizeTimer);
-  coastalResizeTimer = setTimeout(() => { if (coastalState?.isCoastal) renderCoastal(); }, 180);
+  coastalResizeTimer = setTimeout(() => {
+    if (coastalState?.isCoastal) renderCoastal();
+    if (riverState?.gauges?.length) renderRivers();
+  }, 180);
 });
 
 setRainfallOpacity(radarOpacity * 100, { persist: false });

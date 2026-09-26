@@ -72,7 +72,7 @@ test('outlook fills, radar, GLM, and outlook borders keep the required stack', (
 });
 
 test('GLM is a transparent point overlay rebuilt after Mapbox style changes', () => {
-  assert.match(appSource, /const OVERLAY_LAYERS = \["GOES GLM"/);
+  assert.match(appSource, /const MAP_OVERLAY_LAYERS = \["GOES GLM"/);
   assert.match(appSource, /id: "glm-flashes",\s*type: "circle"/);
   assert.match(appSource, /radarMap\.once\("style\.load", \(\) => \{[\s\S]*?drawRadar\(false\)/);
   assert.doesNotMatch(appSource, /realtime_goes16_glm|glm[^\n]*type: "raster"/i);

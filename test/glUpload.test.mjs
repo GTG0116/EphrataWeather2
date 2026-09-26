@@ -1,5 +1,5 @@
 // Regression tests for the WebGL texture-reuse path shared by the radar, MRMS
-// (including the future-radar nowcast frames) and satellite layers.
+// and satellite layers.
 //
 // The bug these lock down: texSubImage2D's short form
 //   (target, level, xoffset, yoffset, format, type, source)

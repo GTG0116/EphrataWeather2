@@ -32,7 +32,7 @@
          that exist but are unstyled and do nothing. A changed URL cannot be
          answered from a cache entry for the old one. Bump all three together on
          every release. -->
-    <link rel="stylesheet" href="styles.css?v=20260921b">
+    <link rel="stylesheet" href="styles.css?v=20260925a">
   </head>
   <body data-theme="sunny">
     <canvas id="atmosphereCanvas" aria-hidden="true"></canvas>
@@ -86,6 +86,10 @@
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 7.4c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 13c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/><path d="M2 18.6c2-2 3.4-2 5 0s3 2 5 0 3.4-2 5 0 3 2 5 0"/></svg>
           Coast
         </button>
+        <button class="tab" type="button" data-tab="rivers" hidden>
+          <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3c-2 3 2 5 0 8s2 5 0 10"/><path d="M17 3c-2 3 2 5 0 8s2 5 0 10"/></svg>
+          Rivers
+        </button>
         <button class="tab" type="button" data-tab="maps">
           <svg class="tab-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.6"/><path d="M12 12l6.2-4.8"/></svg>
           Radar
@@ -104,6 +108,7 @@
         <!-- CURRENT & HOURLY -->
         <section class="screen active" id="current" aria-labelledby="current-title">
           <section class="alerts-panel" id="alertsPanel" aria-label="Active weather alerts" hidden></section>
+          <section class="alerts-panel flood-status-panel" id="floodStatusPanel" aria-label="River and coastal flooding" hidden></section>
 
           <div class="hero-grid">
             <article class="tile forecast-banner">
@@ -193,10 +198,25 @@
           <nav class="section-view-switch" id="coastalViewSwitch" aria-label="Coastal forecast views">
             <button type="button" data-coastal-view="overview" class="active" aria-pressed="true">Overview</button>
             <button type="button" data-coastal-view="tides" aria-pressed="false">Tides</button>
+            <button type="button" data-coastal-view="flooding" aria-pressed="false">Flooding</button>
             <button type="button" data-coastal-view="waves" aria-pressed="false">Waves</button>
             <button type="button" data-coastal-view="outlooks" aria-pressed="false">NWS Outlooks</button>
           </nav>
           <div class="coastal-body" id="coastalBody"></div>
+        </section>
+
+        <!-- RIVERS: NWS RIVER GAUGES & FORECASTS -->
+        <section class="screen" id="rivers" aria-labelledby="rivers-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">River Stages &amp; Flood Forecasts</p>
+              <h2 id="rivers-title">Rivers</h2>
+            </div>
+            <div class="section-head-actions">
+              <span id="riverStatus">Checking NWS river gauges…</span>
+            </div>
+          </div>
+          <div class="coastal-body" id="riverBody"></div>
         </section>
 
         <!-- RADAR & MAPS -->
@@ -500,7 +520,7 @@
     </div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.11.0/mapbox-gl.js"></script>
-    <script src="icons.js?v=20260921b"></script>
-    <script src="app.js?v=20260921b"></script>
+    <script src="icons.js?v=20260925a"></script>
+    <script src="app.js?v=20260925a"></script>
   </body>
 </html>
